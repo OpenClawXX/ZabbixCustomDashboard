@@ -1,0 +1,22 @@
+{
+    "manifest_version": 2.0,
+    "id": "tcs_dashboard",
+    "name": "TCS Dashboard",
+    "version": "1.0.0",
+    "namespace": "TcsDashboard",
+    "description": "Custom-skinned operations dashboard for Zabbix (TCS / Extreme / PacketFence integration).",
+    "author": "TCS Networking",
+    "url": "",
+    "actions": {
+        "tcs.dashboard.view": {
+            "class": "ActionDashboard",
+            "view": "dashboard.view",
+            "layout": "layout.htmlpage"
+        },
+        "tcs.dashboard.data": {
+            "class": "ActionDashboardData",
+            "layout": "layout.json",
+            "view": null
+        }
+    }
+}
