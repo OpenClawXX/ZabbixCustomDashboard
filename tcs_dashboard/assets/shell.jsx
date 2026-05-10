@@ -1,7 +1,20 @@
 // Main app shell
 
-const Sidebar = ({ tab, setTab }) => (
+// URLs of the sibling module pages and the default Zabbix UI. Centralised
+// here so all sidebars (Sidebar + NVRSidebar) reference the same constants.
+window.TCS_NAV = window.TCS_NAV || {
+  zabbixDefault: "zabbix.php?action=dashboard.view",
+  apDetail:      "zabbix.php?action=tcs.dashboard.view",
+  surveillance:  "zabbix.php?action=tcs.surveillance.view",
+  switches:      "zabbix.php?action=tcs.switches.view"
+};
+
+const Sidebar = ({ tab, setTab, active = "wireless" }) => (
   <aside className="sidebar">
+    <a className="back-to-zabbix" href={window.TCS_NAV.zabbixDefault} title="Back to default Zabbix UI">
+      <Icon name="back" /> <span>Default Zabbix Dashboard</span>
+    </a>
+
     <div className="brand">
       <div className="brand-mark">Z·P</div>
       <div>
@@ -12,12 +25,12 @@ const Sidebar = ({ tab, setTab }) => (
 
     <div className="nav-section">
       <div className="nav-label">Monitoring</div>
-      <div className="nav-item"><Icon name="map" /> Dashboards</div>
-      <div className="nav-item"><Icon name="ap" /> Hosts <span className="nav-count">2,418</span></div>
-      <div className="nav-item active"><Icon name="wifi" /> Wireless APs <span className="nav-count">1,184</span></div>
-      <div className="nav-item"><Icon name="ethernet" /> Switches <span className="nav-count">312</span></div>
-      <div className="nav-item"><Icon name="alert" /> Problems <span className="nav-count warn">23</span></div>
-      <div className="nav-item"><Icon name="events" /> Events</div>
+      <a className="nav-item" href={window.TCS_NAV.zabbixDefault}><Icon name="map" /> Dashboards</a>
+      <a className="nav-item" href={window.TCS_NAV.apDetail}><Icon name="ap" /> Hosts <span className="nav-count">2,418</span></a>
+      <a className={"nav-item" + (active === "wireless"     ? " active" : "")} href={window.TCS_NAV.apDetail}><Icon name="wifi" /> Wireless APs <span className="nav-count">1,184</span></a>
+      <a className={"nav-item" + (active === "switches"     ? " active" : "")} href={window.TCS_NAV.switches}><Icon name="ethernet" /> Switches <span className="nav-count">312</span></a>
+      <a className={"nav-item" + (active === "surveillance" ? " active" : "")} href={window.TCS_NAV.surveillance}><Icon name="events" /> Surveillance <span className="nav-count">1,147</span></a>
+      <a className="nav-item"><Icon name="alert" /> Problems <span className="nav-count warn">23</span></a>
     </div>
 
     <div className="nav-section">

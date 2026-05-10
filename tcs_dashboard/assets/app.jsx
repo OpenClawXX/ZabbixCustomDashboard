@@ -41,7 +41,7 @@ const App = () => {
 
   return (
     <div className="app" data-density={t.density} style={{ fontSize: `${13 * densityVar}px` }}>
-      <Sidebar tab={tab} setTab={setTab} />
+      <Sidebar tab={tab} setTab={setTab} active="wireless" />
       <div className="main">
         <Topbar onCmdK={() => setPaletteOpen(true)} />
         <PageHeader timeRange={timeRange} setTimeRange={setTimeRange} host={window.ZBX_HOST} />

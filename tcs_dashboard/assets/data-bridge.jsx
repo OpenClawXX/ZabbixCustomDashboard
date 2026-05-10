@@ -5,8 +5,12 @@
 // already consumes. Then sets up a polling loop against TCS_DATA_URL so the
 // values refresh without a full page reload.
 //
-// If ZBX_BOOT is null (no hostid was passed in the URL), we fall back to a
-// tiny stub so the UI still renders an empty-state instead of crashing.
+// IMPORTANT: the consumer JSX (tabs.jsx, etc.) reads keys like
+//   I.cpu.value, I.poeDraw.history, I.channelUtil5.value
+// without guarding for missing keys, so we ALWAYS publish a fully-keyed
+// ZBX_ITEMS object — even when the server returned nothing. Missing keys
+// get a stub with value=null, history=[], missing=true; consumers then
+// render dashes instead of crashing.
 
 (function () {
     const STUB_HOST = {
@@ -24,39 +28,60 @@
         lastSeen: "—"
     };
 
-    const STUB_ITEMS = {};
+    // Every key the React app reads from window.ZBX_ITEMS. Keep this list in
+    // sync with the $key_map in ActionDashboard::collectItems(). If you add
+    // a new metric to either side, add it here too.
+    const EXPECTED_ITEM_KEYS = [
+        "cpu", "memory", "temp", "poeDraw",
+        "uplinkIn", "uplinkOut", "pktLoss", "latency",
+        "noise24", "noise5", "channelUtil24", "channelUtil5"
+    ];
+
+    const emptyItem = () => ({
+        value: null,
+        prev: null,
+        unit: "",
+        trigger: null,
+        history: [],
+        missing: true,
+        key: ""
+    });
+
+    const buildItems = (serverItems) => {
+        const out = {};
+        for (const k of EXPECTED_ITEM_KEYS) {
+            const incoming = serverItems && serverItems[k];
+            if (incoming && typeof incoming === "object") {
+                // Merge: server fields win, stub fills gaps. Defensive coercion
+                // for history so .map / .length always work in consumers.
+                out[k] = {
+                    ...emptyItem(),
+                    ...incoming,
+                    history: Array.isArray(incoming.history) ? incoming.history : []
+                };
+            } else {
+                out[k] = emptyItem();
+            }
+        }
+        return out;
+    };
 
     function applyBoot(boot) {
-        if (!boot) {
-            window.ZBX_HOST = STUB_HOST;
-            window.ZBX_ITEMS = STUB_ITEMS;
-            window.SYSTEM_INFO = [];
-            window.NETWORK_INFO = [];
-            window.PF_CLIENTS = [];
-            window.PF_AUTH_FAILS = [];
-            window.ZBX_EVENTS = [];
-            window.ALERTS_SUMMARY = {
-                associationFailures: 0, authFailures: 0,
-                networkIssues: 0, packetLoss: 0,
-                totalClients: 0, activeClients: 0
-            };
-            window.WIRED_PORTS = [];
-            return;
-        }
+        const b = boot || {};
 
-        window.ZBX_HOST      = boot.host        || STUB_HOST;
-        window.ZBX_ITEMS     = boot.items       || STUB_ITEMS;
-        window.SYSTEM_INFO   = boot.systemInfo  || [];
-        window.NETWORK_INFO  = boot.networkInfo || [];
-        window.PF_CLIENTS    = boot.pfClients   || [];
-        window.PF_AUTH_FAILS = boot.pfAuthFails || [];
-        window.ZBX_EVENTS    = boot.events      || [];
-        window.ALERTS_SUMMARY = boot.alerts || {
+        window.ZBX_HOST      = b.host        || STUB_HOST;
+        window.ZBX_ITEMS     = buildItems(b.items);
+        window.SYSTEM_INFO   = Array.isArray(b.systemInfo)  ? b.systemInfo  : [];
+        window.NETWORK_INFO  = Array.isArray(b.networkInfo) ? b.networkInfo : [];
+        window.PF_CLIENTS    = Array.isArray(b.pfClients)   ? b.pfClients   : [];
+        window.PF_AUTH_FAILS = Array.isArray(b.pfAuthFails) ? b.pfAuthFails : [];
+        window.ZBX_EVENTS    = Array.isArray(b.events)      ? b.events      : [];
+        window.WIRED_PORTS   = Array.isArray(b.wiredPorts)  ? b.wiredPorts  : [];
+        window.ALERTS_SUMMARY = b.alerts || {
             associationFailures: 0, authFailures: 0,
             networkIssues: 0, packetLoss: 0,
             totalClients: 0, activeClients: 0
         };
-        window.WIRED_PORTS   = boot.wiredPorts  || [];
     }
 
     // Initial paint comes from the server-inlined snapshot.
@@ -73,11 +98,10 @@
     };
 
     // ----- Live refresh ------------------------------------------------------
-    // Poll the JSON endpoint every 30s and merge updates into the globals.
-    // The existing components read window.ZBX_ITEMS each render, so updating
-    // the global is enough to refresh on the next setState. If you'd rather
-    // wire real reactivity, expose a tiny event bus instead and dispatch
-    // 'tcs:data' on every fetch.
+    // Poll the JSON endpoint every 30s. The existing components read
+    // window.ZBX_ITEMS each render, so updating the global is enough to
+    // refresh on the next setState. If you'd rather wire real reactivity,
+    // listen for the 'tcs:data' CustomEvent dispatched below.
 
     const REFRESH_MS = 30_000;
     const hostid = window.ZBX_HOST && window.ZBX_HOST.hostid;
@@ -93,9 +117,9 @@
                 if (!resp.ok) return;
                 const fresh = await resp.json();
                 applyBoot({
-                    ...window.ZBX_BOOT,
+                    ...(window.ZBX_BOOT || {}),
                     host:       fresh.host       ?? window.ZBX_HOST,
-                    items:      fresh.items      ?? window.ZBX_ITEMS,
+                    items:      fresh.items      ?? {},
                     events:     fresh.events     ?? window.ZBX_EVENTS,
                     alerts:     fresh.alerts     ?? window.ALERTS_SUMMARY,
                     wiredPorts: fresh.wiredPorts ?? window.WIRED_PORTS
