@@ -86,7 +86,6 @@ const ServersApp = () => {
 
   const Body = (
     <>
-      {t.showFleet && <FleetOverview activeId={activeId} onSelect={onSelect} />}
       {t.showSidecar ? (
         <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 14 }}>
           <ServerSidecar host={host} />
@@ -153,7 +152,6 @@ const ServersApp = () => {
             { value: "balanced", label: "Balanced" },
             { value: "dense",    label: "Dense" }
           ]} onChange={v => setTweak("density", v)} />
-          <TweakToggle label="Show fleet tile grid" value={t.showFleet} onChange={v => setTweak("showFleet", v)} />
           <TweakToggle label="Show device sidecar" value={t.showSidecar} onChange={v => setTweak("showSidecar", v)} />
         </TweakSection>
         <TweakSection title="Visual">

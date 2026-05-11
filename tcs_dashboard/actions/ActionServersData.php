@@ -287,8 +287,8 @@ class ActionServersData extends CController {
             'history' => $history,
             'fs'      => $this->collectFilesystems($hostid),
             'ifaces'  => $this->collectInterfaces($hostid),
-            'procs'   => [], // procs require proc.cpu/mem items per pid — left for v2
-            'services'=> [], // service.info[*] discovery — left for v2
+            'procs'   => $this->collectProcs($hostid),
+            'services'=> $this->collectServices($hostid),
             'sessions'=> []  // no Zabbix-native SQL/RDP session item — stays empty
         ];
     }
@@ -333,25 +333,111 @@ class ActionServersData extends CController {
             'startSearch' => true,
             'webitems' => true
         ]));
+        // Zabbix item keys can be net.if.in[eth0], net.if.in["eth0"],
+        // net.if.in.errors[eth0], etc. Strip surrounding quotes from the
+        // captured iface name so different templates collapse to one row.
         $by_iface = [];
         foreach ($items as $it) {
-            if (!preg_match('/^net\.if\.(in|out|speed|status)\[([^\]]+)\]$/', $it['key_'], $m)) continue;
-            $by_iface[$m[2]][$m[1]] = (float) $it['lastvalue'];
+            if (!preg_match('/^net\.if\.([a-z.]+)\[(.+)\]$/', $it['key_'], $m)) continue;
+            $metric = $m[1];                       // "in" / "out" / "in.errors" / "speed" / "status" / …
+            $name   = trim($m[2], "\"'");          // unwrap quoted name
+            $name   = preg_replace('/,.*$/', '', $name); // drop ,mode trailing args
+            $by_iface[$name][$metric] = (float) $it['lastvalue'];
         }
         $out = [];
         foreach ($by_iface as $name => $vals) {
             $out[] = [
                 'name'    => $name,
-                'speed'   => isset($vals['speed']) ? (int) ($vals['speed'] / 1_000_000) : null, // bps → Mbps
+                'speed'   => isset($vals['speed']) ? (int) ($vals['speed'] / 1_000_000) : null,
                 'ip'      => '',
                 'mac'     => '',
-                'inMbps'  => isset($vals['in'])  ? round($vals['in']  / 1_000_000, 1) : null,
-                'outMbps' => isset($vals['out']) ? round($vals['out'] / 1_000_000, 1) : null,
-                'errs'    => 0,
+                'inMbps'  => isset($vals['in'])  ? round($vals['in']  / 1_000_000, 2) : null,
+                'outMbps' => isset($vals['out']) ? round($vals['out'] / 1_000_000, 2) : null,
+                'errs'    => (int) (($vals['in.errors'] ?? 0) + ($vals['out.errors'] ?? 0)),
                 'status'  => (int) ($vals['status'] ?? 1) === 1 ? 'up' : 'down'
             ];
         }
+        usort($out, fn($a, $b) => strcmp($a['name'], $b['name']));
         return $out;
+    }
+
+    /**
+     * Windows-style discovered services (service.info[<name>,...]).
+     * Item state convention: 0 = running, 1 = paused, 2 = start pending,
+     * 3 = pause pending, 4 = continue pending, 5 = stop pending, 6 = stopped,
+     * 7 = unknown, 255 = no such service.
+     */
+    private function collectServices(string $hostid): array {
+        $items = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['key_', 'lastvalue', 'name'],
+            'hostids'     => [$hostid],
+            'search'      => ['key_' => 'service.info['],
+            'startSearch' => true,
+            'webitems'    => true
+        ]));
+        $out = [];
+        foreach ($items as $it) {
+            // service.info[<name>] or service.info[<name>,state|startup|...]
+            if (!preg_match('/^service\.info\[([^,\]]+)(?:,([a-z]+))?\]$/', $it['key_'], $m)) continue;
+            $name  = trim($m[1], "\"'");
+            $field = $m[2] ?: 'state';
+            $key   = $name; // group rows by service name
+            if (!isset($out[$key])) {
+                $out[$key] = [
+                    'name'  => $name,
+                    'state' => 'unknown',
+                    'auto'  => null,
+                    'pid'   => null,
+                    'cpu'   => 0.0,
+                    'mem'   => 0.0,
+                    'since' => '—',
+                    'check' => $it['key_']
+                ];
+            }
+            $v = $it['lastvalue'];
+            if ($field === 'state') {
+                $code = (int) $v;
+                $out[$key]['state'] = ($code === 0) ? 'running' : (($code === 255) ? 'missing' : 'stopped');
+            } elseif ($field === 'startup') {
+                // 0 = automatic, 1 = automatic delayed, 2 = manual, 3 = disabled
+                $out[$key]['auto'] = (int) $v <= 1;
+            }
+        }
+        return array_values($out);
+    }
+
+    /**
+     * Top processes by CPU. Reads proc.cpu.util[<name>...] + proc.mem
+     * [<name>...] items if present and joins by process name. Returns
+     * the top 12 by CPU. Items are template-discovered, so empty by
+     * default — that's fine.
+     */
+    private function collectProcs(string $hostid): array {
+        $items = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['key_', 'lastvalue'],
+            'hostids'     => [$hostid],
+            'search'      => ['key_' => 'proc.'],
+            'startSearch' => true,
+            'webitems'    => true
+        ]));
+        $by_name = [];
+        foreach ($items as $it) {
+            if (!preg_match('/^proc\.(cpu\.util|mem|num)\[([^,\]]+)/', $it['key_'], $m)) continue;
+            $metric = $m[1];
+            $name   = trim($m[2], "\"'");
+            if (!isset($by_name[$name])) {
+                $by_name[$name] = [
+                    'name' => $name, 'user' => '—', 'cpu' => 0.0,
+                    'mem' => 0.0, 'threads' => 0, 'pid' => 0
+                ];
+            }
+            $v = (float) $it['lastvalue'];
+            if ($metric === 'cpu.util') $by_name[$name]['cpu'] = round($v, 1);
+            elseif ($metric === 'mem')  $by_name[$name]['mem'] = round($v / 1024 / 1024, 1); // bytes → MB
+            elseif ($metric === 'num')  $by_name[$name]['threads'] = (int) $v;
+        }
+        usort($by_name, fn($a, $b) => $b['cpu'] <=> $a['cpu']);
+        return array_slice(array_values($by_name), 0, 12);
     }
 
     /** triggerid → [{hostid, host, name}, ...] using one trigger.get call. */
