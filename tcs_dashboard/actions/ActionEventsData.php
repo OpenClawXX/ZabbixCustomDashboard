@@ -8,14 +8,11 @@ use CControllerResponseData;
 use CControllerResponseFatal;
 
 /**
- * GET zabbix.php?action=tcs.events.data
- *   [&severity=disaster,high,warning,info]
- *   [&value=any|firing|resolved]
- *   [&groupids=1,2,3]
- *   [&search=substr]
- *   [&range=1h|6h|24h|7d]
+ * GET zabbix.php?action=tcs.events.data[&range=1h|6h|24h|7d]
  *
- * Returns a windowed event stream + metrics (rate, timeline, MTTR, top hosts).
+ * Returns a windowed event stream + derived aux arrays. Filtering happens
+ * client-side per the Events Console design (search / sev / status /
+ * source / site / group / tags) so this endpoint is range-only.
  */
 class ActionEventsData extends CController {
 
@@ -31,18 +28,14 @@ class ActionEventsData extends CController {
         3 => 'warning', 4 => 'high', 5 => 'disaster'
     ];
 
+    private const SITE_GROUP_PREFIX = 'Site/';
+
     protected function init(): void {
         $this->disableCsrfValidation();
     }
 
     protected function checkInput(): bool {
-        $ret = $this->validateInput([
-            'severity' => 'string',
-            'value'    => 'string',
-            'groupids' => 'string',
-            'search'   => 'string',
-            'range'    => 'string'
-        ]);
+        $ret = $this->validateInput(['range' => 'string']);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
         }
@@ -54,148 +47,178 @@ class ActionEventsData extends CController {
     }
 
     protected function doAction(): void {
-        $payload = $this->collect([
-            'severity' => $this->getInput('severity', ''),
-            'value'    => $this->getInput('value', 'any'),
-            'groupids' => $this->getInput('groupids', ''),
-            'search'   => $this->getInput('search', ''),
-            'range'    => $this->getInput('range', '24h')
-        ]);
+        $payload = $this->collect(['range' => $this->getInput('range', '24h')]);
         $this->setResponse(new CControllerResponseData(['main_block' => json_encode($payload)]));
     }
 
     public function collect(array $filters = []): array {
-        $filters = array_merge([
-            'severity' => '', 'value' => 'any', 'groupids' => '',
-            'search' => '', 'range' => '24h'
-        ], $filters);
+        $range = $filters['range'] ?? '24h';
+        $window_secs = self::RANGES[$range] ?? self::RANGES['24h'];
+        $now = time();
 
-        $sev_filter   = array_filter(array_map('trim', explode(',', $filters['severity'])));
-        $group_filter = array_filter(array_map('trim', explode(',', $filters['groupids'])));
-        $value_filter = $filters['value'];
-        $search       = trim($filters['search']);
-        $window_secs  = self::RANGES[$filters['range']] ?? self::RANGES['24h'];
-
-        $params = [
-            'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'value'],
-            'source'    => EVENT_SOURCE_TRIGGERS,
-            'object'    => EVENT_OBJECT_TRIGGER,
-            'time_from' => time() - $window_secs,
-            'sortfield' => ['eventid'],
-            'sortorder' => 'DESC',
-            'limit'     => 1000
-        ];
-        if ($group_filter) {
-            $params['groupids'] = $group_filter;
-        }
-        $events = $this->safeGet(fn() => API::Event()->get($params));
-
-        $trigger_ids   = array_unique(array_column($events, 'objectid'));
-        $trigger_hosts = $this->resolveTriggerHosts($trigger_ids);
-
-        $groups = $this->safeGet(fn() => API::HostGroup()->get([
-            'output'             => ['groupid', 'name'],
-            'with_monitored_hosts'=> true,
-            'sortfield'          => ['name']
+        $raw = $this->safeGet(fn() => API::Event()->get([
+            'output'      => ['eventid', 'objectid', 'name', 'severity', 'clock', 'value', 'acknowledged', 'r_eventid'],
+            'source'      => EVENT_SOURCE_TRIGGERS,
+            'object'      => EVENT_OBJECT_TRIGGER,
+            'time_from'   => $now - $window_secs,
+            'selectTags'  => ['tag', 'value'],
+            'sortfield'   => ['eventid'],
+            'sortorder'   => 'DESC',
+            'limit'       => 1000
         ]));
 
+        $trigger_ids   = array_unique(array_column($raw, 'objectid'));
+        $trigger_hosts = $this->resolveTriggerHosts($trigger_ids);
+
+        // Build events list (DESC, newest first — design expects this order).
         $rows = [];
-        foreach ($events as $e) {
+        $events_by_trigger_asc = []; // for duration pairing
+        foreach (array_reverse($raw) as $e) {
+            $events_by_trigger_asc[$e['objectid']][] = $e;
+        }
+        // First pass: compute duration for resolution events.
+        $durations = []; // eventid → seconds
+        foreach ($events_by_trigger_asc as $tid => $list) {
+            $open_clock = null;
+            foreach ($list as $e) {
+                if ((int) $e['value'] === TRIGGER_VALUE_TRUE) {
+                    if ($open_clock === null) $open_clock = (int) $e['clock'];
+                } else {
+                    if ($open_clock !== null) {
+                        $durations[$e['eventid']] = (int) $e['clock'] - $open_clock;
+                        $open_clock = null;
+                    }
+                }
+            }
+        }
+        // Mean time to resolve from same pairings.
+        $mttr_secs = $durations ? (int) round(array_sum($durations) / count($durations)) : 0;
+
+        foreach ($raw as $e) {
             $sev_int = (int) $e['severity'];
             $sev = self::SEV_LABEL[$sev_int] ?? 'info';
             $hosts = $trigger_hosts[$e['objectid']] ?? [];
-            $host_label = $hosts[0]['name'] ?? ($hosts[0]['host'] ?? '—');
-            $host_id    = $hosts[0]['hostid'] ?? '';
-            $hostgroups = array_map(fn($g) => $g['name'], $hosts[0]['hostgroups'] ?? []);
-            $is_firing  = (int) $e['value'] === TRIGGER_VALUE_TRUE;
+            $h     = $hosts[0] ?? [];
+            $host_label = $h['name'] ?? ($h['host'] ?? '—');
+            $groups_all = array_map(fn($g) => $g['name'], $h['hostgroups'] ?? []);
+            [$site, $group] = $this->splitGroups($groups_all);
+            $is_firing = (int) $e['value'] === TRIGGER_VALUE_TRUE;
+            $ack       = (int) $e['acknowledged'] === 1;
+            $status    = !$is_firing ? 'resolved' : ($ack ? 'ack' : 'open');
+            $clock     = (int) $e['clock'];
 
-            // Resolved events use severity 0 in some Zabbix variants — pull
-            // the severity off the original 'PROBLEM' event for display so
-            // resolution rows stay coloured. The trigger's own severity is
-            // the most consistent fallback.
-            if ($value_filter === 'firing'  && !$is_firing) continue;
-            if ($value_filter === 'resolved' && $is_firing) continue;
-            if ($sev_filter && !in_array($sev, $sev_filter, true)) continue;
-            if ($search !== '' && stripos($e['name'].' '.$host_label, $search) === false) continue;
+            $tags = [];
+            foreach ($e['tags'] ?? [] as $t) {
+                $val = $t['value'] ?? '';
+                $tags[] = $val === '' ? $t['tag'] : ($t['tag'].':'.$val);
+            }
+
+            $duration_secs = $durations[$e['eventid']] ?? null;
 
             $rows[] = [
-                'eventid'    => $e['eventid'],
-                'severity'   => $sev,
-                'host'       => $host_label,
-                'hostid'     => $host_id,
-                'hostgroups' => $hostgroups,
-                'name'       => $e['name'],
-                'value'      => $is_firing ? 'firing' : 'resolved',
-                'clock'      => (int) $e['clock'],
-                'ts'         => date('Y-m-d H:i:s', (int) $e['clock'])
+                'id'       => $e['eventid'],
+                'sev'      => $is_firing ? $sev : 'ok',
+                'rawSev'   => $sev,
+                'status'   => $status,
+                'ts'       => date('H:i', $clock),
+                'tsFull'   => date('Y-m-d H:i:s', $clock),
+                'clock'    => $clock,
+                'age'      => $this->fmtAge(max(0, $now - $clock)),
+                'source'   => 'zbx',
+                'host'     => $host_label,
+                'hostid'   => $h['hostid'] ?? '',
+                'site'     => $site,
+                'group'    => $group,
+                'trigger'  => $e['name'],
+                'tags'     => $tags,
+                'owner'    => '',
+                'count'    => 1,
+                'duration' => $duration_secs !== null ? $this->fmtAge($duration_secs) : '—'
             ];
         }
 
         return [
-            'events'  => array_slice($rows, 0, 300),
-            'metrics' => $this->buildMetrics($rows, $events, $window_secs),
-            'groups'  => array_map(fn($g) => ['id' => $g['groupid'], 'name' => $g['name']], $groups),
-            'filters' => $filters,
-            'ts'      => time()
+            'events'     => $rows,
+            'timeline'   => $this->buildStackedTimeline($rows, $window_secs),
+            'sites'      => $this->uniqueSorted(array_column($rows, 'site')),
+            'hostgroups' => $this->uniqueSorted(array_column($rows, 'group')),
+            'tags'       => $this->uniqueSorted(array_merge(...array_map(fn($r) => $r['tags'], $rows ?: [[]]))),
+            'savedViews' => $this->savedViews($rows),
+            'metrics'    => [
+                'open'    => count(array_filter($rows, fn($r) => $r['status'] === 'open')),
+                'ack'     => count(array_filter($rows, fn($r) => $r['status'] === 'ack')),
+                'mttaStr' => '—',  // requires selectAcknowledges; skipped for v1
+                'mttrStr' => $this->fmtAge($mttr_secs),
+                'mttrSec' => $mttr_secs
+            ],
+            'range'      => $range,
+            'ts'         => $now
         ];
     }
 
-    private function buildMetrics(array $rows, array $raw_events, int $window_secs): array {
-        $by_sev   = ['disaster' => 0, 'high' => 0, 'warning' => 0, 'info' => 0];
-        $by_host  = [];
-        $fired    = 0;
-        $resolved = 0;
-        foreach ($rows as $r) {
-            $by_sev[$r['severity']] = ($by_sev[$r['severity']] ?? 0) + 1;
-            $by_host[$r['host']]    = ($by_host[$r['host']] ?? 0) + 1;
-            if ($r['value'] === 'firing') $fired++; else $resolved++;
-        }
-        arsort($by_host);
-        $top_hosts = [];
-        foreach (array_slice($by_host, 0, 10, true) as $h => $n) $top_hosts[] = ['name' => $h, 'count' => $n];
-
-        // 24 buckets of "fired" event volume; bucket size = window / 24.
-        $buckets = array_fill(0, 24, 0);
+    /** 24 buckets, each is [disaster, high, warning, info] counts. */
+    private function buildStackedTimeline(array $rows, int $window_secs): array {
+        $buckets = [];
+        for ($i = 0; $i < 24; $i++) $buckets[$i] = [0, 0, 0, 0];
         $start = time() - $window_secs;
         $bucket_secs = max(1, intdiv($window_secs, 24));
         foreach ($rows as $r) {
-            if ($r['value'] !== 'firing') continue;
+            if ($r['status'] === 'resolved') continue;
             $b = intdiv($r['clock'] - $start, $bucket_secs);
-            if ($b >= 0 && $b < 24) $buckets[$b]++;
+            if ($b < 0 || $b >= 24) continue;
+            $idx = match ($r['rawSev']) {
+                'disaster' => 0,
+                'high'     => 1,
+                'warning'  => 2,
+                default    => 3
+            };
+            $buckets[$b][$idx]++;
         }
-
-        // Mean time to resolve, in seconds. Pair each "resolved" event to
-        // the most-recent earlier "firing" event on the same trigger inside
-        // the window. raw_events is sorted DESC by eventid, so iterate
-        // ascending for the pairing.
-        $mttr = $this->meanTimeToResolve(array_reverse($raw_events));
-
-        return [
-            'total'      => count($rows),
-            'fired'      => $fired,
-            'resolved'   => $resolved,
-            'bySeverity' => $by_sev,
-            'timeline'   => $buckets,
-            'topHosts'   => $top_hosts,
-            'mttrSec'    => $mttr,
-            'mttrStr'    => $this->fmtAge($mttr)
-        ];
+        return array_values($buckets);
     }
 
-    private function meanTimeToResolve(array $events_asc): int {
-        $open = []; // triggerid → clock of last firing
-        $deltas = [];
-        foreach ($events_asc as $e) {
-            $tid = $e['objectid'];
-            if ((int) $e['value'] === TRIGGER_VALUE_TRUE) {
-                $open[$tid] = (int) $e['clock'];
-            } else if (isset($open[$tid])) {
-                $d = (int) $e['clock'] - $open[$tid];
-                if ($d > 0) $deltas[] = $d;
-                unset($open[$tid]);
+    /** Static-ish saved-view set, with live row counts. */
+    private function savedViews(array $rows): array {
+        $views = [
+            ['id' => 'v1', 'name' => 'Disaster + High open',  'system' => false,
+             'fn'  => fn($e) => in_array($e['rawSev'], ['disaster', 'high'], true) && $e['status'] !== 'resolved'],
+            ['id' => 'v2', 'name' => 'Open / unack',          'system' => false,
+             'fn'  => fn($e) => $e['status'] === 'open'],
+            ['id' => 'v3', 'name' => 'Acknowledged',          'system' => false,
+             'fn'  => fn($e) => $e['status'] === 'ack'],
+            ['id' => 'v4', 'name' => 'Resolved · 24h',        'system' => true,
+             'fn'  => fn($e) => $e['status'] === 'resolved'],
+            ['id' => 'v5', 'name' => 'Warning only',          'system' => true,
+             'fn'  => fn($e) => $e['rawSev'] === 'warning' && $e['status'] !== 'resolved']
+        ];
+        $out = [];
+        foreach ($views as $v) {
+            $count = 0;
+            foreach ($rows as $r) if (($v['fn'])($r)) $count++;
+            unset($v['fn']);
+            $v['count'] = $count;
+            $out[] = $v;
+        }
+        return $out;
+    }
+
+    private function splitGroups(array $groups): array {
+        $site = '—';
+        $hg   = '—';
+        foreach ($groups as $g) {
+            if (str_starts_with($g, self::SITE_GROUP_PREFIX)) {
+                $site = substr($g, strlen(self::SITE_GROUP_PREFIX));
+            } elseif ($hg === '—') {
+                $hg = $g;
             }
         }
-        return $deltas ? (int) round(array_sum($deltas) / count($deltas)) : 0;
+        return [$site, $hg];
+    }
+
+    private function uniqueSorted(array $values): array {
+        $values = array_values(array_unique(array_filter($values, fn($v) => $v !== '' && $v !== '—')));
+        sort($values);
+        return $values;
     }
 
     private function resolveTriggerHosts(array $trigger_ids): array {
@@ -237,7 +260,7 @@ class ActionEventsData extends CController {
     private function fmtAge(int $s): string {
         if ($s <= 0)    return '—';
         if ($s < 60)    return $s.'s';
-        if ($s < 3600)  return intdiv($s, 60).'m '.($s % 60).'s';
+        if ($s < 3600)  return intdiv($s, 60).'m';
         if ($s < 86400) return sprintf('%dh %dm', intdiv($s, 3600), intdiv($s % 3600, 60));
         return sprintf('%dd %dh', intdiv($s, 86400), intdiv($s % 86400, 3600));
     }

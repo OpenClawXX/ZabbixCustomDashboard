@@ -1,41 +1,59 @@
-// events-bridge.jsx — adapter for the Events Console.
+// events-bridge.jsx
+//
+// Adapts the ActionEvents / ActionEventsData payload into the window globals
+// the designed events-app.jsx consumes:
+//
+//   EV_EVENTS, EV_TIMELINE, EV_SITES, EV_HOSTGROUPS, EV_TAGS,
+//   EV_SAVED_VIEWS, EV_METRICS, EV_FILTERS
+//
+// Imperative API:
+//   tcsEventsRefresh()        — refetch with current range
+//   tcsEventsFetch({range})   — change range AND refetch
+//
+// Dispatches "tcs:events-data" on every successful refresh.
 
 (function () {
     const EMPTY = {
         events: [],
-        metrics: {
-            total: 0, fired: 0, resolved: 0,
-            bySeverity: { disaster: 0, high: 0, warning: 0, info: 0 },
-            timeline: new Array(24).fill(0),
-            topHosts: [], mttrSec: 0, mttrStr: "—"
-        },
-        groups: [],
-        filters: { severity: "", value: "any", groupids: "", search: "", range: "24h" },
+        timeline: new Array(24).fill(null).map(() => [0, 0, 0, 0]),
+        sites: [],
+        hostgroups: [],
+        tags: [],
+        savedViews: [],
+        metrics: { open: 0, ack: 0, mttaStr: "—", mttrStr: "—", mttrSec: 0 },
+        range: "24h",
         ts: 0
     };
 
     const apply = (b) => {
-        const merged = { ...EMPTY, ...(b || {}) };
-        merged.metrics = { ...EMPTY.metrics, ...(merged.metrics || {}) };
-        if (!Array.isArray(merged.metrics.timeline) || merged.metrics.timeline.length !== 24) {
-            merged.metrics.timeline = new Array(24).fill(0);
-        }
-        window.EVENTS_DATA = merged;
+        const m = { ...EMPTY, ...(b || {}) };
+        m.timeline   = (Array.isArray(m.timeline) && m.timeline.length === 24) ? m.timeline : EMPTY.timeline;
+        m.events     = Array.isArray(m.events)     ? m.events     : [];
+        m.sites      = Array.isArray(m.sites)      ? m.sites      : [];
+        m.hostgroups = Array.isArray(m.hostgroups) ? m.hostgroups : [];
+        m.tags       = Array.isArray(m.tags)       ? m.tags       : [];
+        m.savedViews = Array.isArray(m.savedViews) ? m.savedViews : [];
+        m.metrics    = { ...EMPTY.metrics, ...(m.metrics || {}) };
+
+        window.EV_EVENTS       = m.events;
+        window.EV_TIMELINE     = m.timeline;
+        window.EV_SITES        = m.sites;
+        window.EV_HOSTGROUPS   = m.hostgroups;
+        window.EV_TAGS         = m.tags;
+        window.EV_SAVED_VIEWS  = m.savedViews;
+        window.EV_METRICS      = m.metrics;
+        window.EV_FILTERS      = { range: m.range };
     };
 
     apply(window.EVENTS_BOOT);
 
-    let currentFilters = { ...window.EVENTS_DATA.filters };
+    let currentRange = (window.EV_FILTERS && window.EV_FILTERS.range) || "24h";
     const base = window.TCS_EVENTS_DATA_URL;
     const REFRESH_MS = 30_000;
 
     const fetchNow = async () => {
         if (!base) return;
-        const qs = new URLSearchParams();
-        for (const [k, v] of Object.entries(currentFilters)) {
-            if (v !== "" && v != null) qs.set(k, v);
-        }
-        const url = qs.toString() ? `${base}&${qs}` : base;
+        const url = `${base}&range=${encodeURIComponent(currentRange)}`;
         try {
             const resp = await fetch(url, {
                 credentials: "same-origin",
@@ -54,10 +72,9 @@
 
     window.tcsEventsRefresh = fetchNow;
     window.tcsEventsFetch = (delta) => {
-        currentFilters = { ...currentFilters, ...(delta || {}) };
+        if (delta && delta.range) currentRange = delta.range;
         return fetchNow();
     };
-    window.tcsEventsGetFilters = () => ({ ...currentFilters });
 
     setInterval(fetchNow, REFRESH_MS);
 })();
