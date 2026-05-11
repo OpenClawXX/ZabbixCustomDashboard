@@ -90,7 +90,7 @@ class ActionServersData extends CController {
             'output'           => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
             'selectInterfaces' => ['ip', 'main', 'available'],
             'selectInventory'  => ['os', 'model', 'hardware', 'serialno_a'],
-            'selectGroups'     => ['groupid', 'name'],
+            'selectHostGroups' => ['groupid', 'name'],
             'groupids'         => $group_ids,
             'monitored_hosts'  => true,
             'preservekeys'     => true
@@ -193,7 +193,7 @@ class ActionServersData extends CController {
         foreach ($hosts as $hid => $h) {
             $site_name = 'Unassigned';
             $site_id   = 'unassigned';
-            foreach ($h['groups'] ?? [] as $g) {
+            foreach ($h['hostgroups'] ?? [] as $g) {
                 if (str_starts_with($g['name'], self::SITE_GROUP_PREFIX)) {
                     $site_id   = $g['groupid'];
                     $site_name = substr($g['name'], strlen(self::SITE_GROUP_PREFIX));

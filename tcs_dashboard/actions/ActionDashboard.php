@@ -99,7 +99,7 @@ class ActionDashboard extends CController {
             'output'                  => ['hostid', 'host', 'name', 'status', 'maintenance_status', 'proxy_hostid'],
             'selectInterfaces'        => ['ip', 'main', 'type'],
             'selectParentTemplates'   => ['name'],
-            'selectGroups'            => ['name'],
+            'selectHostGroups'        => ['name'],
             'hostids'                 => [$hostid]
         ]);
 
@@ -127,7 +127,7 @@ class ActionDashboard extends CController {
             'maintenance'  => (int) ($h['maintenance_status'] ?? 0),
             'proxy'        => $this->resolveProxy($h['proxy_hostid'] ?? '0'),
             'templates'    => array_column($h['parentTemplates'] ?? [], 'name'),
-            'groups'       => array_column($h['groups'] ?? [], 'name'),
+            'groups'       => array_column($h['hostgroups'] ?? [], 'name'),
             'uptime'       => $this->resolveUptime($hostid),
             'lastSeen'     => 'now'
         ];

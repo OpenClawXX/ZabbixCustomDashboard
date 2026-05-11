@@ -61,7 +61,7 @@ class ActionGlobalData extends CController {
         $hosts = $this->safeGet(fn() => API::Host()->get([
             'output'                => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
             'selectInterfaces'      => ['available', 'main'],
-            'selectGroups'          => ['groupid', 'name'],
+            'selectHostGroups'      => ['groupid', 'name'],
             'selectParentTemplates' => ['name'],
             'monitored_hosts'       => true,
             'preservekeys'          => true
@@ -215,7 +215,7 @@ class ActionGlobalData extends CController {
         $sites = [];
         foreach ($hosts as $h) {
             $site_group = null;
-            foreach ($h['groups'] ?? [] as $g) {
+            foreach ($h['hostgroups'] ?? [] as $g) {
                 if (str_starts_with($g['name'], self::SITE_GROUP_PREFIX)) {
                     $site_group = $g;
                     break;
