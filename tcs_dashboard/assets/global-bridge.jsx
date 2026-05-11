@@ -18,10 +18,39 @@
         templates: { total: null, version: "—" }
     };
 
+    // Coerce site/totals records so the React layer's unconditional
+    // .toFixed() / .toLocaleString() calls don't blow up on nulls.
+    const normaliseSite = (s) => ({
+        id:       s.id ?? "—",
+        name:     s.name ?? "—",
+        hosts:    s.hosts ?? 0,
+        problems: s.problems ?? 0,
+        sev:      s.sev ?? "ok",
+        sla:      typeof s.sla === "number" ? s.sla : 100,
+        kind:     s.kind ?? null,
+        type:     s.type ?? null
+    });
+
+    const normaliseTotals = (t) => {
+        const merged = { ...EMPTY_TOTALS, ...(t || {}) };
+        // sla may come back null when we have no real source — default to
+        // the configured target so the tile renders rather than crashing.
+        if (typeof merged.sla?.value !== "number") {
+            merged.sla = { ...merged.sla, value: merged.sla?.target ?? 100 };
+        }
+        if (typeof merged.templates?.total !== "number") {
+            merged.templates = { ...merged.templates, total: 0 };
+        }
+        if (typeof merged.devices?.total !== "number") {
+            merged.devices = { total: 0, online: 0, quarantine: 0, byod: 0 };
+        }
+        return merged;
+    };
+
     const applyBoot = (boot) => {
         const b = boot || {};
-        window.GLOBAL_TOTALS    = { ...EMPTY_TOTALS, ...(b.totals || {}) };
-        window.GLOBAL_SITES     = Array.isArray(b.sites)    ? b.sites    : [];
+        window.GLOBAL_TOTALS    = normaliseTotals(b.totals);
+        window.GLOBAL_SITES     = Array.isArray(b.sites)    ? b.sites.map(normaliseSite) : [];
         window.GLOBAL_DOMAINS   = Array.isArray(b.domains)  ? b.domains  : [];
         window.GLOBAL_TRIGGERS  = Array.isArray(b.triggers) ? b.triggers : [];
         window.GLOBAL_EVENTS    = Array.isArray(b.events)   ? b.events   : [];
