@@ -6,7 +6,13 @@ use CController;
 use CControllerResponseData;
 use CControllerResponseFatal;
 
-/** GET zabbix.php?action=tcs.problems.view */
+/**
+ * GET zabbix.php?action=tcs.problems.view
+ *
+ * The Problems page is a graphical view of the same event stream the
+ * Events Console consumes — we boot from ActionEventsData so both pages
+ * share the bridge (events-bridge.jsx → window.EV_EVENTS).
+ */
 class ActionProblems extends CController {
 
     protected function init(): void {
@@ -26,7 +32,7 @@ class ActionProblems extends CController {
     }
 
     protected function doAction(): void {
-        $boot = (new ActionProblemsData())->collect();
+        $boot = (new ActionEventsData())->collect();
         $response = new CControllerResponseData([
             'title' => _('TCS Problems'),
             'boot'  => $boot
