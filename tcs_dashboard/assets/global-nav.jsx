@@ -96,7 +96,7 @@ const GlobalSidebar = ({ active }) => {
   );
 };
 
-const GlobalTopbar = ({ crumb, search = "Find host, MAC, user, IP…" }) => (
+const GlobalTopbar = ({ crumb, search = "Find host, MAC, user, IP…", onRefresh, refreshing }) => (
   <div className="topbar">
     <div className="icon-btn"><Icon name="back" /></div>
     <div className="crumb">
@@ -113,7 +113,17 @@ const GlobalTopbar = ({ crumb, search = "Find host, MAC, user, IP…" }) => (
       <input placeholder={search} readOnly />
       <kbd>⌘K</kbd>
     </div>
-    <div className="icon-btn" title="Refresh"><Icon name="refresh" /></div>
+    <div
+      className="icon-btn"
+      title={refreshing ? "Refreshing…" : "Refresh"}
+      onClick={onRefresh}
+      style={{
+        cursor: onRefresh ? "pointer" : "default",
+        opacity: refreshing ? 0.5 : 1
+      }}
+    >
+      <Icon name="refresh" />
+    </div>
     <div className="icon-btn" title="More"><Icon name="more" /></div>
   </div>
 );

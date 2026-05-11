@@ -10,7 +10,7 @@ const RANGE_OPTIONS = [
   { key: "7d",  label: "Last 7d"  }
 ];
 
-const GlobalHeader = ({ now, rangeKey, setRangeKey, onRefresh, refreshing }) => {
+const GlobalHeader = ({ now, rangeKey, setRangeKey }) => {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
   const current = RANGE_OPTIONS.find(r => r.key === rangeKey) || RANGE_OPTIONS[2];
@@ -37,17 +37,6 @@ const GlobalHeader = ({ now, rangeKey, setRangeKey, onRefresh, refreshing }) => 
           <span className="pill"><span className="lbl">Templates</span> <span className="v">{GLOBAL_TOTALS.templates.version}</span></span>
         </div>
       </div>
-
-      <button
-        className="pill"
-        onClick={onRefresh}
-        disabled={refreshing}
-        title="Refresh now"
-        style={{ cursor: "pointer", border: 0, marginRight: 8, opacity: refreshing ? 0.6 : 1 }}
-      >
-        <Icon name="refresh" />
-        <span className="v" style={{ marginLeft: 6 }}>{refreshing ? "Refreshing…" : "Refresh"}</span>
-      </button>
 
       <div className="timerange" ref={ref} style={{ position: "relative", cursor: "pointer" }} onClick={() => setOpen(o => !o)}>
         <Icon name="calendar" />
@@ -402,8 +391,8 @@ const App = () => {
     <div className="app" data-density={t.density} data-screen-label="Global Dashboard">
       <GlobalSidebar active="global" />
       <div className="main">
-        <GlobalTopbar crumb={["Tuscaloosa City Schools", "Operations", "Global"]} />
-        <GlobalHeader now={now} rangeKey={rangeKey} setRangeKey={setRangeKey} onRefresh={doRefresh} refreshing={refreshing} />
+        <GlobalTopbar crumb={["Tuscaloosa City Schools", "Operations", "Global"]} onRefresh={doRefresh} refreshing={refreshing} />
+        <GlobalHeader now={now} rangeKey={rangeKey} setRangeKey={setRangeKey} />
         <div className="body">
           <SeverityStrip />
           <TrendStrip />
