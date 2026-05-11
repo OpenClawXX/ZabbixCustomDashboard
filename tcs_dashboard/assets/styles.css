@@ -47,6 +47,7 @@ body {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 220px 1fr;
+  column-gap: 14px;
 }
 
 /* ───────── Sidebar ───────── */
@@ -110,7 +111,26 @@ body {
   color: var(--muted);
   display: flex; flex-direction: column; gap: 4px;
 }
-.sidebar-footer .row { display: flex; justify-content: space-between; }
+.sidebar-footer .sf-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.sidebar-footer .sf-k {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-footer .sf-v {
+  font-family: var(--mono);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sidebar-footer .sf-v.ok { color: var(--ok); }
+/* Keep the legacy `.ok` selector for older callers that haven't migrated. */
 .sidebar-footer .ok { color: var(--ok); }
 
 /* ───────── Topbar ───────── */
