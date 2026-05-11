@@ -350,11 +350,12 @@ class ActionGlobalData extends CController {
         return $any_main ? 2 : 0;
     }
 
-    private function hostWorstSev(string $hostid, array $problems): int {
+    private function hostWorstSev($hostid, array $problems): int {
+        $hostid = (string) $hostid;
         $worst = -1;
         foreach ($problems as $p) {
             foreach ($p['hosts'] ?? [] as $h) {
-                if ($h['hostid'] === $hostid) {
+                if ((string) $h['hostid'] === $hostid) {
                     $sev = (int) $p['severity'];
                     if ($sev > $worst) $worst = $sev;
                 }
