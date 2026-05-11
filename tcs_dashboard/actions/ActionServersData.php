@@ -143,7 +143,7 @@ class ActionServersData extends CController {
         $problems = $this->safeGet(fn() => API::Problem()->get([
             'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged'],
             'hostids'   => $host_ids,
-            'sortfield' => ['clock'],
+            'sortfield' => ['eventid'],
             'sortorder' => 'DESC',
             'limit'     => 50
         ]));

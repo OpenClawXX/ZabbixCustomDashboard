@@ -281,14 +281,16 @@ class ActionDashboard extends CController {
     }
 
     private function collectEvents(string $hostid): array {
+        // Zabbix 7.2: sortfield must be 'eventid'; select_acknowledges
+        // dropped in favour of selectAcknowledges (camelCase).
         $events = API::Event()->get([
-            'output'      => ['eventid', 'name', 'severity', 'clock', 'value'],
-            'hostids'     => [$hostid],
-            'sortfield'   => ['clock'],
-            'sortorder'   => 'DESC',
-            'limit'       => 25,
-            'select_acknowledges' => 'count'
-        ]);
+            'output'             => ['eventid', 'name', 'severity', 'clock', 'value'],
+            'hostids'            => [$hostid],
+            'sortfield'          => ['eventid'],
+            'sortorder'          => 'DESC',
+            'limit'              => 25,
+            'selectAcknowledges' => 'count'
+        ]) ?: [];
 
         $sev_label = [
             0 => 'info', 1 => 'info', 2 => 'warning',

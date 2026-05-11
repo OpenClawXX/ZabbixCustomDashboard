@@ -75,7 +75,7 @@ class ActionGlobalData extends CController {
         // in one trigger.get call below.
         $problems = $this->safeGet(fn() => API::Problem()->get([
             'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged'],
-            'sortfield' => ['clock'],
+            'sortfield' => ['eventid'],
             'sortorder' => 'DESC',
             'limit'     => 200
         ]));
@@ -85,7 +85,7 @@ class ActionGlobalData extends CController {
             'source'    => EVENT_SOURCE_TRIGGERS,
             'object'    => EVENT_OBJECT_TRIGGER,
             'time_from' => time() - 24 * 3600,
-            'sortfield' => ['clock'],
+            'sortfield' => ['eventid'],
             'sortorder' => 'ASC',
             'limit'     => 10000
         ]));
@@ -94,7 +94,7 @@ class ActionGlobalData extends CController {
             'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'value'],
             'source'    => EVENT_SOURCE_TRIGGERS,
             'object'    => EVENT_OBJECT_TRIGGER,
-            'sortfield' => ['clock'],
+            'sortfield' => ['eventid'],
             'sortorder' => 'DESC',
             'limit'     => 30
         ]));
