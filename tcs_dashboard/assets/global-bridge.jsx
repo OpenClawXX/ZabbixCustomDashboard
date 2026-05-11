@@ -7,6 +7,12 @@
 // Loaded INSTEAD OF global-data.jsx — same window globals, real data instead
 // of mock. Falls back to the synthetic shapes if the boot payload is missing,
 // so loading order accidents render dashes rather than crashing.
+//
+// Exposes an imperative refresh API used by the header buttons:
+//   window.tcsGlobalRefresh(rangeKey?)   — fetch immediately
+//   window.tcsGlobalSetRange(rangeKey)   — change range AND refetch
+// Dispatches "tcs:global-data" on every successful refresh with the parsed
+// payload so the app can update the "Last refresh" timestamp.
 
 (function () {
     const EMPTY_TOTALS = {
@@ -18,8 +24,14 @@
         templates: { total: null, version: "—" }
     };
 
-    // Coerce site/totals records so the React layer's unconditional
-    // .toFixed() / .toLocaleString() calls don't blow up on nulls.
+    // Range key → human label. Server-side parsed to a seconds window.
+    const RANGES = {
+        "1h":  "Last 1h",
+        "6h":  "Last 6h",
+        "24h": "Last 24h",
+        "7d":  "Last 7d"
+    };
+
     const normaliseSite = (s) => ({
         id:       s.id ?? "—",
         name:     s.name ?? "—",
@@ -33,8 +45,6 @@
 
     const normaliseTotals = (t) => {
         const merged = { ...EMPTY_TOTALS, ...(t || {}) };
-        // sla may come back null when we have no real source — default to
-        // the configured target so the tile renders rather than crashing.
         if (typeof merged.sla?.value !== "number") {
             merged.sla = { ...merged.sla, value: merged.sla?.target ?? 100 };
         }
@@ -69,11 +79,14 @@
         showSidecar: true
     };
 
+    // --- Live refresh state ---
+    let currentRange = "24h";
     const REFRESH_MS = 30_000;
-    const url = window.TCS_GLOBAL_DATA_URL;
-    if (!url) return;
+    const baseUrl = window.TCS_GLOBAL_DATA_URL;
 
-    const tick = async () => {
+    const fetchNow = async () => {
+        if (!baseUrl) return;
+        const url = `${baseUrl}&range=${encodeURIComponent(currentRange)}`;
         try {
             const resp = await fetch(url, {
                 credentials: "same-origin",
@@ -82,10 +95,21 @@
             if (!resp.ok) return;
             const fresh = await resp.json();
             applyBoot(fresh);
-            window.dispatchEvent(new CustomEvent("tcs:global-data", { detail: fresh }));
+            window.dispatchEvent(new CustomEvent("tcs:global-data", {
+                detail: { ...fresh, range: currentRange, fetchedAt: Date.now() }
+            }));
         } catch (e) {
             console.warn("[tcs] global refresh failed:", e);
         }
     };
-    setInterval(tick, REFRESH_MS);
+
+    window.tcsGlobalRefresh = fetchNow;
+    window.tcsGlobalSetRange = (r) => {
+        if (!RANGES[r]) return;
+        currentRange = r;
+        return fetchNow();
+    };
+    window.tcsGlobalRanges = RANGES;
+
+    setInterval(fetchNow, REFRESH_MS);
 })();

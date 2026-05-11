@@ -3,28 +3,87 @@
 // domain breakdown in the middle, triggers table + hotspots below, raw event stream
 // at the bottom. Every card is something an operator can scan in <2 seconds.
 
-const GlobalHeader = ({ now, timeRange, setTimeRange }) => (
-  <div className="page-header" style={{ alignItems: "center" }}>
-    <div style={{ flex: 1 }}>
-      <div className="host-title">
-        <h1>Global Dashboard</h1>
-        <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>OPERATIONS · TIER-1</span>
+const RANGE_OPTIONS = [
+  { key: "1h",  label: "Last 1h"  },
+  { key: "6h",  label: "Last 6h"  },
+  { key: "24h", label: "Last 24h" },
+  { key: "7d",  label: "Last 7d"  }
+];
+
+const GlobalHeader = ({ now, rangeKey, setRangeKey, onRefresh, refreshing }) => {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  const current = RANGE_OPTIONS.find(r => r.key === rangeKey) || RANGE_OPTIONS[2];
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  return (
+    <div className="page-header" style={{ alignItems: "center" }}>
+      <div style={{ flex: 1 }}>
+        <div className="host-title">
+          <h1>Global Dashboard</h1>
+          <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>OPERATIONS · TIER-1</span>
+        </div>
+        <div className="host-meta">
+          <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> All proxies polling</span>
+          <span className="pill"><span className="lbl">Last refresh</span> <span className="v">{now}</span></span>
+          <span className="pill"><span className="lbl">Auto-refresh</span> <span className="v">30s</span></span>
+          <span className="pill"><span className="lbl">Polled hosts</span> <span className="v">{GLOBAL_TOTALS.hosts.total.toLocaleString()}</span></span>
+          <span className="pill"><span className="lbl">Templates</span> <span className="v">{GLOBAL_TOTALS.templates.version}</span></span>
+        </div>
       </div>
-      <div className="host-meta">
-        <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> All proxies polling</span>
-        <span className="pill"><span className="lbl">Last refresh</span> <span className="v">{now}</span></span>
-        <span className="pill"><span className="lbl">Auto-refresh</span> <span className="v">30s</span></span>
-        <span className="pill"><span className="lbl">Polled hosts</span> <span className="v">{GLOBAL_TOTALS.hosts.total.toLocaleString()}</span></span>
-        <span className="pill"><span className="lbl">Templates</span> <span className="v">{GLOBAL_TOTALS.templates.version}</span></span>
+
+      <button
+        className="pill"
+        onClick={onRefresh}
+        disabled={refreshing}
+        title="Refresh now"
+        style={{ cursor: "pointer", border: 0, marginRight: 8, opacity: refreshing ? 0.6 : 1 }}
+      >
+        <Icon name="refresh" />
+        <span className="v" style={{ marginLeft: 6 }}>{refreshing ? "Refreshing…" : "Refresh"}</span>
+      </button>
+
+      <div className="timerange" ref={ref} style={{ position: "relative", cursor: "pointer" }} onClick={() => setOpen(o => !o)}>
+        <Icon name="calendar" />
+        <span className="range-val">{current.label}</span>
+        <Icon name="chevron" />
+        {open && (
+          <div
+            style={{
+              position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 50,
+              background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.4)", minWidth: 140, padding: 4
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {RANGE_OPTIONS.map(o => (
+              <div
+                key={o.key}
+                onClick={() => { setRangeKey(o.key); setOpen(false); }}
+                style={{
+                  padding: "8px 12px", cursor: "pointer", borderRadius: 6,
+                  background: o.key === rangeKey ? "var(--bg-2)" : "transparent",
+                  color: o.key === rangeKey ? "var(--fg)" : "var(--fg-2)",
+                  fontSize: 13
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = "var(--bg-2)"}
+                onMouseLeave={e => e.currentTarget.style.background = o.key === rangeKey ? "var(--bg-2)" : "transparent"}
+              >
+                {o.label}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
-    <div className="timerange">
-      <Icon name="calendar" />
-      <span className="range-val">{timeRange}</span>
-      <Icon name="chevron" />
-    </div>
-  </div>
-);
+  );
+};
 
 // ───────── Severity strip (Disaster / High / Warning / Info / Acknowledged / Hosts down) ─────────
 const SeverityStrip = () => {
@@ -302,19 +361,49 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const App = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
-  const [timeRange, setTimeRange] = React.useState("Last 24h");
+  const [rangeKey, setRangeKeyState] = React.useState("24h");
   const [now, setNow] = React.useState("just now");
+  const [refreshing, setRefreshing] = React.useState(false);
+  // Bump on every successful refresh so children re-read window.GLOBAL_* globals.
+  const [, setTick] = React.useState(0);
 
   React.useEffect(() => {
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
   }, [t.showSourceBadges]);
+
+  // Listen for bridge-published data updates: refresh timestamp + force re-render.
+  React.useEffect(() => {
+    const onData = (ev) => {
+      setNow(new Date().toLocaleTimeString());
+      setRefreshing(false);
+      setTick(n => n + 1);
+    };
+    window.addEventListener("tcs:global-data", onData);
+    return () => window.removeEventListener("tcs:global-data", onData);
+  }, []);
+
+  const doRefresh = React.useCallback(async () => {
+    if (typeof window.tcsGlobalRefresh !== "function") return;
+    setRefreshing(true);
+    await window.tcsGlobalRefresh();
+    // Failure path: clear spinner after a beat in case no event fires.
+    setTimeout(() => setRefreshing(false), 4000);
+  }, []);
+
+  const setRangeKey = React.useCallback((r) => {
+    setRangeKeyState(r);
+    if (typeof window.tcsGlobalSetRange === "function") {
+      setRefreshing(true);
+      window.tcsGlobalSetRange(r);
+    }
+  }, []);
 
   return (
     <div className="app" data-density={t.density} data-screen-label="Global Dashboard">
       <GlobalSidebar active="global" />
       <div className="main">
         <GlobalTopbar crumb={["Tuscaloosa City Schools", "Operations", "Global"]} />
-        <GlobalHeader now={now} timeRange={timeRange} setTimeRange={setTimeRange} />
+        <GlobalHeader now={now} rangeKey={rangeKey} setRangeKey={setRangeKey} onRefresh={doRefresh} refreshing={refreshing} />
         <div className="body">
           <SeverityStrip />
           <TrendStrip />
@@ -393,7 +482,7 @@ const App = () => {
           ]} onChange={v => setTweak("sevFilter", v)} />
         </TweakSection>
         <TweakSection title="Quick actions">
-          <TweakButton onClick={() => setNow(new Date().toLocaleTimeString())}>Refresh now</TweakButton>
+          <TweakButton onClick={doRefresh}>Refresh now</TweakButton>
           <TweakButton onClick={() => alert("This would acknowledge all unacknowledged triggers below disaster.")}>Bulk-ack warnings</TweakButton>
         </TweakSection>
       </TweaksPanel>

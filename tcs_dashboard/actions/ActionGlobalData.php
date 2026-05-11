@@ -32,12 +32,22 @@ class ActionGlobalData extends CController {
         'nvr'      => ['Milestone', 'XProtect', 'NVR']
     ];
 
+    /** Range key → window in seconds (used for both timeline + recent events). */
+    private const RANGES = [
+        '1h'  =>     3600,
+        '6h'  =>  6 * 3600,
+        '24h' => 24 * 3600,
+        '7d'  =>  7 * 86400
+    ];
+
     protected function init(): void {
         $this->disableCsrfValidation();
     }
 
     protected function checkInput(): bool {
-        $ret = $this->validateInput([]);
+        $ret = $this->validateInput([
+            'range' => 'string'
+        ]);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
         }
@@ -49,7 +59,7 @@ class ActionGlobalData extends CController {
     }
 
     protected function doAction(): void {
-        $payload = $this->collect();
+        $payload = $this->collect($this->getInput('range', '24h'));
         $this->setResponse(new CControllerResponseData(['main_block' => json_encode($payload)]));
     }
 
@@ -57,7 +67,8 @@ class ActionGlobalData extends CController {
      * Build the full payload. Called by ActionGlobal::doAction() too, so
      * the first paint uses the same data shape as the polled refresh.
      */
-    public function collect(): array {
+    public function collect(string $range = '24h'): array {
+        $window_secs = self::RANGES[$range] ?? self::RANGES['24h'];
         $hosts = $this->safeGet(fn() => API::Host()->get([
             'output'                => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
             'selectInterfaces'      => ['available', 'main'],
@@ -84,7 +95,7 @@ class ActionGlobalData extends CController {
             'output'    => ['eventid', 'clock', 'value'],
             'source'    => EVENT_SOURCE_TRIGGERS,
             'object'    => EVENT_OBJECT_TRIGGER,
-            'time_from' => time() - 24 * 3600,
+            'time_from' => time() - $window_secs,
             'sortfield' => ['eventid'],
             'sortorder' => 'ASC',
             'limit'     => 10000
@@ -117,7 +128,8 @@ class ActionGlobalData extends CController {
             'domains'  => $this->buildDomains($hosts, $problems),
             'triggers' => $this->buildTriggers($problems),
             'events'   => $this->buildEvents($recent_events),
-            'timeline' => $this->buildTimeline($events_24h),
+            'timeline' => $this->buildTimeline($events_24h, $window_secs),
+            'range'    => $range,
             'ts'       => time()
         ];
     }
@@ -352,14 +364,15 @@ class ActionGlobalData extends CController {
         return $out;
     }
 
-    private function buildTimeline(array $events): array {
-        // 24 hourly buckets — count of new problems opened.
+    private function buildTimeline(array $events, int $window_secs): array {
+        // Always 24 buckets — bucket width = window / 24.
         $buckets = array_fill(0, 24, 0);
-        $start = time() - 24 * 3600;
+        $start = time() - $window_secs;
+        $bucket_secs = max(1, intdiv($window_secs, 24));
         foreach ($events as $e) {
             if ((int) $e['value'] !== TRIGGER_VALUE_TRUE) continue;
-            $h = intdiv((int) $e['clock'] - $start, 3600);
-            if ($h >= 0 && $h < 24) $buckets[$h]++;
+            $b = intdiv((int) $e['clock'] - $start, $bucket_secs);
+            if ($b >= 0 && $b < 24) $buckets[$b]++;
         }
         return $buckets;
     }
