@@ -2,7 +2,7 @@
     "manifest_version": 2.0,
     "id": "tcs_dashboard",
     "name": "TCS Dashboard",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "namespace": "TcsDashboard",
     "description": "Custom-skinned operations dashboards for Zabbix (TCS / Extreme / PacketFence / Milestone XProtect).",
     "author": "TCS Networking",
