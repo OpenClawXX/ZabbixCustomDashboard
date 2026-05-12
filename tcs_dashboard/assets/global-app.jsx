@@ -200,7 +200,8 @@ const SitesHeatmap = ({ filter, setFilter }) => {
           {sites.map(s => {
             const c = sevColors[s.sev] || sevColors.ok;
             const href = (window.TCS_NAV ? window.TCS_NAV.events : "zabbix.php?action=tcs.events.view")
-              + "&site=" + encodeURIComponent(s.name);
+              + "&site=" + encodeURIComponent(s.name)
+              + "&range=open";
             return (
               <a
                 key={s.id}
