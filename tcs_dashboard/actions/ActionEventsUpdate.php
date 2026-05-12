@@ -94,8 +94,20 @@ class ActionEventsUpdate extends ActionDataBase {
     }
 
     private function respond(array $payload): void {
-        $this->setResponse(new CControllerResponseData([
-            'main_block' => json_encode($payload)
-        ]));
+        // Bypass the Zabbix view/layout pipeline entirely. Even with
+        // layout.json wired up in manifest, POST responses occasionally come
+        // back wrapped in HTML chrome (login-expired page, CSRF redirect,
+        // etc.). Emitting headers + body + exit gives the fetch() helper a
+        // clean JSON document to parse.
+        if (!headers_sent()) {
+            header('Content-Type: application/json; charset=utf-8');
+            header('Cache-Control: no-store');
+            header('X-Content-Type-Options: nosniff');
+        }
+        echo json_encode($payload);
+        // We still register an empty response so the framework doesn't
+        // complain, but main_block stays empty — output already flushed.
+        $this->setResponse(new CControllerResponseData(['main_block' => '']));
+        exit;
     }
 }

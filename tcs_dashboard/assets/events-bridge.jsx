@@ -102,9 +102,23 @@
                 body: body.toString()
             });
             const text = await resp.text();
+            // Older Zabbix module routes occasionally wrap layout.json output
+            // in the full HTML page chrome. Try a straight parse first, then
+            // fall back to extracting the first JSON object we can find.
             let json;
-            try { json = JSON.parse(text); } catch (_) { json = { ok: false, error: text.slice(0, 200) }; }
-            if (json.ok) fetchNow();
+            try {
+                json = JSON.parse(text);
+            } catch (_) {
+                const start = text.indexOf("{");
+                const end   = text.lastIndexOf("}");
+                if (start !== -1 && end > start) {
+                    try { json = JSON.parse(text.slice(start, end + 1)); }
+                    catch (__) { json = { ok: false, error: text.slice(0, 200) }; }
+                } else {
+                    json = { ok: false, error: text.slice(0, 200) };
+                }
+            }
+            if (json && json.ok) fetchNow();
             return json;
         } catch (e) {
             console.warn("[tcs] events update failed:", e);
