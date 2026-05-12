@@ -206,25 +206,9 @@ class ActionGlobalData extends ActionDataBase {
     }
 
     private function buildSites(array $hosts, array $problems): array {
-        // Index problems per host for fast site rollup.
-        $problems_by_host = [];
-        $worst_sev_by_host = [];
-        foreach ($problems as $p) {
-            $sev = (int) $p['severity'];
-            // Health map only counts warning+ — info noise (sev 0/1) was
-            // dwarfing real signal on big unassigned buckets.
-            if ($sev < 2) continue;
-            foreach ($p['hosts'] ?? [] as $h) {
-                $hid = $h['hostid'];
-                $problems_by_host[$hid] = ($problems_by_host[$hid] ?? 0) + 1;
-                if ($sev > ($worst_sev_by_host[$hid] ?? -1)) {
-                    $worst_sev_by_host[$hid] = $sev;
-                }
-            }
-        }
-
         // Bucket hosts by site group. Hosts in zero site-prefix groups go
         // to "Unassigned".
+        $host_to_site = [];
         $sites = [];
         foreach ($hosts as $h) {
             $site_group = null;
@@ -249,9 +233,26 @@ class ActionGlobalData extends ActionDataBase {
                 ];
             }
             $sites[$id]['hosts']++;
-            $sites[$id]['problems'] += $problems_by_host[$h['hostid']] ?? 0;
-            $hsev = $worst_sev_by_host[$h['hostid']] ?? -1;
-            if ($hsev > $sites[$id]['_sev']) $sites[$id]['_sev'] = $hsev;
+            $host_to_site[(string) $h['hostid']] = $id;
+        }
+
+        // Count each problem once per site it touches. A trigger whose
+        // expression spans N hosts in the same site must not inflate that
+        // site's tile by N.
+        foreach ($problems as $p) {
+            $sev = (int) $p['severity'];
+            // Health map only counts warning+ — info noise (sev 0/1) was
+            // dwarfing real signal on big unassigned buckets.
+            if ($sev < 2) continue;
+            $touched = [];
+            foreach ($p['hosts'] ?? [] as $h) {
+                $sid = $host_to_site[(string) $h['hostid']] ?? null;
+                if ($sid !== null) $touched[$sid] = true;
+            }
+            foreach (array_keys($touched) as $sid) {
+                $sites[$sid]['problems']++;
+                if ($sev > $sites[$sid]['_sev']) $sites[$sid]['_sev'] = $sev;
+            }
         }
 
         $out = [];
