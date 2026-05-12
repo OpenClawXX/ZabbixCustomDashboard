@@ -210,10 +210,13 @@ class ActionGlobalData extends ActionDataBase {
         $problems_by_host = [];
         $worst_sev_by_host = [];
         foreach ($problems as $p) {
+            $sev = (int) $p['severity'];
+            // Health map only counts warning+ — info noise (sev 0/1) was
+            // dwarfing real signal on big unassigned buckets.
+            if ($sev < 2) continue;
             foreach ($p['hosts'] ?? [] as $h) {
                 $hid = $h['hostid'];
                 $problems_by_host[$hid] = ($problems_by_host[$hid] ?? 0) + 1;
-                $sev = (int) $p['severity'];
                 if ($sev > ($worst_sev_by_host[$hid] ?? -1)) {
                     $worst_sev_by_host[$hid] = $sev;
                 }
