@@ -203,11 +203,22 @@ class SwitchClient {
 
     /** @param array<int,array<string,mixed>> $items */
     private function extractStackMembers(array $items): array {
+        // Multiple EXOS / generic-SNMP templates use slightly different key
+        // names for the stacking LLD prototype. Match on any of them — the
+        // shared shape is `<prefix>[<n>]` where <n> is the member index.
+        $rxList = [
+            '/^(?:extreme\.)?stacking\.member\[(\d+)\]$/',
+            '/^(?:extreme\.)?stack\.member\[(\d+)\]$/',
+            '/^snmp\.(?:stacking|stack)\.member\[(\d+)\]$/'
+        ];
         $out = [];
         foreach ($items as $it) {
-            if (!preg_match('/^stacking\.member\[(\d+)\]$/', (string) $it['key_'], $m)) continue;
-            $idx = (int) $m[1];
-            if ($idx < 1 || $idx > self::STACK_LIMIT) continue;
+            $k = (string) $it['key_'];
+            $idx = null;
+            foreach ($rxList as $rx) {
+                if (preg_match($rx, $k, $m)) { $idx = (int) $m[1]; break; }
+            }
+            if ($idx === null || $idx < 1 || $idx > self::STACK_LIMIT) continue;
             $out[$idx] = [
                 'index'  => $idx,
                 'role'   => self::stackRoleLabel((string) $it['lastvalue']),
@@ -221,9 +232,25 @@ class SwitchClient {
 
     /** @param array<int,array<string,mixed>> $items */
     private function extractPortStatus(array $items): array {
+        // Try the prefixes the various EXOS / generic-SNMP templates use, in
+        // order of specificity. parseMemberPort returns null on miss so we
+        // fall through to the next candidate.
+        $prefixes = [
+            'net.if.status[ifOperStatus.',
+            'net.if.status[',
+            'ifOperStatus[',
+            'snmp.interfaces.ifoperstatus[',
+            'snmp.interfaces.status[',
+            'snmp.interfaces.if.status['
+        ];
         $out = [];
         foreach ($items as $it) {
-            $idx = self::parseMemberPort((string) $it['key_'], 'net.if.status[ifOperStatus.');
+            $k = (string) $it['key_'];
+            $idx = null;
+            foreach ($prefixes as $p) {
+                $idx = self::parseMemberPort($k, $p);
+                if ($idx !== null) break;
+            }
             if ($idx === null) continue;
             [$member, $port] = $idx;
             $status = (int) $it['lastvalue'];

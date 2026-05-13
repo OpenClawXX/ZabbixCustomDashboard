@@ -118,26 +118,48 @@
     const poeDelivering = (s) => Number(s) === 3;
 
     function buildStack(members, ports, poe) {
-        if (!ports.length) return null;
-
+        // Union the (member, port) keys observed across BOTH port-status and
+        // PoE items. Some EXOS templates expose PoE per port but no
+        // ifOperStatus item — in that case we still want to render the grid
+        // using PoE delivery state as a coarse up/down hint.
+        const portByKey = Object.create(null);
+        for (const p of ports) portByKey[`${p.member}.${p.port}`] = p;
         const poeByKey = Object.create(null);
-        for (const p of poe) {
-            poeByKey[`${p.member}.${p.port}`] = poeDelivering(p.status);
-        }
+        for (const p of poe) poeByKey[`${p.member}.${p.port}`] = poeDelivering(p.status);
+
+        const keys = new Set();
+        for (const k of Object.keys(portByKey)) keys.add(k);
+        for (const k of Object.keys(poeByKey))  keys.add(k);
+        if (!keys.size) return null;
 
         const byMember = new Map();
-        for (const p of ports) {
-            const m = Number(p.member) || 1;
+        for (const key of keys) {
+            const [memberStr, portStr] = key.split(".");
+            const m = Number(memberStr) || 1;
+            const portNum = Number(portStr) || 0;
+            const portRow = portByKey[key];
+            const isDelivering = !!poeByKey[key];
+
+            let state;
+            if (portRow) {
+                state = ifOperToState(portRow.status);
+            } else {
+                // No ifOperStatus item — infer link from PoE delivery.
+                state = isDelivering ? "up" : "down";
+            }
+
             if (!byMember.has(m)) byMember.set(m, []);
             byMember.get(m).push({
-                n: Number(p.port),
-                state: ifOperToState(p.status),
+                n: portNum,
+                state,
                 speed: 1000,
-                poe: !!poeByKey[`${p.member}.${p.port}`],
+                poe: isDelivering,
                 alert: false
             });
         }
 
+        // Members from explicit stacking items OR derived from observed
+        // member indices on the port keys themselves.
         const memberIdxs = members.length
             ? members.map(m => Number(m.index)).filter(n => n > 0)
             : [...byMember.keys()].sort((a, b) => a - b);
