@@ -70,27 +70,42 @@
     window.SWITCH_LOADING   = { fleet: true, snapshot: true };
 
     // Self-contained port-detail builder. Returns the fields PortDetailPane
-    // / PacketFenceDevicePane read; histories and per-port rates stay empty
-    // until dedicated items are wired. FDB MACs are attached when applySnapshot
-    // captures them.
+    // / PacketFenceDevicePane read. Per-port histories aren't fetched (the
+    // snapshot's history bucket is per-KPI, not per-port) — that would need a
+    // dedicated per-port endpoint. Rates and errors come from the traffic
+    // bag, populated by applySnapshot.
     const FLAT60 = Array.from({ length: 60 }, () => 0);
-    const _fdbByKey = Object.create(null);
+    const _fdbByKey     = Object.create(null);
+    const _trafficByKey = Object.create(null);
+    window._tcsFdbByKey     = _fdbByKey;
+    window._tcsTrafficByKey = _trafficByKey;
+
     window.makePortDetail = function (memberIdx, port) {
         const k = `${memberIdx}.${port.n}`;
         const macs = _fdbByKey[k] || [];
+        const tr   = _trafficByKey[k] || null;
+
+        // Server gives us bytes/sec on each side. Convert to kbps for the
+        // detail panel, then derive a coarse utilization % off the port's
+        // assumed speed (default 1G = 1_000_000 kbps line rate).
+        const inKbps  = tr ? Math.round(((tr.in  || 0) * 8) / 1000 * 10) / 10 : 0;
+        const outKbps = tr ? Math.round(((tr.out || 0) * 8) / 1000 * 10) / 10 : 0;
+        const lineKbps = (port.speed || 1000) * 1000;
+        const utilPct  = lineKbps > 0 ? Math.min(100, Math.round((Math.max(inKbps, outKbps) / lineKbps) * 100)) : 0;
+
         return {
             label:      `${memberIdx}:${port.n}`,
             state:      port.state,
             speed:      port.speed || 0,
             poe:        !!port.poe,
             poeWatts:   0,
-            inKbps:     0,
-            outKbps:    0,
-            utilPct:    0,
+            inKbps,
+            outKbps,
+            utilPct,
             inHist:     FLAT60,
             outHist:    FLAT60,
             onlineHist: FLAT60.map(() => port.state === "up" ? "ok" : "off"),
-            errors1h:   0,
+            errors1h:   tr ? (tr.err || 0) : 0,
             discards1h: 0,
             device:     null,    // PacketFenceDevicePane shows empty-state on null
             extraMacs:  macs.length > 1 ? macs.length - 1 : 0,
@@ -99,8 +114,6 @@
             ageMin:     0
         };
     };
-    // Stash the bag so applySnapshot can repopulate it on each refresh.
-    window._tcsFdbByKey = _fdbByKey;
 
     /* --------------------------------------------------------------------- */
     /* Adapters: payload sections → window globals                           */
@@ -164,16 +177,26 @@
             ? members.map(m => Number(m.index)).filter(n => n > 0)
             : [...byMember.keys()].sort((a, b) => a - b);
 
+        // Standard Extreme convention: the last 4 ports per member are SFP+
+        // uplinks. Only split them off when there are enough regular ports
+        // (skip on a 4-or-fewer-port "member" — that's probably a tiny stack
+        // member, not a 48-port switch).
+        const SFP_COUNT = 4;
         const stack = [];
         for (const idx of memberIdxs) {
-            const list = (byMember.get(idx) || []).slice().sort((a, b) => a.n - b.n);
+            const full = (byMember.get(idx) || []).slice().sort((a, b) => a.n - b.n);
+            let list = full, sfp = [];
+            if (full.length > SFP_COUNT * 2) {
+                sfp = full.slice(-SFP_COUNT).map(p => ({ ...p, sfp: true }));
+                list = full.slice(0, -SFP_COUNT);
+            }
             stack.push({
                 idx,
                 ports: list,
-                sfp: [],
-                upCount:   list.filter(p => p.state === "up").length,
-                downCount: list.filter(p => p.state === "down").length,
-                poeCount:  list.filter(p => p.poe).length
+                sfp,
+                upCount:   full.filter(p => p.state === "up").length,
+                downCount: full.filter(p => p.state === "down").length,
+                poeCount:  full.filter(p => p.poe).length
             });
         }
         return stack.length ? stack : null;
@@ -209,6 +232,15 @@
         const problems = Array.isArray(snap.problems) ? snap.problems : [];
         const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
         const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
+        const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
+
+        // Per-port traffic — makePortDetail reads from this on demand so port
+        // clicks pick up the freshest rates without a second fetch.
+        const tbag = window._tcsTrafficByKey;
+        for (const k of Object.keys(tbag)) delete tbag[k];
+        for (const k of Object.keys(traffic)) {
+            tbag[k] = traffic[k];
+        }
 
         const stack = buildStack(members, ports, poe);
         if (stack) window.ARC_MDF_STACK = stack;

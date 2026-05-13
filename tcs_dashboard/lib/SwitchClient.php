@@ -193,7 +193,8 @@ class SwitchClient {
             'fdb'     => $fdb,
             'kpis'    => $kpis,
             'history' => $this->historyForKpis($kpis),
-            'uplinks' => $uplinks
+            'uplinks' => $this->uplinksFromTraffic($traffic = $this->extractTraffic($items)),
+            'traffic' => $traffic
         ];
     }
 
@@ -327,8 +328,16 @@ class SwitchClient {
         return $out;
     }
 
-    /** @param array<int,array<string,mixed>> $items */
-    private function extractUplinks(array $items, int $limit = 4): array {
+    /**
+     * Extract per-port traffic + errors from net.if.in/out/errors items.
+     * Returns one row per (m.p) key with bps values + error count, so
+     * uplinksFromTraffic can pick the top N and makePortDetail can read
+     * per-port rates without a second fetch.
+     *
+     * @param array<int,array<string,mixed>> $items
+     * @return array<string, array{in:float, out:float, err:int}>
+     */
+    private function extractTraffic(array $items): array {
         $by = [];
         foreach ($items as $it) {
             $k = (string) $it['key_'];
@@ -343,9 +352,13 @@ class SwitchClient {
             if ($kind === 'err') $by[$idx]['err'] = (int) $val;
             else                 $by[$idx][$kind] = $val;
         }
+        return $by;
+    }
 
+    /** @param array<string, array{in:float, out:float, err:int}> $traffic */
+    private function uplinksFromTraffic(array $traffic, int $limit = 4): array {
         $rows = [];
-        foreach ($by as $idx => $v) {
+        foreach ($traffic as $idx => $v) {
             $rows[] = [
                 'name'   => str_replace('.', ':', (string) $idx),
                 'type'   => '—',
