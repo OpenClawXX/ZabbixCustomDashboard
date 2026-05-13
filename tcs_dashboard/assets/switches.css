@@ -199,7 +199,8 @@
   background: #2a3245;
 }
 
-/* States: speed colors borrowed from Extreme switch UI conventions but recolored for our palette */
+/* States: link state colors the body uniformly (green when up). Speed lives
+   on the second LED only — see .led-speed.spd-* below. */
 .port.up .body {
   background: var(--ok);
   border-color: rgba(52,211,153,0.7);
@@ -216,10 +217,6 @@
 .port.up .led-speed.spd-25000,
 .port.up .led-speed.spd-40000,
 .port.up .led-speed.spd-100000 { background: #7c5cff; box-shadow: 0 0 4px rgba(124,92,255,0.85); }
-
-.port.up.spd-100 .body { background: #c9d62b; border-color: #a3b226; }
-.port.up.spd-10  .body { background: #f0a52c; border-color: #c4861f; }
-.port.up.spd-10000 .body { background: #2bd6c0; border-color: #1fa896; }
 
 .port.down .body { background: #0a0d14; }
 .port.down .led { background: var(--info); box-shadow: 0 0 3px var(--info); }

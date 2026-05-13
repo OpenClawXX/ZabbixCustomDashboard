@@ -235,6 +235,13 @@ const formatRate = (kbps) => {
   return [kbps.toFixed(1), "Kbps"];
 };
 
+// Log-scaled bar width for unbounded counters (errors / discards). 0 → 0%,
+// 1 error → small but visible, 100 → ~half, 10k+ → full bar.
+const countBarPct = (n) => {
+  if (!n || n <= 0) return 0;
+  return Math.min(100, Math.max(6, Math.log10(n + 1) * 25));
+};
+
 const PortDetailPane = ({ detail, onClose }) => {
   const [cycleState, setCycleState] = React.useState({ busy: false, msg: "" });
   const onCycle = React.useCallback(async () => {
@@ -334,14 +341,22 @@ const PortDetailPane = ({ detail, onClose }) => {
           </div>
           <div className="pd-row">
             <div className="pd-lbl">Errors 1H <Icon name="events" size={11} /></div>
-            <div className="pd-mid" />
+            <div className="pd-mid">
+              <div className="pd-util">
+                <i className={detail.errors1h > 0 ? "err" : ""} style={{width: `${countBarPct(detail.errors1h)}%`}}/>
+              </div>
+            </div>
             <div className={"pd-val " + (detail.errors1h > 0 ? "warn" : "muted")} style={{fontSize: 11}}>
               {detail.errors1h} <span style={{color:"var(--muted)"}}>(in {detail.errIn || 0} / out {detail.errOut || 0})</span>
             </div>
           </div>
           <div className="pd-row">
             <div className="pd-lbl">Discards 1H <Icon name="events" size={11} /></div>
-            <div className="pd-mid" />
+            <div className="pd-mid">
+              <div className="pd-util">
+                <i className={detail.discards1h > 0 ? "warn" : ""} style={{width: `${countBarPct(detail.discards1h)}%`}}/>
+              </div>
+            </div>
             <div className={"pd-val " + (detail.discards1h > 0 ? "warn" : "muted")} style={{fontSize: 11}}>
               {detail.discards1h} <span style={{color:"var(--muted)"}}>(in {detail.discIn || 0} / out {detail.discOut || 0})</span>
             </div>
