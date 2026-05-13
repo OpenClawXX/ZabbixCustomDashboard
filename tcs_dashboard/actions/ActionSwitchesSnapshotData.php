@@ -119,7 +119,16 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         }
 
         $pf = PFClient::fromMacros($macros);
-        $byMac = $pf->nodesByMac($macList);
+        $byMac    = $pf->nodesByMac($macList);
+        // Locationlog gives us the human role label + 802.1X username,
+        // neither of which appear on /nodes. Best-effort: if it fails we
+        // still emit the device card without role/user.
+        $locByMac = [];
+        try {
+            $locByMac = $pf->locationsByMac(array_keys($byMac) ?: $macList);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] pfNodes: locationlogs lookup failed: '.$e->getMessage());
+        }
 
         $bag = [];
         $hits = 0;
@@ -129,14 +138,32 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
             $member = (int) ($row['member'] ?? 0);
             $port   = (int) ($row['port']   ?? 0);
             if ($member <= 0 || $port <= 0) continue;
+
+            $dev = $byMac[$m];
+            $loc = $locByMac[$m] ?? null;
+            if ($loc) {
+                // Locationlog role is the human label ("Faculty", "Guest", …);
+                // /nodes only carried the numeric category_id. Prefer the
+                // label. Same for owner — dot1x_username is what the user
+                // actually authenticated as, which is more useful in the
+                // tile than the PF `pid` (registration owner).
+                $locRole = trim((string) ($loc['role'] ?? ''));
+                if ($locRole !== '') $dev['role'] = $locRole;
+                $dot1x = trim((string) ($loc['dot1x_username'] ?? ''));
+                if ($dot1x !== '') $dev['owner'] = $dot1x;
+                $dev['ssid']    = (string) ($loc['ssid'] ?? '');
+                $dev['vlan']    = (string) ($loc['vlan'] ?? '');
+                $dev['ifDesc']  = (string) ($loc['ifDesc'] ?? '');
+            }
+
             $key = $member.'.'.$port;
             $bag[$key] ??= [];
-            $bag[$key][] = $byMac[$m];
+            $bag[$key][] = $dev;
             $hits++;
         }
         error_log(sprintf(
-            '[tcs_dashboard] pfNodes: host=%s fdbMacs=%d pfMatched=%d ports=%d',
-            $hostid, count($macList), count($byMac), count($bag)
+            '[tcs_dashboard] pfNodes: host=%s fdbMacs=%d pfMatched=%d locMatched=%d ports=%d',
+            $hostid, count($macList), count($byMac), count($locByMac), count($bag)
         ));
         return $bag ?: new \stdClass();
     }

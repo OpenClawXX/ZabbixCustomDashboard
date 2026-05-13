@@ -176,6 +176,60 @@ class PFClient {
     }
 
     /**
+     * Latest locationlog entry per MAC — gives us the human role name,
+     * 802.1X username, VLAN, SSID, switch port, and ifDesc that the
+     * /nodes endpoint doesn't carry (nodes only has category_id, which
+     * is the numeric internal id, not the role label).
+     *
+     * One OR'd POST to /api/v1/locationlogs/search, sorted newest first,
+     * deduped to the first hit per MAC on the way out.
+     *
+     * @param array<int, string> $macs
+     * @return array<string, array<string, mixed>>  keyed by lowercased MAC
+     */
+    public function locationsByMac(array $macs): array {
+        $clean = [];
+        foreach ($macs as $m) {
+            $norm = strtolower(trim((string) $m));
+            if ($norm !== '') $clean[$norm] = true;
+        }
+        if (!$clean) return [];
+        $list = array_keys($clean);
+
+        $clauses = array_map(fn($m) => [
+            'op'    => 'equals',
+            'field' => 'mac',
+            'value' => $m
+        ], $list);
+
+        $body = [
+            'cursor' => 0,
+            // Buffer for stale entries; one MAC can have many locationlog rows.
+            'limit'  => max(100, count($list) * 4),
+            'sort'   => ['start_time DESC'],
+            'fields' => [
+                'mac', 'switch', 'switch_ip', 'port', 'vlan', 'role',
+                'ssid', 'connection_type', 'connection_sub_type',
+                'dot1x_username', 'realm', 'ifDesc', 'start_time', 'end_time'
+            ],
+            'query' => count($clauses) === 1
+                ? $clauses[0]
+                : ['op' => 'or', 'values' => $clauses]
+        ];
+
+        $rows = $this->call('POST', '/api/v1/locationlogs/search', [], $body);
+
+        // Pre-sorted DESC by start_time — first hit per MAC wins.
+        $out = [];
+        foreach (($rows['items'] ?? []) as $r) {
+            $mac = strtolower((string) ($r['mac'] ?? ''));
+            if ($mac === '' || isset($out[$mac])) continue;
+            $out[$mac] = $r;
+        }
+        return $out;
+    }
+
+    /**
      * Recent 802.1X auth failures (radius_audit_logs filtered to reject).
      *
      * @return array<int, array<string, mixed>>
