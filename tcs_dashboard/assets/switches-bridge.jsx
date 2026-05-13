@@ -179,7 +179,7 @@
                 : (macs.length > 1 ? macs.length - 1 : 0),
             macs,
             ifIndex:    (Number(memberIdx) || 1) * 1000 + (Number(port.n) || 0),
-            ageMin:     device ? pfAgeMin(pfPrimary.lastSeen) : 0
+            ageMin:     device ? pfAgeMin(device.lastSeen) : 0
         };
     };
 
