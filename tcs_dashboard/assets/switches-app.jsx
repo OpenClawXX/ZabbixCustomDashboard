@@ -12,7 +12,11 @@ const TWEAK_DEFAULTS_SW = /*EDITMODE-BEGIN*/{
 
 const SwitchesApp = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS_SW);
-  const [activeId, setActiveId] = useStateSWA(t.selectedSwitch);
+  // When the bridge bound a live switch, prefer its shortname over the
+  // sticky tweak so the navigator highlights the correct row on load.
+  const liveHost = (window.SWITCH_BOOT && window.SWITCH_BOOT.host) || null;
+  const initialId = liveHost ? (liveHost.host || liveHost.visible_name || t.selectedSwitch) : t.selectedSwitch;
+  const [activeId, setActiveId] = useStateSWA(initialId);
   const [selectedPort, setSelectedPort] = useStateSWA(() => {
     const m1 = window.ARC_MDF_STACK[0];
     const p = m1.ports.find(pp => pp.n === 18);

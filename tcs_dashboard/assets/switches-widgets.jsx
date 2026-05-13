@@ -3,10 +3,26 @@
 const { useState: useStateSW } = React;
 
 // ───────── Host Navigator ─────────
+// activeId can be either a numeric hostid (live data) or a host shortname
+// (mock data fallback). Rows with a `hostid` field navigate to that switch
+// by reloading the page with ?switchid=<hostid>; rows without it fall back
+// to onSelect() for in-page selection (mock mode).
 const HostNavigator = ({ activeId, onSelect }) => {
   const [sites, setSites] = useStateSW(window.SWITCH_SITES);
   const toggle = (idx) => {
     setSites(sites.map((s, i) => i === idx ? { ...s, expanded: !s.expanded } : s));
+  };
+  const isActive = (sw) => {
+    if (!activeId) return !!sw.selected;
+    const a = String(activeId);
+    return a === String(sw.hostid || "") || a === String(sw.id);
+  };
+  const onRowClick = (sw) => {
+    if (sw.hostid && typeof window.tcsNavigateSwitch === "function") {
+      window.tcsNavigateSwitch(sw.hostid);
+      return;
+    }
+    onSelect(sw.id);
   };
   return (
     <div className="card">
@@ -32,9 +48,10 @@ const HostNavigator = ({ activeId, onSelect }) => {
             <div className={"host-nav-children" + (site.expanded ? "" : " hidden")}>
               {site.switches.map(sw => (
                 <div
-                  key={sw.id}
-                  className={"host-nav-host" + (sw.id === activeId ? " active" : "")}
-                  onClick={() => onSelect(sw.id)}
+                  key={sw.hostid || sw.id}
+                  className={"host-nav-host" + (isActive(sw) ? " active" : "")}
+                  onClick={() => onRowClick(sw)}
+                  title={sw.ip ? `${sw.id} · ${sw.ip}` : sw.id}
                 >
                   <span className="h-id">{sw.id}</span>
                   {sw.problems > 0 && <span className="h-prob">●</span>}

@@ -25,9 +25,21 @@
     const poe     = Array.isArray(boot.poe)     ? boot.poe     : [];
     const members = Array.isArray(boot.members) ? boot.members : [];
     const fdb     = Array.isArray(boot.fdb)     ? boot.fdb     : [];
+    const fleet   = Array.isArray(boot.fleet)   ? boot.fleet   : [];
 
     // Expose the bound hostid so the CYCLE button can POST without prop-drilling.
     window.TCS_SWITCH_HOSTID = host ? String(host.hostid || "") : "";
+
+    // Navigation helper: change page to the selected switch. Used by the
+    // HostNavigator click handler. Reads window.location so the rest of the
+    // query string (e.g. tweak overrides) is preserved.
+    window.tcsNavigateSwitch = function (hostid) {
+        if (!hostid) return;
+        const params = new URLSearchParams(window.location.search);
+        params.set("action", "tcs.switches.view");
+        params.set("switchid", String(hostid));
+        window.location.search = "?" + params.toString();
+    };
 
     /* --------------------------------------------------------------------- */
     /* Stack / port grid                                                     */
@@ -104,15 +116,32 @@
     /* Fleet listing                                                         */
     /* --------------------------------------------------------------------- */
 
-    // Until a fleet collector exists, splice the bound switch into the mock
-    // SWITCH_SITES so it appears as the selected host with real counters.
-    if (host && Array.isArray(window.SWITCH_SITES)) {
+    // When the server discovered a fleet, replace the mock SWITCH_SITES
+    // entirely. Mark the currently-bound switch as selected so the navigator
+    // highlights it. If no fleet came back (e.g. EXOS template not yet
+    // imported), keep the mock data so the page still demos.
+    if (fleet.length) {
+        const activeHostid = host ? String(host.hostid || "") : "";
+        const activeHost   = host ? String(host.host || "")   : "";
+        window.SWITCH_SITES = fleet.map(site => ({
+            ...site,
+            switches: (site.switches || []).map(sw => ({
+                ...sw,
+                selected: activeHostid !== ""
+                    ? String(sw.hostid) === activeHostid
+                    : sw.id === activeHost
+            }))
+        }));
+    } else if (host && Array.isArray(window.SWITCH_SITES)) {
+        // Fallback: no fleet from server but we do have a bound host —
+        // splice it in so users see real counters for the selected switch.
         const upCount   = ports.filter(p => Number(p.status) === 1).length;
         const downCount = ports.filter(p => Number(p.status) === 2).length;
         const poeCount  = poe.filter(p => poeDelivering(p.status)).length;
 
         const liveRow = {
             id:       host.host || host.visible_name || String(host.hostid),
+            hostid:   String(host.hostid || ""),
             ip:       host.ip || "",
             model:    "—",
             members:  Math.max(1, members.length || 1),
