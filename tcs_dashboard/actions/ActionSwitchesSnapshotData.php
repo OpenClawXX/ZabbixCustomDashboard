@@ -72,7 +72,7 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         }
 
         try {
-            $payload['pfNodes'] = $this->collectPfNodes($hostid, $payload['host'] ?? null);
+            $payload['pfNodes'] = $this->collectPfNodes($hostid, $payload['fdb'] ?? []);
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] snapshot.data pfNodes: '.$e->getMessage());
             $payload['pfNodes'] = new \stdClass();
@@ -84,76 +84,61 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
     }
 
     /**
-     * Pull PacketFence nodes currently associated with this switch and bucket
-     * them by "member.port" so the React port-detail can light up the
-     * PacketFence tile from a snapshot read.
+     * Drive the PF lookup off the switch's own FDB instead of trying to
+     * filter PF nodes by `locationlog.switch` (which PF v11+ doesn't
+     * support on /api/v1/nodes). The FDB already gives us every MAC the
+     * switch has learned + its member.port; we just enrich each MAC with
+     * PF's registration / fingerprint / hostname data.
      *
-     * Returns a map { "m.p" => [device, ...] }. Multiple devices per port are
-     * common (uplinks, hubs); the first row is treated as primary, additional
-     * rows feed the "N MACS" badge.
-     *
+     * @param array<int, array{member:int|string, port:int|string, mac:string}> $fdb
      * @return array<string, array<int, array<string, mixed>>>|\stdClass
      */
-    private function collectPfNodes(string $hostid, ?array $host) {
+    private function collectPfNodes(string $hostid, array $fdb) {
         $macros = $this->resolvePfMacros($hostid);
         if ($macros === null) {
             error_log('[tcs_dashboard] pfNodes: skipped — {$PF.URL/USER/PASSWORD} not set on host '.$hostid);
             return new \stdClass();
         }
+        if (!$fdb) {
+            error_log('[tcs_dashboard] pfNodes: FDB empty for host '.$hostid.' — nothing to enrich');
+            return new \stdClass();
+        }
 
-        // PF stores switches by whatever identifier was set in switches.conf —
-        // usually IP, sometimes hostname (or visible_name). OR all three so we
-        // hit regardless of how the operator configured it.
-        $candidates = array_values(array_unique(array_filter([
-            (string) ($host['host']         ?? ''),
-            (string) ($host['visible_name'] ?? ''),
-            (string) ($host['ip']           ?? ''),
-        ], fn($s) => $s !== '')));
-        if (!$candidates) {
-            error_log('[tcs_dashboard] pfNodes: no switch identifier on host '.$hostid);
+        // Collect unique MACs across the whole FDB so we batch into one
+        // PF search call rather than one-per-port. Port-bucketing happens
+        // on the way back out.
+        $macs = [];
+        foreach ($fdb as $row) {
+            $m = strtolower(trim((string) ($row['mac'] ?? '')));
+            if ($m !== '') $macs[$m] = true;
+        }
+        $macList = array_keys($macs);
+        if (!$macList) {
+            error_log('[tcs_dashboard] pfNodes: no MACs in FDB for host '.$hostid);
             return new \stdClass();
         }
 
         $pf = PFClient::fromMacros($macros);
-        $devices = $pf->devicesOnSwitch($candidates);
+        $byMac = $pf->nodesByMac($macList);
 
         $bag = [];
-        $skipped = 0;
-        foreach ($devices as $d) {
-            $idx = self::parseIfIndex((string) ($d['port'] ?? ''));
-            if ($idx === null) { $skipped++; continue; }
-            $key = $idx[0].'.'.$idx[1];
+        $hits = 0;
+        foreach ($fdb as $row) {
+            $m = strtolower(trim((string) ($row['mac'] ?? '')));
+            if ($m === '' || !isset($byMac[$m])) continue;
+            $member = (int) ($row['member'] ?? 0);
+            $port   = (int) ($row['port']   ?? 0);
+            if ($member <= 0 || $port <= 0) continue;
+            $key = $member.'.'.$port;
             $bag[$key] ??= [];
-            $bag[$key][] = $d;
+            $bag[$key][] = $byMac[$m];
+            $hits++;
         }
         error_log(sprintf(
-            '[tcs_dashboard] pfNodes: host=%s candidates=[%s] devices=%d bucketed=%d skipped=%d',
-            $hostid, implode(',', $candidates), count($devices), count($bag), $skipped
+            '[tcs_dashboard] pfNodes: host=%s fdbMacs=%d pfMatched=%d ports=%d',
+            $hostid, count($macList), count($byMac), count($bag)
         ));
         return $bag ?: new \stdClass();
-    }
-
-    /**
-     * Decode PF's `locationlog.port` (SNMP ifIndex string) into [member, port]
-     * using the Extreme EXOS encoding (idx = 1000 * member + port). Mirrors
-     * SwitchClient::parseMemberPort's ifIndex branch.
-     *
-     * @return array{0:int,1:int}|null
-     */
-    private static function parseIfIndex(string $port): ?array {
-        $port = trim($port);
-        if ($port === '') return null;
-        if (preg_match('/^(\d+)\.(\d+)$/', $port, $m)) {
-            return [(int) $m[1], (int) $m[2]];
-        }
-        if (!preg_match('/^\d+$/', $port)) return null;
-        $idx = (int) $port;
-        if ($idx <= 0) return null;
-        if ($idx < 1000) return [1, $idx];
-        $member = intdiv($idx, 1000);
-        $p      = $idx % 1000;
-        if ($member < 1 || $member > 8 || $p <= 0) return null;
-        return [$member, $p];
     }
 
     /**

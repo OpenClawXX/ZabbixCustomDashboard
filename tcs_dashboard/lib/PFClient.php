@@ -105,63 +105,66 @@ class PFClient {
     }
 
     /**
-     * Rich per-node detail for every device PF currently associates with a
-     * switch. Returns the full field set the Port Detail card consumes — IP,
-     * hostname, vendor/OS fingerprint, owner, role, last-seen / arp / dhcp
-     * timestamps, and the SNMP ifIndex (locationlog.port) needed to bucket
-     * the row to a member.port.
+     * Rich per-node detail for an explicit list of MACs. Returns the full
+     * field set the Port Detail card consumes, keyed by lowercased MAC.
      *
-     * PF stores `locationlog.switch` as whatever NAS identifier the operator
-     * configured in conf/switches.conf — usually the IP, sometimes the
-     * hostname. Caller can pass any number of candidate identifiers; we OR
-     * them together in a single search query.
+     * PF v11+ doesn't support filtering /api/v1/nodes by `locationlog.switch`
+     * (locationlog is a separate table linked by MAC), so the working pf_device
+     * reference resolves the per-switch MAC list out-of-band (FDB / bridge
+     * table on the switch) and looks each MAC up here. We do the same — the
+     * FDB already comes back in the snapshot via SwitchClient.
      *
-     * Uses POST /api/v1/nodes/search (the canonical PF v11+ search surface)
-     * rather than GET /api/v1/nodes with flat query params — the GET form
-     * silently ignores nested-field filters on most PF builds.
+     * Uses POST /api/v1/nodes/search with an OR'd MAC-equals query.
      *
-     * @param array<int, string>|string $switchIds
-     * @return array<int, array<string, mixed>>
+     * @param array<int, string> $macs
+     * @return array<string, array<string, mixed>>  keyed by lowercased MAC
      */
-    public function devicesOnSwitch($switchIds, int $limit = 500): array {
-        $ids = is_array($switchIds) ? $switchIds : [(string) $switchIds];
-        $ids = array_values(array_filter(array_map('strval', $ids), fn($s) => $s !== ''));
-        if (!$ids) return [];
+    public function nodesByMac(array $macs): array {
+        $clean = [];
+        foreach ($macs as $m) {
+            $norm = strtolower(trim((string) $m));
+            if ($norm === '') continue;
+            $clean[$norm] = true;
+        }
+        if (!$clean) return [];
+        $list = array_keys($clean);
 
-        $values = array_map(fn($id) => [
-            'field' => 'locationlog.switch',
+        $clauses = array_map(fn($m) => [
             'op'    => 'equals',
-            'value' => $id
-        ], $ids);
+            'field' => 'mac',
+            'value' => $m
+        ], $list);
 
         $body = [
-            'query' => count($values) === 1
-                ? $values[0]
-                : ['op' => 'or', 'values' => $values],
+            'cursor' => 0,
+            'limit'  => max(25, count($list) + 10),
+            'sort'   => ['mac ASC'],
             'fields' => [
                 'mac', 'pid', 'computername', 'status', 'category_id',
-                'device_class', 'device_type', 'device_manufacturer',
+                'device_class', 'device_type', 'device_manufacturer', 'device_version',
                 'dhcp_fingerprint', 'dhcp_vendor',
                 'last_seen', 'last_arp', 'last_dhcp',
-                'ip4log.ip', 'locationlog.switch', 'locationlog.port'
+                'ip4log.ip'
             ],
-            'limit' => $limit,
-            'sort'  => ['last_seen DESC']
+            'query'  => count($clauses) === 1
+                ? $clauses[0]
+                : ['op' => 'or', 'values' => $clauses]
         ];
 
         $rows = $this->call('POST', '/api/v1/nodes/search', [], $body);
 
         $out = [];
         foreach (($rows['items'] ?? []) as $r) {
-            $out[] = [
-                'mac'      => (string) ($r['mac'] ?? ''),
+            $mac = strtolower((string) ($r['mac'] ?? ''));
+            if ($mac === '') continue;
+            $out[$mac] = [
+                'mac'      => $mac,
                 'host'     => (string) ($r['computername'] ?? ''),
                 'ip'       => (string) ($r['ip4log.ip'] ?? ''),
-                'port'     => (string) ($r['locationlog.port'] ?? ''),
                 'reg'      => strtolower((string) ($r['status'] ?? '')) === 'reg' ? 'REG' : 'UNREG',
                 'role'     => (string) ($r['category_id'] ?? ''),
                 'vendor'   => (string) ($r['device_manufacturer'] ?? $r['device_class'] ?? ''),
-                'os'       => (string) ($r['device_type'] ?? ''),
+                'os'       => (string) ($r['device_type'] ?? ($r['device_class'] ?? '')),
                 'owner'    => (string) ($r['pid'] ?? ''),
                 'dhcpFp'   => (string) ($r['dhcp_fingerprint'] ?? $r['dhcp_vendor'] ?? ''),
                 'lastSeen' => (string) ($r['last_seen'] ?? ''),
@@ -262,7 +265,9 @@ class PFClient {
         $this->ensureToken();
 
         [$status, $payload] = $this->raw($method, $path, $query, $body, [
-            'Authorization: Bearer '.($this->token ?? '')
+            // PF accepts the raw token (no "Bearer " prefix) — confirmed against the
+            // pf_device reference client in jerahl/ZabbixSwitchPortWidgets.
+            'Authorization: '.($this->token ?? '')
         ]);
 
         if ($status === 401) {
@@ -273,7 +278,9 @@ class PFClient {
             $this->ensureToken();
 
             [$status, $payload] = $this->raw($method, $path, $query, $body, [
-                'Authorization: Bearer '.($this->token ?? '')
+                // PF accepts the raw token (no "Bearer " prefix) — confirmed against the
+            // pf_device reference client in jerahl/ZabbixSwitchPortWidgets.
+            'Authorization: '.($this->token ?? '')
             ]);
         }
 
