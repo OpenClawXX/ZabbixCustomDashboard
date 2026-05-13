@@ -7,7 +7,8 @@ const TWEAK_DEFAULTS_SW = /*EDITMODE-BEGIN*/{
   "accent": "#d92929",
   "showSourceBadges": true,
   "selectedSwitch": "ARC-MDF",
-  "portStyle": "filled"
+  "portStyle": "filled",
+  "activeTab": "ports"
 }/*EDITMODE-END*/;
 
 const SwitchesApp = () => {
@@ -17,6 +18,7 @@ const SwitchesApp = () => {
   const liveHost = (window.SWITCH_BOOT && window.SWITCH_BOOT.host) || null;
   const initialId = liveHost ? (liveHost.host || liveHost.visible_name || t.selectedSwitch) : t.selectedSwitch;
   const [activeId, setActiveId] = useStateSWA(initialId);
+  const [activeTab, setActiveTab] = useStateSWA(t.activeTab || "ports");
   const [selectedPort, setSelectedPort] = useStateSWA(() => {
     const m1 = window.ARC_MDF_STACK[0];
     const p = m1.ports.find(pp => pp.n === 18);
@@ -68,29 +70,77 @@ const SwitchesApp = () => {
         </div>
 
         <div className="tabs">
-          <div className="tab active">Port Status</div>
-          <div className="tab">Topology</div>
-          <div className="tab">Stack Health</div>
-          <div className="tab">VLAN / EAPS</div>
-          <div className="tab">PoE Budget</div>
-          <div className="tab">Macros · CLI</div>
-          <div className="tab">Triggers <span className="badge warn">3</span></div>
-          <div className="tab">Config Backups</div>
+          {window.SWITCH_TABS.map(tab => (
+            <div
+              key={tab.id}
+              className={"tab" + (activeTab === tab.id ? " active" : "")}
+              onClick={() => { setActiveTab(tab.id); setTweak("activeTab", tab.id); }}
+            >
+              {tab.label}
+              {tab.badge && <span className={"badge " + tab.badge.kind}>{tab.badge.v}</span>}
+            </div>
+          ))}
         </div>
 
-        <div className="body" data-screen-label="Switches Dashboard">
-          <StackKPIs host={host} />
-          <div className="switch-layout">
-            <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
-              <SwitchPortWidget host={host} selected={selectedPort} onSelectPort={onSelectPort} />
-              <PortDetailRow host={host} detail={selectedPort ? selectedPort.detail : null} />
-              <UplinkTable />
+        <div className="body" data-screen-label={`Switches Dashboard · ${activeTab}`}>
+          {activeTab === "ports" && (
+            <React.Fragment>
+              <StackKPIs host={host} />
+              <div className="switch-layout">
+                <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+                <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
+                  <SwitchPortWidget host={host} selected={selectedPort} onSelectPort={onSelectPort} />
+                  <PortDetailRow host={host} detail={selectedPort ? selectedPort.detail : null} />
+                  <UplinkTable />
+                </div>
+              </div>
+              <div className="switch-problems-row">
+                <ProblemsWidget />
+              </div>
+            </React.Fragment>
+          )}
+          {activeTab === "topo" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabTopology host={host} />
             </div>
-          </div>
-          <div className="switch-problems-row">
-            <ProblemsWidget />
-          </div>
+          )}
+          {activeTab === "health" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabStackHealth />
+            </div>
+          )}
+          {activeTab === "vlan" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabVlanEaps />
+            </div>
+          )}
+          {activeTab === "poe" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabPoe />
+            </div>
+          )}
+          {activeTab === "macros" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabMacros host={host} />
+            </div>
+          )}
+          {activeTab === "triggers" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabTriggers />
+            </div>
+          )}
+          {activeTab === "backups" && (
+            <div className="switch-layout-2col">
+              <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+              <TabBackups />
+            </div>
+          )}
         </div>
       </div>
 

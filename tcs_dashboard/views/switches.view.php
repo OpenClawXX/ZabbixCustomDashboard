@@ -75,4 +75,5 @@ $asset_base = 'modules/tcs_dashboard/assets';
 <script type="text/babel" src="<?= $asset_base ?>/switches-data.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/switches-bridge.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/switches-widgets.jsx"></script>
+<script type="text/babel" src="<?= $asset_base ?>/switches-tabs.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/switches-app.jsx"></script>
