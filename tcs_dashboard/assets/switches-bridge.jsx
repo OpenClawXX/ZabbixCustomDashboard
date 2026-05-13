@@ -131,25 +131,39 @@
     const poeDelivering = (s) => Number(s) === 3;
 
     function buildStack(members, ports, poe) {
-        // Union the (member, port) keys observed across BOTH port-status and
-        // PoE items. Some EXOS templates expose PoE per port but no
-        // ifOperStatus item — in that case we still want to render the grid
-        // using PoE delivery state as a coarse up/down hint.
-        const portByKey = Object.create(null);
+        const speedByKey = window._tcsSpeedByKey || {};
+        const portByKey  = Object.create(null);
         for (const p of ports) portByKey[`${p.member}.${p.port}`] = p;
-        const poeByKey = Object.create(null);
-        for (const p of poe) poeByKey[`${p.member}.${p.port}`] = poeDelivering(p.status);
+        const poeByKey   = Object.create(null);
+        const poePresent = Object.create(null);   // any PoE item, even "searching"
+        for (const p of poe) {
+            poeByKey[`${p.member}.${p.port}`] = poeDelivering(p.status);
+            poePresent[`${p.member}.${p.port}`] = true;
+        }
 
         const keys = new Set();
         for (const k of Object.keys(portByKey)) keys.add(k);
-        for (const k of Object.keys(poeByKey))  keys.add(k);
+        for (const k of Object.keys(poePresent)) keys.add(k);
         if (!keys.size) return null;
+
+        // Compute per-member highest port number that has ANY PoE item. Ports
+        // numbered above that are SFP/uplink (Extreme convention: PoE LLD walks
+        // the copper ports; SFP cages don't appear in the PoE table). Members
+        // with zero PoE items skip the split (probably a non-PoE switch — all
+        // regular).
+        const maxPoePortByMember = new Map();
+        for (const key of Object.keys(poePresent)) {
+            const [mStr, pStr] = key.split(".");
+            const m = Number(mStr), p = Number(pStr);
+            const cur = maxPoePortByMember.get(m) || 0;
+            if (p > cur) maxPoePortByMember.set(m, p);
+        }
 
         const byMember = new Map();
         for (const key of keys) {
-            const [memberStr, portStr] = key.split(".");
-            const m = Number(memberStr) || 1;
-            const portNum = Number(portStr) || 0;
+            const [mStr, pStr] = key.split(".");
+            const m = Number(mStr) || 1;
+            const portNum = Number(pStr) || 0;
             const portRow = portByKey[key];
             const isDelivering = !!poeByKey[key];
 
@@ -157,42 +171,36 @@
             if (portRow) {
                 state = ifOperToState(portRow.status);
             } else {
-                // No ifOperStatus item — infer link from PoE delivery.
                 state = isDelivering ? "up" : "down";
             }
+
+            const speed = Number(speedByKey[key]) || (state === "up" ? 1000 : 0);
+            const maxPoe = maxPoePortByMember.get(m) || 0;
+            const isSfp = maxPoe > 0 && portNum > maxPoe;
 
             if (!byMember.has(m)) byMember.set(m, []);
             byMember.get(m).push({
                 n: portNum,
                 state,
-                speed: 1000,
+                speed,
                 poe: isDelivering,
-                alert: false
+                alert: false,
+                sfp: isSfp
             });
         }
 
-        // Members from explicit stacking items OR derived from observed
-        // member indices on the port keys themselves.
         const memberIdxs = members.length
             ? members.map(m => Number(m.index)).filter(n => n > 0)
             : [...byMember.keys()].sort((a, b) => a - b);
 
-        // Standard Extreme convention: the last 4 ports per member are SFP+
-        // uplinks. Only split them off when there are enough regular ports
-        // (skip on a 4-or-fewer-port "member" — that's probably a tiny stack
-        // member, not a 48-port switch).
-        const SFP_COUNT = 4;
         const stack = [];
         for (const idx of memberIdxs) {
             const full = (byMember.get(idx) || []).slice().sort((a, b) => a.n - b.n);
-            let list = full, sfp = [];
-            if (full.length > SFP_COUNT * 2) {
-                sfp = full.slice(-SFP_COUNT).map(p => ({ ...p, sfp: true }));
-                list = full.slice(0, -SFP_COUNT);
-            }
+            const regular = full.filter(p => !p.sfp);
+            const sfp     = full.filter(p =>  p.sfp);
             stack.push({
                 idx,
-                ports: list,
+                ports: regular,
                 sfp,
                 upCount:   full.filter(p => p.state === "up").length,
                 downCount: full.filter(p => p.state === "down").length,
@@ -233,6 +241,10 @@
         const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
         const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
         const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
+        const speeds   = (snap.speeds  && typeof snap.speeds  === "object") ? snap.speeds  : {};
+
+        // Stash speeds for buildStack to consume.
+        window._tcsSpeedByKey = speeds;
 
         // Per-port traffic — makePortDetail reads from this on demand so port
         // clicks pick up the freshest rates without a second fetch.

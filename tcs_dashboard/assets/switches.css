@@ -206,7 +206,16 @@
   box-shadow: 0 0 4px rgba(52,211,153,0.35) inset;
 }
 .port.up .led { background: rgba(255,255,255,0.92); box-shadow: 0 0 3px rgba(255,255,255,0.6); }
-.port.up.poe .led:first-child { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
+.port.up.poe .led-link { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
+
+/* Second LED indicates link speed when the port is up. */
+.port.up .led-speed.spd-10     { background: #f0a52c; box-shadow: 0 0 3px rgba(240,165,44,0.7); }
+.port.up .led-speed.spd-100    { background: #c9d62b; box-shadow: 0 0 3px rgba(201,214,43,0.7); }
+.port.up .led-speed.spd-1000   { background: var(--ok); box-shadow: 0 0 3px rgba(52,211,153,0.7); }
+.port.up .led-speed.spd-10000  { background: #2bd6c0; box-shadow: 0 0 4px rgba(43,214,192,0.85); }
+.port.up .led-speed.spd-25000,
+.port.up .led-speed.spd-40000,
+.port.up .led-speed.spd-100000 { background: #7c5cff; box-shadow: 0 0 4px rgba(124,92,255,0.85); }
 
 .port.up.spd-100 .body { background: #c9d62b; border-color: #a3b226; }
 .port.up.spd-10  .body { background: #f0a52c; border-color: #c4861f; }

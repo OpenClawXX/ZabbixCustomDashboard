@@ -105,8 +105,8 @@ const Port = ({ p, selected, onClick }) => {
     <div className={cls} onClick={onClick} title={`Port ${p.n} · ${p.state}${p.state === "up" ? " · " + speedLbl : ""}${p.poe ? " · PoE" : ""}`}>
       <div className="pn">{p.n}</div>
       <div className="body">
-        <span className="led" />
-        <span className="led" />
+        <span className="led led-link" />
+        <span className={"led led-speed " + speedClass} />
       </div>
       <div style={{ height: 4 }} />
     </div>

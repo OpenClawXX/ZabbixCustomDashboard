@@ -196,8 +196,38 @@ class SwitchClient {
             'kpis'    => $kpis,
             'history' => $this->historyForKpis($kpis),
             'uplinks' => $this->uplinksFromTraffic($traffic = $this->extractTraffic($items)),
-            'traffic' => $traffic
+            'traffic' => $traffic,
+            'speeds'  => $this->extractSpeeds($items)
         ];
+    }
+
+    /**
+     * Per-port link speed in Mbps, keyed by "m.p". Template item:
+     *   net.if.speed[ifHighSpeed.{#SNMPINDEX}]    (Mbps)
+     * Older templates ship the same data as ifSpeed in bps via
+     *   net.if.speed[ifSpeed.{#SNMPINDEX}]        — convert bps → Mbps.
+     *
+     * @param array<int,array<string,mixed>> $items
+     * @return array<string, int>
+     */
+    private function extractSpeeds(array $items): array {
+        $out = [];
+        foreach ($items as $it) {
+            $k = (string) $it['key_'];
+            $idx = null; $unitDivisor = 1;
+            $idx = self::parseMemberPort($k, 'net.if.speed[ifHighSpeed.');
+            if ($idx === null) {
+                $idx = self::parseMemberPort($k, 'net.if.speed[ifSpeed.');
+                if ($idx !== null) $unitDivisor = 1_000_000;  // bps → Mbps
+            }
+            if ($idx === null) continue;
+
+            [$member, $port] = $idx;
+            $mbps = (int) round(((float) $it['lastvalue']) / $unitDivisor);
+            if ($mbps <= 0) continue;
+            $out[$member.'.'.$port] = $mbps;
+        }
+        return $out;
     }
 
     /* ------------------------------------------------------------------ */
