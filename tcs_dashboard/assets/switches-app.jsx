@@ -139,9 +139,6 @@ const SwitchesApp = () => {
                   <UplinkTable />
                 </div>
               </div>
-              <div className="switch-problems-row">
-                <ProblemsWidget />
-              </div>
             </React.Fragment>
           )}
           {activeTab === "topo" && (
