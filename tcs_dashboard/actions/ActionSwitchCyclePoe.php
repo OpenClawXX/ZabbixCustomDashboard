@@ -138,30 +138,75 @@ class ActionSwitchCyclePoe extends CController {
     }
 
     /**
+     * Resolve {$RCONFIG.*} macros through the host → linked templates →
+     * global chain. Host-level wins, then template-inherited, then
+     * globals — matching how Zabbix itself resolves macros at runtime.
+     *
+     * Secret macros come through fine via output=['macro','value'] as
+     * long as the requesting user has read access (admin does).
+     *
      * @return array{url:string, token:string, verify_ssl:bool, snippet_id:int, device_id:?int}|null
      */
     private function resolveRConfigMacros(string $hostid): ?array {
-        $rows = API::UserMacro()->get([
+        $names = [
+            '{$RCONFIG.URL}',
+            '{$RCONFIG.TOKEN}',
+            '{$RCONFIG.POE_SNIPPET_ID}',
+            '{$RCONFIG.DEVICE_ID}',
+            '{$RCONFIG.VERIFY.SSL}'
+        ];
+        $bag = [];
+
+        // 1. Global macros (lowest precedence).
+        $globals = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => $names]
+        ]) ?: [];
+        foreach ($globals as $r) $bag[$r['macro']] = (string) $r['value'];
+
+        // 2. Template-inherited macros.
+        $hosts = API::Host()->get([
+            'output'                => ['hostid'],
+            'hostids'               => [$hostid],
+            'selectParentTemplates' => ['templateid']
+        ]) ?: [];
+        $templateIds = [];
+        if ($hosts) {
+            foreach (($hosts[0]['parentTemplates'] ?? []) as $t) {
+                $templateIds[] = $t['templateid'];
+            }
+        }
+        if ($templateIds) {
+            $tpl = API::UserMacro()->get([
+                'output'  => ['macro', 'value'],
+                'hostids' => $templateIds,
+                'filter'  => ['macro' => $names]
+            ]) ?: [];
+            foreach ($tpl as $r) $bag[$r['macro']] = (string) $r['value'];
+        }
+
+        // 3. Host-level (highest precedence).
+        $hostRows = API::UserMacro()->get([
             'output'  => ['macro', 'value'],
             'hostids' => [$hostid],
-            'filter'  => ['macro' => [
-                '{$RCONFIG.URL}',
-                '{$RCONFIG.TOKEN}',
-                '{$RCONFIG.POE_SNIPPET_ID}',
-                '{$RCONFIG.DEVICE_ID}',
-                '{$RCONFIG.VERIFY.SSL}'
-            ]]
+            'filter'  => ['macro' => $names]
         ]) ?: [];
-
-        $bag = [];
-        foreach ($rows as $r) {
-            $bag[$r['macro']] = (string) $r['value'];
-        }
+        foreach ($hostRows as $r) $bag[$r['macro']] = (string) $r['value'];
 
         $url     = $bag['{$RCONFIG.URL}'] ?? '';
         $token   = $bag['{$RCONFIG.TOKEN}'] ?? '';
         $snippet = (int) ($bag['{$RCONFIG.POE_SNIPPET_ID}'] ?? 0);
-        if ($url === '' || $token === '' || $snippet <= 0) return null;
+        if ($url === '' || $token === '' || $snippet <= 0) {
+            error_log(sprintf(
+                '[tcs_dashboard] cyclepoe: macros missing — url=%s token=%s snippet=%s (host %s + %d template(s) + globals)',
+                $url !== '' ? 'set' : 'EMPTY',
+                $token !== '' ? 'set' : 'EMPTY',
+                $snippet > 0 ? (string) $snippet : 'EMPTY',
+                $hostid, count($templateIds)
+            ));
+            return null;
+        }
 
         $deviceMacro = isset($bag['{$RCONFIG.DEVICE_ID}']) && $bag['{$RCONFIG.DEVICE_ID}'] !== ''
             ? (int) $bag['{$RCONFIG.DEVICE_ID}']
