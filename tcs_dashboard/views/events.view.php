@@ -6,6 +6,12 @@
  */
 
 $asset_base = 'modules/tcs_dashboard/assets';
+$asset_dir  = __DIR__.'/../assets';
+$v = static function (string $rel) use ($asset_base, $asset_dir): string {
+    $abs = $asset_dir.'/'.$rel;
+    $mt  = @filemtime($abs) ?: time();
+    return $asset_base.'/'.$rel.'?v='.$mt;
+};
 ?>
 <style>
     body > header, body > nav, body > aside, body > footer, body > .menu-main, body > .header-title, .wrapper > footer, footer[role="contentinfo"], .msg-global-footer, #page-footer { display: none !important; }
@@ -17,9 +23,9 @@ $asset_base = 'modules/tcs_dashboard/assets';
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="<?= $asset_base ?>/styles.css">
-<link rel="stylesheet" href="<?= $asset_base ?>/global.css">
-<link rel="stylesheet" href="<?= $asset_base ?>/events.css">
+<link rel="stylesheet" href="<?= $v('styles.css') ?>">
+<link rel="stylesheet" href="<?= $v('global.css') ?>">
+<link rel="stylesheet" href="<?= $v('events.css') ?>">
 
 <style>
     html.hide-src-badges .src-badge { display: none !important; }
@@ -39,15 +45,17 @@ $asset_base = 'modules/tcs_dashboard/assets';
 
 <script>
     window.EVENTS_BOOT          = <?= json_encode($data['boot'] ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-    window.TCS_EVENTS_DATA_URL  = "zabbix.php?action=tcs.events.data";
+    window.TCS_EVENTS_DATA_URL   = "zabbix.php?action=tcs.events.data";
+    window.TCS_EVENTS_UPDATE_URL = "zabbix.php?action=tcs.events.update";
+    window.TCS_HOST_VIEW_URL     = "zabbix.php?action=host.dashboard.view";
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 
-<script type="text/babel" src="<?= $asset_base ?>/tweaks-panel.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/primitives.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/global-nav.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/events-bridge.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/events-app.jsx"></script>
+<script type="text/babel" src="<?= $v('tweaks-panel.jsx') ?>"></script>
+<script type="text/babel" src="<?= $v('primitives.jsx') ?>"></script>
+<script type="text/babel" src="<?= $v('global-nav.jsx') ?>"></script>
+<script type="text/babel" src="<?= $v('events-bridge.jsx') ?>"></script>
+<script type="text/babel" src="<?= $v('events-app.jsx') ?>"></script>

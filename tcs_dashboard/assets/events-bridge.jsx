@@ -76,5 +76,57 @@
         return fetchNow();
     };
 
+    // POST helper for acknowledge / suppress / sev change / close / message.
+    // opts: { action: int bitmask, message?, severity?, suppress_until? }
+    window.tcsEventsUpdate = async (eventids, opts) => {
+        const updateUrl = window.TCS_EVENTS_UPDATE_URL;
+        if (!updateUrl) return { ok: false, error: "no update url" };
+        const ids = (Array.isArray(eventids) ? eventids : [eventids]).map(String).filter(Boolean);
+        if (!ids.length) return { ok: false, error: "no eventids" };
+
+        const body = new URLSearchParams();
+        ids.forEach(id => body.append("eventids[]", id));
+        // Named `op` server-side because `action` collides with Zabbix's
+        // own routing parameter (which is `tcs.events.update` here).
+        body.append("op", String(opts.action | 0));
+        if (opts.message != null)        body.append("message", String(opts.message));
+        if (opts.severity != null)       body.append("severity", String(opts.severity | 0));
+        if (opts.suppress_until != null) body.append("suppress_until", String(opts.suppress_until | 0));
+
+        try {
+            const resp = await fetch(updateUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                body: body.toString()
+            });
+            const text = await resp.text();
+            // Older Zabbix module routes occasionally wrap layout.json output
+            // in the full HTML page chrome. Try a straight parse first, then
+            // fall back to extracting the first JSON object we can find.
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (_) {
+                const start = text.indexOf("{");
+                const end   = text.lastIndexOf("}");
+                if (start !== -1 && end > start) {
+                    try { json = JSON.parse(text.slice(start, end + 1)); }
+                    catch (__) { json = { ok: false, error: text.slice(0, 200) }; }
+                } else {
+                    json = { ok: false, error: text.slice(0, 200) };
+                }
+            }
+            if (json && json.ok) fetchNow();
+            return json;
+        } catch (e) {
+            console.warn("[tcs] events update failed:", e);
+            return { ok: false, error: String(e) };
+        }
+    };
+
     setInterval(fetchNow, REFRESH_MS);
 })();
