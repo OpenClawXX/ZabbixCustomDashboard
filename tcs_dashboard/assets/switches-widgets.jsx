@@ -191,11 +191,11 @@ const PfActionRow = ({ mac }) => {
   return (
     <div className="pf-actions">
       {viewHref ? (
-        <a className="pf-btn primary" href={viewHref} target="_blank" rel="noopener noreferrer">
+        <a className="pf-btn" href={viewHref} target="_blank" rel="noopener noreferrer">
           <Icon name="external" size={11}/> View in PacketFence
         </a>
       ) : (
-        <span className="pf-btn primary" style={{ opacity: 0.4, cursor: "not-allowed" }} title="PF admin URL not configured">
+        <span className="pf-btn" style={{ opacity: 0.4, cursor: "not-allowed" }} title="PF admin URL not configured">
           View in PacketFence
         </span>
       )}
