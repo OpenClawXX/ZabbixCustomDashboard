@@ -214,10 +214,11 @@ class ActionSwitchCyclePoe extends CController {
             'startSearch' => true
         ]) ?: [];
         foreach ($globals as $r) {
-            $diag['globals'][] = $r['macro'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
-            if (in_array($r['macro'], $names, true)) {
-                $bag[$r['macro']] = (string) $r['value'];
-            }
+            $isSecret = isset($r['type']) && (int) $r['type'] !== 0;
+            $diag['globals'][] = $r['macro'].($isSecret ? '(secret/vault)' : '');
+            if (!in_array($r['macro'], $names, true)) continue;
+            if (!array_key_exists('value', $r)) continue; // secret/vault — value not exposed via API
+            $bag[$r['macro']] = (string) $r['value'];
         }
 
         // 2. Template-inherited macros — walk the full ancestry, not just
@@ -233,10 +234,11 @@ class ActionSwitchCyclePoe extends CController {
                 'startSearch' => true
             ]) ?: [];
             foreach ($tpl as $r) {
-                $diag['tpls'][] = $r['macro'].'@'.$r['hostid'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
-                if (in_array($r['macro'], $names, true)) {
-                    $bag[$r['macro']] = (string) $r['value'];
-                }
+                $isSecret = isset($r['type']) && (int) $r['type'] !== 0;
+                $diag['tpls'][] = $r['macro'].'@'.$r['hostid'].($isSecret ? '(secret/vault)' : '');
+                if (!in_array($r['macro'], $names, true)) continue;
+                if (!array_key_exists('value', $r)) continue;
+                $bag[$r['macro']] = (string) $r['value'];
             }
         }
 
@@ -248,10 +250,11 @@ class ActionSwitchCyclePoe extends CController {
             'startSearch' => true
         ]) ?: [];
         foreach ($hostRows as $r) {
-            $diag['host'][] = $r['macro'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
-            if (in_array($r['macro'], $names, true)) {
-                $bag[$r['macro']] = (string) $r['value'];
-            }
+            $isSecret = isset($r['type']) && (int) $r['type'] !== 0;
+            $diag['host'][] = $r['macro'].($isSecret ? '(secret/vault)' : '');
+            if (!in_array($r['macro'], $names, true)) continue;
+            if (!array_key_exists('value', $r)) continue;
+            $bag[$r['macro']] = (string) $r['value'];
         }
 
         error_log(sprintf(

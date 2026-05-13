@@ -263,7 +263,10 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
             'globalmacro' => true,
             'filter'      => ['macro' => $names]
         ]) ?: [];
-        foreach ($globals as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($globals as $r) {
+            if (!array_key_exists('value', $r)) continue;
+            $bag[$r['macro']] = (string) $r['value'];
+        }
 
         $templateIds = self::collectTemplateAncestry($hostid);
         if ($templateIds) {
@@ -272,7 +275,10 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
                 'hostids' => $templateIds,
                 'filter'  => ['macro' => $names]
             ]) ?: [];
-            foreach ($tplMacros as $r) $bag[$r['macro']] = (string) $r['value'];
+            foreach ($tplMacros as $r) {
+                if (!array_key_exists('value', $r)) continue;
+                $bag[$r['macro']] = (string) $r['value'];
+            }
         }
 
         $hostMacros = API::UserMacro()->get([
@@ -280,7 +286,10 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
             'hostids' => [$hostid],
             'filter'  => ['macro' => $names]
         ]) ?: [];
-        foreach ($hostMacros as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($hostMacros as $r) {
+            if (!array_key_exists('value', $r)) continue;
+            $bag[$r['macro']] = (string) $r['value'];
+        }
 
         return $bag;
     }

@@ -164,28 +164,40 @@ class ActionPfDevice extends CController {
         $bag = [];
 
         $globals = API::UserMacro()->get([
-            'output'      => ['macro', 'value'],
+            'output'      => ['macro', 'value', 'type'],
             'globalmacro' => true,
             'filter'      => ['macro' => $names]
         ]) ?: [];
-        foreach ($globals as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($globals as $r) {
+            // Secret/vault macros are returned without a `value` field.
+            // Skip them so a readable lower-precedence value isn't
+            // overwritten with nothing.
+            if (!array_key_exists('value', $r)) continue;
+            $bag[$r['macro']] = (string) $r['value'];
+        }
 
         $templateIds = self::collectTemplateAncestry($hostid);
         if ($templateIds) {
             $tplMacros = API::UserMacro()->get([
-                'output'  => ['macro', 'value'],
+                'output'  => ['macro', 'value', 'type'],
                 'hostids' => $templateIds,
                 'filter'  => ['macro' => $names]
             ]) ?: [];
-            foreach ($tplMacros as $r) $bag[$r['macro']] = (string) $r['value'];
+            foreach ($tplMacros as $r) {
+                if (!array_key_exists('value', $r)) continue;
+                $bag[$r['macro']] = (string) $r['value'];
+            }
         }
 
         $hostMacros = API::UserMacro()->get([
-            'output'  => ['macro', 'value'],
+            'output'  => ['macro', 'value', 'type'],
             'hostids' => [$hostid],
             'filter'  => ['macro' => $names]
         ]) ?: [];
-        foreach ($hostMacros as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($hostMacros as $r) {
+            if (!array_key_exists('value', $r)) continue;
+            $bag[$r['macro']] = (string) $r['value'];
+        }
 
         $url  = $bag['{$PF.URL}']  ?? '';
         $user = $bag['{$PF.USER}'] ?? '';
