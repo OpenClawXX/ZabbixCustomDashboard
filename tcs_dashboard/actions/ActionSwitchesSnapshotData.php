@@ -129,6 +129,22 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] pfNodes: locationlogs lookup failed: '.$e->getMessage());
         }
+        // Resolve numeric role ids → names. Some locationlog rows leave
+        // `role` as the numeric category_id and /nodes only carries the
+        // id, so without this dictionary the tile shows "252" instead of
+        // "Faculty". One call, cached implicitly by APCu via the token.
+        $catMap = [];
+        try {
+            $catMap = $pf->nodeCategories();
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] pfNodes: node_categories lookup failed: '.$e->getMessage());
+        }
+        $resolveRole = function ($raw) use ($catMap): string {
+            $s = trim((string) $raw);
+            if ($s === '') return '';
+            if (ctype_digit($s) && isset($catMap[$s])) return $catMap[$s];
+            return $s;
+        };
 
         $bag = [];
         $hits = 0;
@@ -142,11 +158,6 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
             $dev = $byMac[$m];
             $loc = $locByMac[$m] ?? null;
             if ($loc) {
-                // Locationlog role is the human label ("Faculty", "Guest", …);
-                // /nodes only carried the numeric category_id. Prefer the
-                // label. Same for owner — dot1x_username is what the user
-                // actually authenticated as, which is more useful in the
-                // tile than the PF `pid` (registration owner).
                 $locRole = trim((string) ($loc['role'] ?? ''));
                 if ($locRole !== '') $dev['role'] = $locRole;
                 $dot1x = trim((string) ($loc['dot1x_username'] ?? ''));
@@ -155,6 +166,8 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
                 $dev['vlan']    = (string) ($loc['vlan'] ?? '');
                 $dev['ifDesc']  = (string) ($loc['ifDesc'] ?? '');
             }
+            // Coerce any leftover numeric role id to its label.
+            $dev['role'] = $resolveRole($dev['role'] ?? '');
 
             $key = $member.'.'.$port;
             $bag[$key] ??= [];

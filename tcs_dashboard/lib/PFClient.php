@@ -176,6 +176,31 @@ class PFClient {
     }
 
     /**
+     * Map of node category id (string) → human role name. PF stores roles
+     * on /nodes as `category_id` (numeric) and only sometimes surfaces the
+     * label on locationlog.role; this endpoint is the canonical id-to-name
+     * dictionary.
+     *
+     * @return array<string, string>
+     */
+    public function nodeCategories(): array {
+        try {
+            $rows = $this->get('/api/v1/node_categories', ['limit' => 500]);
+        } catch (\Throwable) {
+            return [];
+        }
+        $out = [];
+        foreach (($rows['items'] ?? []) as $r) {
+            $id   = (string) ($r['category_id'] ?? $r['id'] ?? '');
+            $name = (string) ($r['name'] ?? '');
+            if ($id !== '' && $name !== '') {
+                $out[$id] = $name;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Latest locationlog entry per MAC — gives us the human role name,
      * 802.1X username, VLAN, SSID, switch port, and ifDesc that the
      * /nodes endpoint doesn't carry (nodes only has category_id, which
