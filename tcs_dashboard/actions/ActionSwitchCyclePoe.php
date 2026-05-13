@@ -96,13 +96,16 @@ class ActionSwitchCyclePoe extends CController {
             $client = new RConfigClient($macros['url'], $macros['token'], $macros['verify_ssl']);
             $deviceId = $client->resolveDeviceId(
                 $hostid,
-                (string) ($host['host'] ?? ''),
-                $host['ip'] ?? null,
+                $host['host'],
+                $host['visible_name'],
+                $host['snmp_ips'],
+                $host['any_ips'],
                 $macros['device_id']
             );
+            // Snippet placeholder is `interface_name` (e.g. "1:7"); matches
+            // the reference rConfig snippet shipped with the pf_device widget.
             $result = $client->deploySnippet($deviceId, $macros['snippet_id'], [
-                'port'   => $port,
-                'member' => $member
+                'interface_name' => $member.':'.$port
             ]);
 
             $this->respond([
@@ -163,23 +166,31 @@ class ActionSwitchCyclePoe extends CController {
     }
 
     /** @return array{host:string, ip:?string}|null */
+    /** @return array{host:string, visible_name:string, snmp_ips:array<int,string>, any_ips:array<int,string>}|null */
     private function loadHost(string $hostid): ?array {
         $hosts = API::Host()->get([
-            'output'           => ['hostid', 'host'],
-            'selectInterfaces' => ['ip', 'main'],
+            'output'           => ['hostid', 'host', 'name'],
+            'selectInterfaces' => ['ip', 'main', 'type'],
             'hostids'          => [$hostid]
         ]);
         if (!$hosts) return null;
 
-        $h  = $hosts[0];
-        $ip = null;
+        $h = $hosts[0];
+        $snmpIps = [];
+        $anyIps  = [];
         foreach ($h['interfaces'] ?? [] as $iface) {
-            if ((int) ($iface['main'] ?? 0) === 1) {
-                $ip = $iface['ip'];
-                break;
-            }
+            $ip = trim((string) ($iface['ip'] ?? ''));
+            if ($ip === '' || $ip === '0.0.0.0') continue;
+            $anyIps[] = $ip;
+            // INTERFACE_TYPE_SNMP == 2 — preferred match key for switches.
+            if ((int) ($iface['type'] ?? 0) === 2) $snmpIps[] = $ip;
         }
-        return ['host' => (string) $h['host'], 'ip' => $ip];
+        return [
+            'host'         => (string) $h['host'],
+            'visible_name' => (string) ($h['name'] ?? ''),
+            'snmp_ips'     => $snmpIps,
+            'any_ips'      => $anyIps
+        ];
     }
 
     /**
