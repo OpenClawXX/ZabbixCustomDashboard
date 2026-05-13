@@ -61,6 +61,27 @@ $asset_base = 'modules/tcs_dashboard/assets';
     window.SWITCH_BOOT = <?= json_encode($data['boot'] ?? new stdClass(), JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) ?>;
     // POST target for the CYCLE PoE button (admin-only on the server side).
     window.TCS_SWITCH_CYCLEPOE_URL = "zabbix.php?action=tcs.switch.cyclepoe";
+
+    // Disable Zabbix's standard whole-page refresh on this view. The user
+    // profile "Refresh time" setting drives PageRefresh / location.reload
+    // timers that we don't want clobbering our React tree state (selected
+    // port, expanded site, active tab). Run-once at load + a follow-up tick
+    // because Zabbix sometimes (re)installs the timer after DOMContentLoaded.
+    (function disableZabbixRefresh() {
+        const kill = () => {
+            try {
+                if (window.PageRefresh && typeof window.PageRefresh.stop === "function") {
+                    window.PageRefresh.stop();
+                }
+            } catch (e) { /* no-op */ }
+            // Strip any <meta http-equiv="refresh"> tags the layout emitted.
+            document.querySelectorAll('meta[http-equiv="refresh" i]').forEach(m => m.remove());
+        };
+        kill();
+        document.addEventListener("DOMContentLoaded", kill);
+        setTimeout(kill, 0);
+        setTimeout(kill, 250);
+    })();
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
