@@ -201,14 +201,24 @@ class ActionSwitchCyclePoe extends CController {
             '{$RCONFIG.VERIFY.SSL}'
         ];
         $bag = [];
+        $diag = ['globals' => [], 'tpls' => [], 'host' => []];
 
-        // 1. Global macros (lowest precedence).
+        // 1. Global macros (lowest precedence). Pull ALL globals matching
+        // the RCONFIG prefix — drop the exact-name filter so a single typo
+        // (extra space, case mismatch, …) doesn't silently hide them. Log
+        // what we actually see so misconfigurations are easy to spot.
         $globals = API::UserMacro()->get([
-            'output'      => ['macro', 'value'],
+            'output'      => ['macro', 'value', 'type'],
             'globalmacro' => true,
-            'filter'      => ['macro' => $names]
+            'search'      => ['macro' => '{$RCONFIG.'],
+            'startSearch' => true
         ]) ?: [];
-        foreach ($globals as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($globals as $r) {
+            $diag['globals'][] = $r['macro'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
+            if (in_array($r['macro'], $names, true)) {
+                $bag[$r['macro']] = (string) $r['value'];
+            }
+        }
 
         // 2. Template-inherited macros — walk the full ancestry, not just
         // the direct parents. selectParentTemplates is one hop only, so a
@@ -217,20 +227,41 @@ class ActionSwitchCyclePoe extends CController {
         $templateIds = $this->collectTemplateAncestry($hostid);
         if ($templateIds) {
             $tpl = API::UserMacro()->get([
-                'output'  => ['macro', 'value'],
-                'hostids' => $templateIds,
-                'filter'  => ['macro' => $names]
+                'output'      => ['macro', 'value', 'type', 'hostid'],
+                'hostids'     => $templateIds,
+                'search'      => ['macro' => '{$RCONFIG.'],
+                'startSearch' => true
             ]) ?: [];
-            foreach ($tpl as $r) $bag[$r['macro']] = (string) $r['value'];
+            foreach ($tpl as $r) {
+                $diag['tpls'][] = $r['macro'].'@'.$r['hostid'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
+                if (in_array($r['macro'], $names, true)) {
+                    $bag[$r['macro']] = (string) $r['value'];
+                }
+            }
         }
 
         // 3. Host-level (highest precedence).
         $hostRows = API::UserMacro()->get([
-            'output'  => ['macro', 'value'],
-            'hostids' => [$hostid],
-            'filter'  => ['macro' => $names]
+            'output'      => ['macro', 'value', 'type'],
+            'hostids'     => [$hostid],
+            'search'      => ['macro' => '{$RCONFIG.'],
+            'startSearch' => true
         ]) ?: [];
-        foreach ($hostRows as $r) $bag[$r['macro']] = (string) $r['value'];
+        foreach ($hostRows as $r) {
+            $diag['host'][] = $r['macro'].(isset($r['type']) && (int) $r['type'] !== 0 ? '(secret/vault)' : '');
+            if (in_array($r['macro'], $names, true)) {
+                $bag[$r['macro']] = (string) $r['value'];
+            }
+        }
+
+        error_log(sprintf(
+            '[tcs_dashboard] cyclepoe macros found — host[%s]=[%s] tpls(%d)=[%s] globals=[%s]',
+            $hostid,
+            implode(',', $diag['host']),
+            count($templateIds),
+            implode(',', $diag['tpls']),
+            implode(',', $diag['globals'])
+        ));
 
         $url     = $bag['{$RCONFIG.URL}'] ?? '';
         $token   = $bag['{$RCONFIG.TOKEN}'] ?? '';
