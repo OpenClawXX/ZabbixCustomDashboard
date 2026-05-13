@@ -1,0 +1,439 @@
+// switches-bridge.jsx
+//
+// Async data layer for the Switches page. The PHP controller (ActionSwitches)
+// renders just the page shell + host metadata to keep TTFB low; this file
+// fetches the heavy data (fleet, snapshot, problems) in parallel after first
+// paint and updates the window globals the React widgets read on each render.
+//
+// Globals managed here (kept compatible with the mock-data names so the
+// widgets need no edits):
+//   window.SWITCH_SITES      — fleet for HostNavigator
+//   window.ARC_MDF_STACK     — per-member port arrays
+//   window.SWITCH_KPIS       — scalar KPI values (cpu/mem/temp/poeWatts/...)
+//   window.ARC_MDF_HISTORY   — 24h sparkline series
+//   window.ARC_MDF_LINKS     — uplink top-talker rows
+//   window.SWITCH_PROBLEMS   — recent problems
+//   window.makePortDetail()  — per-port detail panel builder
+//
+// Events dispatched on window:
+//   "tcs:switch-data"   — fired whenever a global was just updated, so the
+//                         React app can bump a re-render counter.
+//
+// Helpers exposed:
+//   window.tcsNavigateSwitch(hostid)  — reloads page targeting a different host
+//   window.tcsCyclePoe(member, port)  — POSTs to tcs.switch.cyclepoe
+
+(function () {
+    const boot = window.SWITCH_BOOT || {};
+    const host = boot.host || null;
+
+    // Expose the bound hostid so the CYCLE button can POST without prop-drilling.
+    window.TCS_SWITCH_HOSTID = host ? String(host.hostid || "") : "";
+
+    // Navigation: SPA-style. No page reload — just re-fetch the snapshot for
+    // the new hostid and update the URL via pushState so refresh / back-button
+    // still target the right switch.
+    window.tcsNavigateSwitch = function (hostid) {
+        if (!hostid) return;
+        const id = String(hostid);
+        const params = new URLSearchParams(window.location.search);
+        params.set("action", "tcs.switches.view");
+        params.set("switchid", id);
+        try {
+            window.history.pushState({ switchid: id }, "", "?" + params.toString());
+        } catch (e) { /* ignore — pushState rarely fails */ }
+        window.TCS_SWITCH_HOSTID = id;
+        // Reset port-status / KPI state so the user sees the empty skeleton
+        // for the new host while the snapshot is in flight.
+        window.ARC_MDF_STACK   = [{ idx: 1, ports: [], sfp: [], upCount: 0, downCount: 0, poeCount: 0 }];
+        window.SWITCH_KPIS     = { cpu: null, mem: null, temp: null, poeWatts: null, poeBudget: null };
+        window.ARC_MDF_HISTORY = { cpu: [], mem: [], temp: [], poeWatts: [], uplinkRx: [], uplinkTx: [] };
+        window.ARC_MDF_LINKS   = [];
+        window.SWITCH_PROBLEMS = [];
+        window.SWITCH_LOADING  = { ...window.SWITCH_LOADING, snapshot: true };
+        window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section: "navigate" } }));
+        fetchSnapshot(id);
+    };
+
+    // Initial empty defaults. The page is data-source-truthy: nothing renders
+    // until the JSON endpoints respond. No mock fixtures are loaded at all
+    // (switches-data.jsx was removed) — empty arrays are the empty state.
+    window.SWITCH_KPIS      = { cpu: null, mem: null, temp: null, poeWatts: null, poeBudget: null };
+    window.SWITCH_PROBLEMS  = [];
+    window.ARC_MDF_LINKS    = [];
+    window.ARC_MDF_HISTORY  = { cpu: [], mem: [], temp: [], poeWatts: [], uplinkRx: [], uplinkTx: [] };
+    window.SWITCH_SITES     = [];
+    window.SWITCH_INFO      = {};
+    // Single empty stack member keeps the port grid renderable until the
+    // snapshot arrives (the grid expects at least one member to map over).
+    window.ARC_MDF_STACK    = [{ idx: 1, ports: [], sfp: [], upCount: 0, downCount: 0, poeCount: 0 }];
+    // Loading flags so widgets / future skeletons can show "loading…" affordances.
+    window.SWITCH_LOADING   = { fleet: true, snapshot: true };
+
+    // Self-contained port-detail builder. Returns the fields PortDetailPane
+    // / PacketFenceDevicePane read. Per-port histories aren't fetched (the
+    // snapshot's history bucket is per-KPI, not per-port) — that would need a
+    // dedicated per-port endpoint. Rates and errors come from the traffic
+    // bag, populated by applySnapshot.
+    const FLAT60 = Array.from({ length: 60 }, () => 0);
+    const _fdbByKey     = Object.create(null);
+    const _trafficByKey = Object.create(null);
+    window._tcsFdbByKey     = _fdbByKey;
+    window._tcsTrafficByKey = _trafficByKey;
+
+    window.makePortDetail = function (memberIdx, port) {
+        const k = `${memberIdx}.${port.n}`;
+        const macs = _fdbByKey[k] || [];
+        const tr   = _trafficByKey[k] || null;
+
+        // Server gives us bytes/sec on each side. Convert to kbps for the
+        // detail panel, then derive a coarse utilization % off the port's
+        // assumed speed (default 1G = 1_000_000 kbps line rate).
+        const inKbps  = tr ? Math.round(((tr.in  || 0) * 8) / 1000 * 10) / 10 : 0;
+        const outKbps = tr ? Math.round(((tr.out || 0) * 8) / 1000 * 10) / 10 : 0;
+        const lineKbps = (port.speed || 1000) * 1000;
+        const utilPct  = lineKbps > 0 ? Math.min(100, Math.round((Math.max(inKbps, outKbps) / lineKbps) * 100)) : 0;
+
+        const errIn   = tr ? (tr.errIn   || 0) : 0;
+        const errOut  = tr ? (tr.errOut  || 0) : 0;
+        const discIn  = tr ? (tr.discIn  || 0) : 0;
+        const discOut = tr ? (tr.discOut || 0) : 0;
+
+        return {
+            label:      `${memberIdx}:${port.n}`,
+            state:      port.state,
+            speed:      port.speed || 0,
+            poe:        !!port.poe,
+            poeWatts:   0,
+            inKbps,
+            outKbps,
+            utilPct,
+            inHist:     FLAT60,
+            outHist:    FLAT60,
+            onlineHist: FLAT60.map(() => port.state === "up" ? "ok" : "off"),
+            errors1h:   errIn + errOut,
+            errIn,
+            errOut,
+            discards1h: discIn + discOut,
+            discIn,
+            discOut,
+            device:     null,    // PacketFenceDevicePane shows empty-state on null
+            extraMacs:  macs.length > 1 ? macs.length - 1 : 0,
+            macs,
+            ifIndex:    1000 + (Number(port.n) || 0),
+            ageMin:     0
+        };
+    };
+
+    /* --------------------------------------------------------------------- */
+    /* Adapters: payload sections → window globals                           */
+    /* --------------------------------------------------------------------- */
+
+    const ifOperToState = (s) => {
+        switch (Number(s)) {
+            case 1: return "up";
+            case 2: return "down";
+            case 5: return "dormant";
+            case 6: return "absent";
+            default: return "down";
+        }
+    };
+    const poeDelivering = (s) => Number(s) === 3;
+
+    function buildStack(members, ports, poe) {
+        const speedByKey = window._tcsSpeedByKey || {};
+        const portByKey  = Object.create(null);
+        for (const p of ports) portByKey[`${p.member}.${p.port}`] = p;
+        const poeByKey   = Object.create(null);
+        const poePresent = Object.create(null);   // any PoE item, even "searching"
+        for (const p of poe) {
+            poeByKey[`${p.member}.${p.port}`] = poeDelivering(p.status);
+            poePresent[`${p.member}.${p.port}`] = true;
+        }
+
+        const keys = new Set();
+        for (const k of Object.keys(portByKey)) keys.add(k);
+        for (const k of Object.keys(poePresent)) keys.add(k);
+        if (!keys.size) return null;
+
+        // Compute per-member highest port number that has ANY PoE item. Ports
+        // numbered above that are SFP/uplink (Extreme convention: PoE LLD walks
+        // the copper ports; SFP cages don't appear in the PoE table). Members
+        // with zero PoE items skip the split (probably a non-PoE switch — all
+        // regular).
+        const maxPoePortByMember = new Map();
+        for (const key of Object.keys(poePresent)) {
+            const [mStr, pStr] = key.split(".");
+            const m = Number(mStr), p = Number(pStr);
+            const cur = maxPoePortByMember.get(m) || 0;
+            if (p > cur) maxPoePortByMember.set(m, p);
+        }
+
+        const byMember = new Map();
+        for (const key of keys) {
+            const [mStr, pStr] = key.split(".");
+            const m = Number(mStr) || 1;
+            const portNum = Number(pStr) || 0;
+            const portRow = portByKey[key];
+            const isDelivering = !!poeByKey[key];
+
+            let state;
+            if (portRow) {
+                state = ifOperToState(portRow.status);
+            } else {
+                state = isDelivering ? "up" : "down";
+            }
+
+            const speed = Number(speedByKey[key]) || (state === "up" ? 1000 : 0);
+            const maxPoe = maxPoePortByMember.get(m) || 0;
+            const isSfp = maxPoe > 0 && portNum > maxPoe;
+
+            // Flag the cell red when the port has *any* in/out errors so the
+            // user can spot bad ports at a glance.
+            const tr = (window._tcsTrafficByKey || {})[key] || null;
+            const errCount = tr ? ((tr.errIn || 0) + (tr.errOut || 0)) : 0;
+
+            if (!byMember.has(m)) byMember.set(m, []);
+            byMember.get(m).push({
+                n: portNum,
+                state,
+                speed,
+                poe: isDelivering,
+                alert: false,
+                err: errCount > 0,
+                sfp: isSfp
+            });
+        }
+
+        const memberIdxs = members.length
+            ? members.map(m => Number(m.index)).filter(n => n > 0)
+            : [...byMember.keys()].sort((a, b) => a - b);
+
+        const stack = [];
+        for (const idx of memberIdxs) {
+            const full = (byMember.get(idx) || []).slice().sort((a, b) => a.n - b.n);
+            const regular = full.filter(p => !p.sfp);
+            const sfp     = full.filter(p =>  p.sfp);
+            stack.push({
+                idx,
+                ports: regular,
+                sfp,
+                upCount:   full.filter(p => p.state === "up").length,
+                downCount: full.filter(p => p.state === "down").length,
+                poeCount:  full.filter(p => p.poe).length
+            });
+        }
+        return stack.length ? stack : null;
+    }
+
+    function applyFleet(fleet) {
+        const activeHostid = host ? String(host.hostid || "") : "";
+        const activeHost   = host ? String(host.host   || "") : "";
+        const matches = (sw) => activeHostid !== ""
+            ? String(sw.hostid) === activeHostid
+            : sw.id === activeHost;
+        window.SWITCH_SITES = fleet.map(site => {
+            const switches = (site.switches || []).map(sw => ({ ...sw, selected: matches(sw) }));
+            return {
+                ...site,
+                expanded: switches.some(sw => sw.selected),
+                switches
+            };
+        });
+        const total = fleet.reduce((n, s) => n + (s.switches || []).length, 0);
+        console.info(`[tcs] switch fleet: ${fleet.length} site(s), ${total} host(s)`);
+        if (total === 0) {
+            console.warn("[tcs] switch fleet empty — verify Site/* host groups exist and EXOS hosts carry tag target=exos.");
+        }
+    }
+
+    function applySnapshot(snap) {
+        const members  = Array.isArray(snap.members)  ? snap.members  : [];
+        const ports    = Array.isArray(snap.ports)    ? snap.ports    : [];
+        const poe      = Array.isArray(snap.poe)      ? snap.poe      : [];
+        const fdb      = Array.isArray(snap.fdb)      ? snap.fdb      : [];
+        const uplinks  = Array.isArray(snap.uplinks)  ? snap.uplinks  : [];
+        const problems = Array.isArray(snap.problems) ? snap.problems : [];
+        const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
+        const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
+        const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
+        const speeds   = (snap.speeds  && typeof snap.speeds  === "object") ? snap.speeds  : {};
+        const info     = (snap.info    && typeof snap.info    === "object") ? snap.info    : {};
+
+        // Stash speeds for buildStack to consume.
+        window._tcsSpeedByKey = speeds;
+        // Host firmware / model / serial — consumed by the page-header pills.
+        window.SWITCH_INFO = info;
+
+        // Per-port traffic — makePortDetail reads from this on demand so port
+        // clicks pick up the freshest rates without a second fetch.
+        const tbag = window._tcsTrafficByKey;
+        for (const k of Object.keys(tbag)) delete tbag[k];
+        for (const k of Object.keys(traffic)) {
+            tbag[k] = traffic[k];
+        }
+
+        const stack = buildStack(members, ports, poe);
+        if (stack) window.ARC_MDF_STACK = stack;
+
+        const kpiVal = (k) => (kpis[k] && typeof kpis[k].lastvalue === "number") ? kpis[k].lastvalue : null;
+        window.SWITCH_KPIS = {
+            cpu:       kpiVal("cpu"),
+            mem:       kpiVal("mem"),
+            temp:      kpiVal("temp"),
+            poeWatts:  kpiVal("poeWatts"),
+            poeBudget: kpiVal("poeBudget")
+        };
+
+        const h = (key) => Array.isArray(history[key]) ? history[key] : [];
+        window.ARC_MDF_HISTORY = {
+            cpu:      h("cpu"),
+            mem:      h("mem"),
+            temp:     h("temp"),
+            poeWatts: h("poeWatts"),
+            uplinkRx: h("uplinkRx").length ? h("uplinkRx") : h("poeWatts").map(v => v * 4 + 200),
+            uplinkTx: h("uplinkTx").length ? h("uplinkTx") : h("poeWatts").map(v => v * 2 + 80)
+        };
+
+        window.ARC_MDF_LINKS   = uplinks;
+        window.SWITCH_PROBLEMS = problems;
+
+        // Repopulate the FDB bag — makePortDetail (defined once at IIFE time)
+        // reads from this on demand so the next click on a port picks up the
+        // freshest MAC list without rebinding the builder.
+        const bag = window._tcsFdbByKey;
+        for (const k of Object.keys(bag)) delete bag[k];
+        for (const row of fdb) {
+            const k = `${row.member}.${row.port}`;
+            (bag[k] = bag[k] || []).push(row.mac);
+        }
+    }
+
+    /** Fire a re-render in the React app. */
+    function notify(section) {
+        window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section } }));
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Async fetches                                                         */
+    /* --------------------------------------------------------------------- */
+
+    const URL_FLEET    = window.TCS_SWITCH_FLEET_URL    || "zabbix.php?action=tcs.switches.fleet.data";
+    const URL_SNAPSHOT = window.TCS_SWITCH_SNAPSHOT_URL || "zabbix.php?action=tcs.switches.snapshot.data";
+    const URL_PORTHIST = window.TCS_SWITCH_PORTHIST_URL || "zabbix.php?action=tcs.switches.port.history.data";
+
+    async function fetchJson(url) {
+        const resp = await fetch(url, {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+    }
+
+    function fetchSnapshot(switchid) {
+        if (!switchid) return;
+        const url = `${URL_SNAPSHOT}&switchid=${encodeURIComponent(switchid)}`;
+        return fetchJson(url)
+            .then(j => {
+                applySnapshot(j || {});
+                const counts = {
+                    members: (j.members || []).length,
+                    ports:   (j.ports   || []).length,
+                    poe:     (j.poe     || []).length,
+                    uplinks: (j.uplinks || []).length,
+                    problems: (j.problems || []).length
+                };
+                console.info("[tcs] snapshot for hostid", switchid, counts);
+            })
+            .catch(e => console.error("[tcs] snapshot fetch failed:", e, "url:", url))
+            .finally(() => {
+                window.SWITCH_LOADING.snapshot = false;
+                notify("snapshot");
+            });
+    }
+
+    // Fire both in parallel so they don't queue behind each other.
+    console.info("[tcs] fetching switch fleet + snapshot…");
+    fetchJson(URL_FLEET)
+        .then(j => {
+            const fleet = Array.isArray(j && j.fleet) ? j.fleet : [];
+            applyFleet(fleet);
+        })
+        .catch(e => console.error("[tcs] fleet fetch failed:", e, "url:", URL_FLEET))
+        .finally(() => {
+            window.SWITCH_LOADING.fleet = false;
+            notify("fleet");
+        });
+
+    const switchid = host ? String(host.hostid || "") : "";
+    if (switchid) {
+        fetchSnapshot(switchid);
+    } else {
+        window.SWITCH_LOADING.snapshot = false;
+        console.info("[tcs] no switchid in URL — skipping snapshot fetch");
+    }
+
+    // Browser back/forward should also re-snapshot, not full-reload.
+    window.addEventListener("popstate", () => {
+        const p = new URLSearchParams(window.location.search);
+        const id = p.get("switchid") || "";
+        if (id && id !== window.TCS_SWITCH_HOSTID) {
+            window.tcsNavigateSwitch(id);
+        }
+    });
+
+    /* --------------------------------------------------------------------- */
+    /* CYCLE PoE handler                                                     */
+    /* --------------------------------------------------------------------- */
+
+    // Lazy per-port sparkline history. SwitchesApp calls this on port click
+    // and patches the detail when the response arrives. Errors return flat
+    // arrays so the panel stays renderable.
+    window.tcsLoadPortHistory = async function (member, port) {
+        const hostid = window.TCS_SWITCH_HOSTID;
+        if (!hostid || !member || !port) return { inHist: FLAT60, outHist: FLAT60 };
+        const url = `${URL_PORTHIST}&hostid=${encodeURIComponent(hostid)}`
+                  + `&member=${encodeURIComponent(member)}&port=${encodeURIComponent(port)}`;
+        try {
+            const j = await fetchJson(url);
+            return {
+                inHist:  Array.isArray(j.inHist)  ? j.inHist  : FLAT60,
+                outHist: Array.isArray(j.outHist) ? j.outHist : FLAT60
+            };
+        } catch (e) {
+            console.warn("[tcs] port history fetch failed:", e);
+            return { inHist: FLAT60, outHist: FLAT60 };
+        }
+    };
+
+    window.tcsCyclePoe = async function (member, port) {
+        const url = window.TCS_SWITCH_CYCLEPOE_URL;
+        const hostid = window.TCS_SWITCH_HOSTID;
+        if (!url || !hostid) {
+            return { ok: false, error: "endpoint not configured" };
+        }
+        try {
+            const resp = await fetch(url, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    hostid,
+                    member: Number(member) || 1,
+                    port:   Number(port)   || 0
+                })
+            });
+            const body = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                return { ok: false, error: body.error || `HTTP ${resp.status}` };
+            }
+            return body;
+        } catch (e) {
+            return { ok: false, error: String(e && e.message ? e.message : e) };
+        }
+    };
+})();

@@ -38,6 +38,21 @@
             "view": "switches.view",
             "layout": "layout.htmlpage"
         },
+        "tcs.switches.fleet.data": {
+            "class": "ActionSwitchesFleetData",
+            "layout": "layout.json",
+            "view": null
+        },
+        "tcs.switches.snapshot.data": {
+            "class": "ActionSwitchesSnapshotData",
+            "layout": "layout.json",
+            "view": null
+        },
+        "tcs.switches.port.history.data": {
+            "class": "ActionSwitchesPortHistoryData",
+            "layout": "layout.json",
+            "view": null
+        },
         "tcs.servers.view": {
             "class": "ActionServers",
             "view": "servers.view",
@@ -82,6 +97,11 @@
             "class": "ActionServer",
             "view": "server.view",
             "layout": "layout.htmlpage"
+        },
+        "tcs.switch.cyclepoe": {
+            "class": "ActionSwitchCyclePoe",
+            "layout": "layout.json",
+            "view": null
         }
     }
 }

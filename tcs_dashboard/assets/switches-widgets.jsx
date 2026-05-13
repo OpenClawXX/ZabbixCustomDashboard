@@ -3,20 +3,71 @@
 const { useState: useStateSW } = React;
 
 // ───────── Host Navigator ─────────
+// activeId can be either a numeric hostid (live data) or a host shortname
+// (mock data fallback). Rows with a `hostid` field navigate to that switch
+// by reloading the page with ?switchid=<hostid>; rows without it fall back
+// to onSelect() for in-page selection (mock mode).
 const HostNavigator = ({ activeId, onSelect }) => {
   const [sites, setSites] = useStateSW(window.SWITCH_SITES);
+  const [loading, setLoading] = useStateSW(() => !!(window.SWITCH_LOADING && window.SWITCH_LOADING.fleet));
+  // The bridge updates window.SWITCH_SITES in-place after the fleet fetch
+  // resolves. Re-sync our local state on each tcs:switch-data event,
+  // preserving expand/collapse choices by id so user toggles don't get
+  // clobbered when a refresh lands.
+  React.useEffect(() => {
+    const sync = () => {
+      const fresh = window.SWITCH_SITES || [];
+      setSites(prev => {
+        if (!prev || prev.length === 0) return fresh;
+        const expandedById = Object.create(null);
+        for (const s of prev) expandedById[s.id] = !!s.expanded;
+        return fresh.map(s => ({
+          ...s,
+          expanded: (s.id in expandedById) ? expandedById[s.id] : s.expanded
+        }));
+      });
+      setLoading(!!(window.SWITCH_LOADING && window.SWITCH_LOADING.fleet));
+    };
+    window.addEventListener("tcs:switch-data", sync);
+    return () => window.removeEventListener("tcs:switch-data", sync);
+  }, []);
   const toggle = (idx) => {
     setSites(sites.map((s, i) => i === idx ? { ...s, expanded: !s.expanded } : s));
   };
+  const isActive = (sw) => {
+    if (!activeId) return !!sw.selected;
+    const a = String(activeId);
+    return a === String(sw.hostid || "") || a === String(sw.id);
+  };
+  const onRowClick = (sw) => {
+    // Always let the parent update activeId so the page header / KPI tiles
+    // re-bind to the new switch immediately. Then fire SPA-style navigation
+    // which kicks off the snapshot fetch in the background.
+    onSelect(sw.id);
+    if (sw.hostid && typeof window.tcsNavigateSwitch === "function") {
+      window.tcsNavigateSwitch(sw.hostid);
+    }
+  };
+  const totalHosts = sites.reduce((n, s) => n + (s.switches || []).length, 0);
   return (
     <div className="card">
       <div className="card-h">
         <h3>Host navigator</h3>
         <SourceBadge src="zbx" />
         <div className="h-spacer" />
-        <span className="h-meta">{sites.reduce((n, s) => n + s.switches.length, 0)} switches</span>
+        <span className="h-meta">
+          {loading && totalHosts === 0
+            ? <span className="hn-loading-inline"><span className="hn-spinner" /> loading…</span>
+            : `${totalHosts} switches`}
+        </span>
       </div>
       <div className="host-nav">
+        {loading && sites.length === 0 && (
+          <div className="hn-loading">
+            <span className="hn-spinner" />
+            <span className="hn-loading-lbl">Loading fleet…</span>
+          </div>
+        )}
         {sites.map((site, i) => (
           <div className="host-nav-section" key={site.id}>
             <div
@@ -32,9 +83,10 @@ const HostNavigator = ({ activeId, onSelect }) => {
             <div className={"host-nav-children" + (site.expanded ? "" : " hidden")}>
               {site.switches.map(sw => (
                 <div
-                  key={sw.id}
-                  className={"host-nav-host" + (sw.id === activeId ? " active" : "")}
-                  onClick={() => onSelect(sw.id)}
+                  key={sw.hostid || sw.id}
+                  className={"host-nav-host" + (isActive(sw) ? " active" : "")}
+                  onClick={() => onRowClick(sw)}
+                  title={sw.ip ? `${sw.id} · ${sw.ip}` : sw.id}
                 >
                   <span className="h-id">{sw.id}</span>
                   {sw.problems > 0 && <span className="h-prob">●</span>}
@@ -60,14 +112,14 @@ const Port = ({ p, selected, onClick }) => {
     );
   }
   const speedClass = p.state === "up" ? `spd-${p.speed}` : "";
-  const cls = ["port", p.state, speedClass, p.poe ? "poe" : "", p.alert ? "alert" : "", p.state === "down" ? "searching" : "", selected ? "selected" : ""].filter(Boolean).join(" ");
+  const cls = ["port", p.state, speedClass, p.poe ? "poe" : "", p.err ? "err" : "", p.alert ? "alert" : "", p.state === "down" ? "searching" : "", selected ? "selected" : ""].filter(Boolean).join(" ");
   const speedLbl = p.speed === 10000 ? "10G" : p.speed === 1000 ? "1G" : p.speed === 100 ? "100M" : "10M";
   return (
     <div className={cls} onClick={onClick} title={`Port ${p.n} · ${p.state}${p.state === "up" ? " · " + speedLbl : ""}${p.poe ? " · PoE" : ""}`}>
       <div className="pn">{p.n}</div>
       <div className="body">
-        <span className="led" />
-        <span className="led" />
+        <span className="led led-link" />
+        <span className={"led led-speed " + speedClass} />
       </div>
       <div style={{ height: 4 }} />
     </div>
@@ -76,29 +128,35 @@ const Port = ({ p, selected, onClick }) => {
 
 // ───────── Member port grid (28 ports per row, two rows) ─────────
 const MemberGrid = ({ member, selected, onSelect }) => {
-  const odds = member.ports.filter(p => p.n % 2 === 1);
+  const odds  = member.ports.filter(p => p.n % 2 === 1);
   const evens = member.ports.filter(p => p.n % 2 === 0);
-  const cols = Math.max(odds.length, evens.length);
+  // repeat(0, …) is invalid CSS — fall back to 1 so an empty regular grid
+  // still produces a renderable (zero-height) track instead of breaking
+  // layout flow.
+  const cols = Math.max(1, odds.length, evens.length);
   const isSel = (n) => selected && selected.member === member.idx && selected.port === n;
+  const hasSfp = Array.isArray(member.sfp) && member.sfp.length > 0;
   return (
-    <div className="swport-row">
-      <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", gap: 5 }}>
-        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+    <div className="swport-row" style={hasSfp ? null : { gridTemplateColumns: "1fr" }}>
+      <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", gap: 5, minWidth: 0 }}>
+        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, minWidth: 0 }}>
           {odds.map(p => <Port key={p.n} p={p} selected={isSel(p.n)} onClick={() => onSelect(member.idx, p)} />)}
         </div>
-        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, minWidth: 0 }}>
           {evens.map(p => <Port key={p.n} p={p} selected={isSel(p.n)} onClick={() => onSelect(member.idx, p)} />)}
         </div>
       </div>
-      <div className="swport-sfp">
-        <div className="sfp-label">SFP</div>
-        {member.sfp.map(s => (
-          <div key={s.n} className={"sfp-port " + s.state} title={`SFP ${s.n} · ${s.state}`} onClick={() => onSelect(member.idx, { ...s, state: s.state, n: s.n, speed: s.speed, poe: false })}>
-            <div className="core" />
-            <div className="pn">{s.n}</div>
-          </div>
-        ))}
-      </div>
+      {hasSfp && (
+        <div className="swport-sfp">
+          <div className="sfp-label">SFP</div>
+          {member.sfp.map(s => (
+            <div key={s.n} className={"sfp-port " + s.state} title={`SFP ${s.n} · ${s.state}`} onClick={() => onSelect(member.idx, { ...s, state: s.state, n: s.n, speed: s.speed, poe: false })}>
+              <div className="core" />
+              <div className="pn">{s.n}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -196,7 +254,31 @@ const formatRate = (kbps) => {
   return [kbps.toFixed(1), "Kbps"];
 };
 
+// Log-scaled bar width for unbounded counters (errors / discards). 0 → 0%,
+// 1 error → small but visible, 100 → ~half, 10k+ → full bar.
+const countBarPct = (n) => {
+  if (!n || n <= 0) return 0;
+  return Math.min(100, Math.max(6, Math.log10(n + 1) * 25));
+};
+
 const PortDetailPane = ({ detail, onClose }) => {
+  const [cycleState, setCycleState] = React.useState({ busy: false, msg: "" });
+  const onCycle = React.useCallback(async () => {
+    if (cycleState.busy || !detail || typeof window.tcsCyclePoe !== "function") return;
+    // detail.label is "<member>:<port>" — parse to get the args.
+    const [m, p] = String(detail.label || "").split(":").map(s => parseInt(s, 10));
+    if (!m || !p) {
+      setCycleState({ busy: false, msg: "bad port" });
+      return;
+    }
+    setCycleState({ busy: true, msg: "queuing…" });
+    const r = await window.tcsCyclePoe(m, p);
+    setCycleState({
+      busy: false,
+      msg: r && r.ok ? (r.message || "queued") : (r && (r.error || r.message)) || "failed"
+    });
+    setTimeout(() => setCycleState({ busy: false, msg: "" }), 4000);
+  }, [detail, cycleState.busy]);
   if (!detail) {
     return (
       <div className="pd-pane">
@@ -242,7 +324,21 @@ const PortDetailPane = ({ detail, onClose }) => {
               {detail.poe ? (
                 <div className="pd-poe-btns">
                   <span className="pd-btn delivering">Delivering Power</span>
-                  <span className="pd-btn cycle"><Icon name="refresh" size={11}/> CYCLE</span>
+                  <button
+                    type="button"
+                    className="pd-btn cycle"
+                    onClick={onCycle}
+                    disabled={cycleState.busy}
+                    title="Cycle PoE on this port via rConfig"
+                    style={{ cursor: cycleState.busy ? "wait" : "pointer", border: 0, font: "inherit" }}
+                  >
+                    <Icon name="refresh" size={11}/> {cycleState.busy ? "CYCLING…" : "CYCLE"}
+                  </button>
+                  {cycleState.msg && (
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", marginLeft: 6 }}>
+                      {cycleState.msg}
+                    </span>
+                  )}
                 </div>
               ) : (
                 <span style={{fontSize: 11, color: "var(--muted)"}}>—</span>
@@ -264,16 +360,24 @@ const PortDetailPane = ({ detail, onClose }) => {
           </div>
           <div className="pd-row">
             <div className="pd-lbl">Errors 1H <Icon name="events" size={11} /></div>
-            <div className="pd-mid" />
+            <div className="pd-mid">
+              <div className="pd-util">
+                <i className={detail.errors1h > 0 ? "err" : ""} style={{width: `${countBarPct(detail.errors1h)}%`}}/>
+              </div>
+            </div>
             <div className={"pd-val " + (detail.errors1h > 0 ? "warn" : "muted")} style={{fontSize: 11}}>
-              {detail.errors1h} <span style={{color:"var(--muted)"}}>(in 0 / out {detail.errors1h}), stable</span>
+              {detail.errors1h} <span style={{color:"var(--muted)"}}>(in {detail.errIn || 0} / out {detail.errOut || 0})</span>
             </div>
           </div>
           <div className="pd-row">
             <div className="pd-lbl">Discards 1H <Icon name="events" size={11} /></div>
-            <div className="pd-mid" />
+            <div className="pd-mid">
+              <div className="pd-util">
+                <i className={detail.discards1h > 0 ? "warn" : ""} style={{width: `${countBarPct(detail.discards1h)}%`}}/>
+              </div>
+            </div>
             <div className={"pd-val " + (detail.discards1h > 0 ? "warn" : "muted")} style={{fontSize: 11}}>
-              {detail.discards1h} <span style={{color:"var(--muted)"}}>(in 0 / out {detail.discards1h}), stable</span>
+              {detail.discards1h} <span style={{color:"var(--muted)"}}>(in {detail.discIn || 0} / out {detail.discOut || 0})</span>
             </div>
           </div>
           <div className="pd-row">
@@ -393,8 +497,22 @@ const ProblemsWidget = () => {
 const StackKPIs = ({ host }) => {
   const stack = window.ARC_MDF_STACK;
   const totalUp = stack.reduce((n, m) => n + m.upCount, 0);
-  const totalPoe = stack.reduce((n, m) => n + m.poeCount, 0);
   const H = window.ARC_MDF_HISTORY;
+  const K = window.SWITCH_KPIS || {};
+
+  const fmt = (v, suffix = "") =>
+    (v === null || v === undefined) ? "—" : (Math.round(v * 10) / 10) + suffix;
+
+  const cpuVal  = K.cpu  !== null && K.cpu  !== undefined ? Math.round(K.cpu)  : host.cpu;
+  const tempVal = K.temp !== null && K.temp !== undefined ? Math.round(K.temp) : host.temp;
+  const poeW    = K.poeWatts;
+  const poeMax  = K.poeBudget;
+
+  // Peak uplink RX from the history series, converted to a friendly unit.
+  const peakRx  = H.uplinkRx && H.uplinkRx.length ? Math.max(...H.uplinkRx) : 0;
+  const peakRxV = peakRx >= 1000 ? (peakRx / 1000).toFixed(1) : Math.round(peakRx);
+  const peakRxU = peakRx >= 1000 ? "Gbps" : "Mbps";
+
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="swstat-strip">
@@ -406,27 +524,30 @@ const StackKPIs = ({ host }) => {
         <div className="swstat-cell">
           <div className="lbl">Active Ports</div>
           <div className="val">{totalUp}<span style={{fontSize:11,color:"var(--muted)",fontWeight:500}}> / {host.ports}</span></div>
-          <Sparkline data={H.uplinkRx.map(v => Math.round(v / 30 + 60))} color="var(--ok)" width={120} height={20} />
+          <Sparkline data={(H.uplinkRx || []).map(v => Math.round(v / 30 + 60))} color="var(--ok)" width={120} height={20} />
         </div>
         <div className="swstat-cell">
           <div className="lbl">PoE Budget</div>
-          <div className="val">428<span style={{fontSize:11,color:"var(--muted)",fontWeight:500}}> W / 720</span></div>
-          <Sparkline data={H.poeWatts} color="var(--warn)" width={120} height={20} />
+          <div className="val">
+            {fmt(poeW)}
+            <span style={{fontSize:11,color:"var(--muted)",fontWeight:500}}> W{poeMax ? ` / ${Math.round(poeMax)}` : ""}</span>
+          </div>
+          <Sparkline data={H.poeWatts || []} color="var(--warn)" width={120} height={20} />
         </div>
         <div className="swstat-cell">
           <div className="lbl">Uplink RX (peak)</div>
-          <div className="val">1.9<span style={{fontSize:11,color:"var(--muted)",fontWeight:500}}> Gbps</span></div>
-          <Sparkline data={H.uplinkRx} color="var(--zbx)" width={120} height={20} />
+          <div className="val">{peakRxV}<span style={{fontSize:11,color:"var(--muted)",fontWeight:500}}> {peakRxU}</span></div>
+          <Sparkline data={H.uplinkRx || []} color="var(--zbx)" width={120} height={20} />
         </div>
         <div className="swstat-cell">
           <div className="lbl">CPU · 1m</div>
-          <div className="val ok">{host.cpu}%</div>
-          <Sparkline data={H.cpu} color="var(--info)" width={120} height={20} />
+          <div className="val ok">{cpuVal}%</div>
+          <Sparkline data={H.cpu || []} color="var(--info)" width={120} height={20} />
         </div>
         <div className="swstat-cell">
           <div className="lbl">Temp (max)</div>
-          <div className="val warn">{host.temp}°C</div>
-          <Sparkline data={H.temp} color="var(--pf)" width={120} height={20} threshold={75} />
+          <div className="val warn">{tempVal}°C</div>
+          <Sparkline data={H.temp || []} color="var(--pf)" width={120} height={20} threshold={75} />
         </div>
       </div>
     </div>
