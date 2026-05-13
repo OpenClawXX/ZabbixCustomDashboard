@@ -142,27 +142,78 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
     }
 
     /**
-     * Read {$PF.*} macros for this hostid. Mirrors ActionDashboard's resolver
-     * (kept local so the snapshot action doesn't reach across action classes).
+     * Read {$PF.*} macros for this hostid, falling through host → linked
+     * templates → global. Zabbix's UserMacro API doesn't merge these for
+     * us — global macros require an explicit `globalmacro: true` call.
+     * Precedence: host wins over template wins over global.
      *
      * @return array{url:string,user:string,pass:string,verify_ssl:bool}|null
      */
     private function resolvePfMacros(string $hostid): ?array {
-        $rows = API::UserMacro()->get([
+        $names = ['{$PF.URL}', '{$PF.USER}', '{$PF.PASSWORD}', '{$PF.VERIFY.SSL}'];
+
+        // Build precedence chain: globals first (lowest), overlaid by host
+        // (highest). Linked-template macros sit between — pull via the
+        // host.get's selectMacros to keep this to two API round-trips.
+        $bag = [];
+
+        // 1. Globals.
+        $globals = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => $names]
+        ]) ?: [];
+        foreach ($globals as $r) {
+            $bag[$r['macro']] = (string) $r['value'];
+        }
+
+        // 2. Template-inherited macros on this host.
+        $hosts = API::Host()->get([
+            'output'          => ['hostid'],
+            'hostids'         => [$hostid],
+            'selectMacros'    => ['macro', 'value'],
+            'selectParentTemplates' => ['templateid']
+        ]) ?: [];
+        $templateIds = [];
+        if ($hosts) {
+            foreach (($hosts[0]['parentTemplates'] ?? []) as $t) {
+                $templateIds[] = $t['templateid'];
+            }
+        }
+        if ($templateIds) {
+            $tplMacros = API::UserMacro()->get([
+                'output'      => ['macro', 'value'],
+                'hostids'     => $templateIds,
+                'filter'      => ['macro' => $names]
+            ]) ?: [];
+            foreach ($tplMacros as $r) {
+                $bag[$r['macro']] = (string) $r['value'];
+            }
+        }
+
+        // 3. Host-level (highest precedence).
+        $hostMacros = API::UserMacro()->get([
             'output'  => ['macro', 'value'],
             'hostids' => [$hostid],
-            'filter'  => ['macro' => ['{$PF.URL}', '{$PF.USER}', '{$PF.PASSWORD}', '{$PF.VERIFY.SSL}']]
+            'filter'  => ['macro' => $names]
         ]) ?: [];
-
-        $bag = [];
-        foreach ($rows as $r) {
+        foreach ($hostMacros as $r) {
             $bag[$r['macro']] = (string) $r['value'];
         }
 
         $url  = $bag['{$PF.URL}']  ?? '';
         $user = $bag['{$PF.USER}'] ?? '';
         $pass = $bag['{$PF.PASSWORD}'] ?? '';
-        if ($url === '' || $user === '' || $pass === '') return null;
+        if ($url === '' || $user === '' || $pass === '') {
+            error_log(sprintf(
+                '[tcs_dashboard] pfNodes: macros missing — url=%s user=%s pass=%s (checked host %s + %d template(s) + globals)',
+                $url !== '' ? 'set' : 'EMPTY',
+                $user !== '' ? 'set' : 'EMPTY',
+                $pass !== '' ? 'set' : 'EMPTY',
+                $hostid, count($templateIds)
+            ));
+            return null;
+        }
 
         return [
             'url'        => $url,
