@@ -115,29 +115,35 @@ const Port = ({ p, selected, onClick }) => {
 
 // ───────── Member port grid (28 ports per row, two rows) ─────────
 const MemberGrid = ({ member, selected, onSelect }) => {
-  const odds = member.ports.filter(p => p.n % 2 === 1);
+  const odds  = member.ports.filter(p => p.n % 2 === 1);
   const evens = member.ports.filter(p => p.n % 2 === 0);
-  const cols = Math.max(odds.length, evens.length);
+  // repeat(0, …) is invalid CSS — fall back to 1 so an empty regular grid
+  // still produces a renderable (zero-height) track instead of breaking
+  // layout flow.
+  const cols = Math.max(1, odds.length, evens.length);
   const isSel = (n) => selected && selected.member === member.idx && selected.port === n;
+  const hasSfp = Array.isArray(member.sfp) && member.sfp.length > 0;
   return (
-    <div className="swport-row">
-      <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", gap: 5 }}>
-        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+    <div className="swport-row" style={hasSfp ? null : { gridTemplateColumns: "1fr" }}>
+      <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", gap: 5, minWidth: 0 }}>
+        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, minWidth: 0 }}>
           {odds.map(p => <Port key={p.n} p={p} selected={isSel(p.n)} onClick={() => onSelect(member.idx, p)} />)}
         </div>
-        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+        <div className="swport-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, minWidth: 0 }}>
           {evens.map(p => <Port key={p.n} p={p} selected={isSel(p.n)} onClick={() => onSelect(member.idx, p)} />)}
         </div>
       </div>
-      <div className="swport-sfp">
-        <div className="sfp-label">SFP</div>
-        {member.sfp.map(s => (
-          <div key={s.n} className={"sfp-port " + s.state} title={`SFP ${s.n} · ${s.state}`} onClick={() => onSelect(member.idx, { ...s, state: s.state, n: s.n, speed: s.speed, poe: false })}>
-            <div className="core" />
-            <div className="pn">{s.n}</div>
-          </div>
-        ))}
-      </div>
+      {hasSfp && (
+        <div className="swport-sfp">
+          <div className="sfp-label">SFP</div>
+          {member.sfp.map(s => (
+            <div key={s.n} className={"sfp-port " + s.state} title={`SFP ${s.n} · ${s.state}`} onClick={() => onSelect(member.idx, { ...s, state: s.state, n: s.n, speed: s.speed, poe: false })}>
+              <div className="core" />
+              <div className="pn">{s.n}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

@@ -132,8 +132,17 @@
 .swport-member {
   padding: 14px 18px;
   border-bottom: 1px solid var(--line);
+  /* Contain any port-grid overflow within the member block so a wide member
+     can never bleed above/outside the SwitchPortWidget card. */
+  min-width: 0;
+  overflow: hidden;
 }
 .swport-member:last-child { border-bottom: 0; }
+/* Same for the inner row, so the 1fr column doesn't overflow horizontally
+   when the port grid's content would otherwise force a wider intrinsic
+   minimum (grid items default to min-width: auto). */
+.swport-row { min-width: 0; }
+.swport-row > * { min-width: 0; }
 .swport-member-head {
   display: flex; align-items: center; gap: 12px;
   margin-bottom: 12px;
