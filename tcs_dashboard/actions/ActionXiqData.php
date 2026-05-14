@@ -2,6 +2,7 @@
 
 namespace Modules\TcsDashboard\Actions;
 
+use API;
 use CControllerResponseData;
 
 /**
@@ -11,21 +12,344 @@ use CControllerResponseData;
  * XIQ_BANDS, XIQ_SSIDS, XIQ_PROBLEM_APS, XIQ_CHANNEL_GRID, XIQ_CLIENT_MIX,
  * XIQ_THROUGHPUT, XIQ_FIRMWARE, XIQ_ROAMING, XIQ_EVENTS).
  *
- * Iteration 1: synthetic data lifted from the design bundle so the page
- * renders end-to-end. Iteration 2 will swap each section for live calls to
- * Modules\TcsDashboard\Lib\XIQClient + Zabbix API::Host/Problem joins.
+ * Live sections (Zabbix-side, no XIQ token required):
+ *   - totals.aps    — host counts from API::Host (tag target=xiq)
+ *   - sites         — bucketed by Site/* host group, sev derived from open
+ *                     problem severity
+ *   - problemAps    — top-N open problems on XIQ hosts
+ *   - events        — recent problem events (open + resolved-recent)
+ *
+ * Synthetic sections (need XIQ API token to populate, deferred):
+ *   - totals.{clients,throughput,ssids,rfHealth,firmware,controllers}
+ *   - bands, ssids, channelGrid, clientMix, throughput, firmware, roaming
  */
 class ActionXiqData extends ActionDataBase {
+
+    /** Site/* + target=xiq host discovery is cached this many seconds. */
+    private const FLEET_CACHE_TTL = 30;
+    private const FLEET_CACHE_KEY = 'tcs_dashboard:xiq_fleet:v1';
 
     protected function checkInput(): bool {
         return $this->validateInput([]);
     }
 
     protected function doAction(): void {
-        $payload = self::syntheticPayload() + ['ts' => time()];
+        $payload = self::syntheticPayload();
+
+        // Overlay Zabbix-side facts on top of the synthetic shell. On failure
+        // we keep the synthetic numbers so the page never blanks — the error
+        // surfaces in the server log instead.
+        try {
+            $fleet = self::collectFleet();
+            if ($fleet['hostids']) {
+                $payload['totals']['aps'] = $fleet['apTotals'];
+                $payload['sites']         = $fleet['sites'];
+                $payload['problemAps']    = $fleet['problemAps'];
+                $payload['events']        = self::collectEvents($fleet['hostids'], $fleet['hostNames']);
+            }
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] xiq.data: ' . $e->getMessage());
+        }
+
+        $payload['ts'] = time();
         $this->setResponse(new CControllerResponseData([
             'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
         ]));
+    }
+
+    /**
+     * Discover XIQ-tagged hosts, bucket by Site/* group, count up/down, and
+     * project into the shape the React widgets consume.
+     *
+     * Result keys:
+     *   hostids   — string[]   for downstream problem/event queries
+     *   hostNames — hostid => display name
+     *   apTotals  — { total, online, offline, critical, idle }
+     *   sites     — array<{ id, name, aps, online, util, clients, sev, top, kind? }>
+     *   problemAps— array<{ ap, site, model, reason, sev, util2, util5, clients, age }>
+     */
+    private static function collectFleet(): array {
+        if (function_exists('apcu_fetch')) {
+            $hit = apcu_fetch(self::FLEET_CACHE_KEY, $ok);
+            if ($ok && is_array($hit)) return $hit;
+        }
+
+        $fleet = self::collectFleetUncached();
+
+        if (function_exists('apcu_store')) {
+            apcu_store(self::FLEET_CACHE_KEY, $fleet, self::FLEET_CACHE_TTL);
+        }
+        return $fleet;
+    }
+
+    /** @return array<string, mixed> */
+    private static function collectFleetUncached(): array {
+        $empty = [
+            'hostids' => [], 'hostNames' => [], 'apTotals' => ['total' => 0, 'online' => 0, 'offline' => 0, 'critical' => 0, 'idle' => 0],
+            'sites' => [], 'problemAps' => []
+        ];
+
+        // Step 1: Site/* host groups.
+        $siteGroups = API::HostGroup()->get([
+            'output'      => ['groupid', 'name'],
+            'search'      => ['name' => 'Site/'],
+            'startSearch' => true
+        ]) ?: [];
+        if (!$siteGroups) return $empty;
+        $groupids = array_column($siteGroups, 'groupid');
+
+        // Step 2: hosts in those groups carrying tag target=xiq. inheritedTags
+        // lets operators put the tag on the XIQ template instead of every host.
+        $hosts = API::Host()->get([
+            'output'           => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
+            'selectHostGroups' => ['groupid', 'name'],
+            'selectInventory'  => ['model'],
+            'tags'             => [['tag' => 'target', 'value' => 'xiq', 'operator' => 1]],
+            'evaltype'         => 0,
+            'inheritedTags'    => true,
+            'preservekeys'     => true
+        ]) ?: [];
+
+        // Narrow to hosts that are ALSO in a Site/* group (the tag-only filter
+        // would otherwise return XIQ hosts that operators haven't bucketed yet).
+        $siteGroupids = array_flip($groupids);
+        $hosts = array_filter($hosts, function ($h) use ($siteGroupids) {
+            foreach ($h['hostgroups'] ?? [] as $g) {
+                if (isset($siteGroupids[$g['groupid']])) return true;
+            }
+            return false;
+        });
+        if (!$hosts) return $empty;
+
+        $hostids   = array_keys($hosts);
+        $hostNames = [];
+        foreach ($hosts as $h) {
+            $hostNames[(string) $h['hostid']] = (string) ($h['name'] ?: $h['host']);
+        }
+
+        // Step 3: open problems for these hosts so we can score severity per
+        // site and surface the top-N problem APs.
+        $problems = self::collectProblemsForHosts($hostids);
+
+        // Map problem.eventid -> hostid via event.get(selectHosts).
+        $problemByHost = [];
+        if ($problems) {
+            $events = API::Event()->get([
+                'output'      => ['eventid'],
+                'eventids'    => array_column($problems, 'eventid'),
+                'selectHosts' => ['hostid']
+            ]) ?: [];
+            $hostByEvent = [];
+            foreach ($events as $ev) {
+                $first = $ev['hosts'][0] ?? null;
+                if ($first) $hostByEvent[(string) $ev['eventid']] = (string) $first['hostid'];
+            }
+            foreach ($problems as $p) {
+                $hid = $hostByEvent[(string) $p['eventid']] ?? null;
+                if ($hid !== null && isset($hosts[$hid])) {
+                    $problemByHost[$hid][] = $p;
+                }
+            }
+        }
+
+        // Step 4: bucket hosts by Site/* group, compute counts + severity.
+        $sites = [];
+        foreach ($hostids as $hid) {
+            $h = $hosts[$hid];
+
+            $siteName = '';
+            foreach ($h['hostgroups'] ?? [] as $g) {
+                if (str_starts_with((string) $g['name'], 'Site/')) {
+                    $siteName = substr($g['name'], strlen('Site/'));
+                    break;
+                }
+            }
+            if ($siteName === '') continue;
+            $siteId = strtoupper(substr(preg_replace('/[^a-z0-9]+/i', '', $siteName), 0, 3) ?: 'SITE');
+
+            $sites[$siteName] = $sites[$siteName] ?? [
+                'id'      => $siteId,
+                'name'    => $siteName,
+                'aps'     => 0,
+                'online'  => 0,
+                'util'    => 0,
+                'clients' => 0,
+                'sev'     => 'ok',
+                'top'     => '—',
+                '_hostids'=> [],
+            ];
+
+            $sites[$siteName]['aps']++;
+            $isOnline = ((int) $h['status'] === 0) && ((int) ($h['maintenance_status'] ?? 0) === 0);
+            if ($isOnline) $sites[$siteName]['online']++;
+
+            $sites[$siteName]['_hostids'][] = $hid;
+
+            // Promote severity per-site to the worst open problem on any host.
+            $worst = self::worstSev($problemByHost[$hid] ?? []);
+            if (self::sevRank($worst) > self::sevRank($sites[$siteName]['sev'])) {
+                $sites[$siteName]['sev'] = $worst;
+                // Pick the top reason from this host's worst problem.
+                foreach ($problemByHost[$hid] ?? [] as $p) {
+                    if (self::zabbixSevToLabel((int) $p['severity']) === $worst) {
+                        $sites[$siteName]['top'] = sprintf('%s · %s', $hostNames[$hid], $p['name']);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Flag a site as "outage" (pulses in the UI) when ≥25% of its APs are
+        // offline AND severity is high/disaster.
+        $sitesOut = [];
+        foreach ($sites as $s) {
+            $offPct = $s['aps'] > 0 ? (($s['aps'] - $s['online']) / $s['aps']) : 0;
+            if ($offPct >= 0.25 && in_array($s['sev'], ['high', 'disaster'], true)) {
+                $s['kind'] = 'outage';
+            }
+            unset($s['_hostids']);
+            $sitesOut[] = $s;
+        }
+        usort($sitesOut, fn($a, $b) => self::sevRank($b['sev']) <=> self::sevRank($a['sev']) ?: strcmp($a['name'], $b['name']));
+
+        // Step 5: AP totals — total / online / offline / critical (high-or-worse
+        // open problem) / idle (no problems and no recent metric — approximated
+        // as the leftover slot for now since we don't poll a "last data" item).
+        $total    = count($hostids);
+        $online   = 0;
+        $critical = 0;
+        foreach ($hostids as $hid) {
+            $h = $hosts[$hid];
+            if ((int) $h['status'] === 0 && (int) ($h['maintenance_status'] ?? 0) === 0) $online++;
+            $w = self::worstSev($problemByHost[$hid] ?? []);
+            if (in_array($w, ['high', 'disaster'], true)) $critical++;
+        }
+        $offline = max(0, $total - $online);
+        $apTotals = [
+            'total'    => $total,
+            'online'   => $online,
+            'offline'  => $offline,
+            'critical' => $critical,
+            'idle'     => 0,
+        ];
+
+        // Step 6: top problem APs — flatten, sort by severity then age (newest
+        // worst first), take 8.
+        $problemAps = [];
+        foreach ($hostids as $hid) {
+            foreach ($problemByHost[$hid] ?? [] as $p) {
+                $clock = (int) $p['clock'];
+                $age   = max(0, time() - $clock);
+                $problemAps[] = [
+                    'ap'      => $hostNames[$hid],
+                    'site'    => self::siteIdFor($hosts[$hid]),
+                    'model'   => (string) ($hosts[$hid]['inventory']['model'] ?? '—'),
+                    'reason'  => (string) $p['name'],
+                    'sev'     => self::zabbixSevToLabel((int) $p['severity']),
+                    'util2'   => 0,
+                    'util5'   => 0,
+                    'clients' => 0,
+                    'age'     => sprintf('%02d:%02d:%02d', intdiv($age, 3600), intdiv($age % 3600, 60), $age % 60),
+                    '_clock'  => $clock,
+                    '_sevr'   => self::sevRank(self::zabbixSevToLabel((int) $p['severity'])),
+                ];
+            }
+        }
+        usort($problemAps, fn($a, $b) => $b['_sevr'] <=> $a['_sevr'] ?: $b['_clock'] <=> $a['_clock']);
+        $problemAps = array_slice($problemAps, 0, 8);
+        foreach ($problemAps as &$p) { unset($p['_clock'], $p['_sevr']); }
+        unset($p);
+
+        return [
+            'hostids'    => $hostids,
+            'hostNames'  => $hostNames,
+            'apTotals'   => $apTotals,
+            'sites'      => $sitesOut,
+            'problemAps' => $problemAps,
+        ];
+    }
+
+    /** Open + recently-resolved problems across a list of XIQ host IDs. */
+    private static function collectProblemsForHosts(array $hostids): array {
+        if (!$hostids) return [];
+        return API::Problem()->get([
+            'output'    => ['eventid', 'name', 'severity', 'clock', 'r_eventid', 'r_clock', 'acknowledged'],
+            'hostids'   => $hostids,
+            'recent'    => true,
+            'time_from' => time() - 24 * 3600,
+            'sortfield' => ['eventid'],
+            'sortorder' => 'DESC',
+            'limit'     => 200,
+        ]) ?: [];
+    }
+
+    /** Recent events for the events stream (top 12, newest first). */
+    private static function collectEvents(array $hostids, array $hostNames): array {
+        if (!$hostids) return [];
+        $problems = API::Problem()->get([
+            'output'    => ['eventid', 'name', 'severity', 'clock'],
+            'hostids'   => $hostids,
+            'recent'    => true,
+            'time_from' => time() - 3600,
+            'sortfield' => ['eventid'],
+            'sortorder' => 'DESC',
+            'limit'     => 50,
+        ]) ?: [];
+        if (!$problems) return [];
+
+        $events = API::Event()->get([
+            'output'      => ['eventid'],
+            'eventids'    => array_column($problems, 'eventid'),
+            'selectHosts' => ['hostid']
+        ]) ?: [];
+        $hostByEvent = [];
+        foreach ($events as $ev) {
+            $first = $ev['hosts'][0] ?? null;
+            if ($first) $hostByEvent[(string) $ev['eventid']] = (string) $first['hostid'];
+        }
+
+        $out = [];
+        foreach ($problems as $p) {
+            $hid = $hostByEvent[(string) $p['eventid']] ?? null;
+            if ($hid === null) continue;
+            $out[] = [
+                'ts'     => date('H:i:s', (int) $p['clock']),
+                'source' => 'zbx',
+                'host'   => $hostNames[$hid] ?? $hid,
+                'msg'    => 'Problem:',
+                'obj'    => (string) $p['name'],
+                'sev'    => self::zabbixSevToLabel((int) $p['severity']),
+            ];
+            if (count($out) >= 12) break;
+        }
+        return $out;
+    }
+
+    private static function zabbixSevToLabel(int $sev): string {
+        return [0 => 'info', 1 => 'info', 2 => 'warning', 3 => 'warning', 4 => 'high', 5 => 'disaster'][$sev] ?? 'info';
+    }
+
+    private static function sevRank(string $label): int {
+        return ['ok' => 0, 'info' => 1, 'warning' => 2, 'high' => 3, 'disaster' => 4][$label] ?? 0;
+    }
+
+    private static function worstSev(array $problems): string {
+        $worst = 'ok';
+        foreach ($problems as $p) {
+            $lbl = self::zabbixSevToLabel((int) $p['severity']);
+            if (self::sevRank($lbl) > self::sevRank($worst)) $worst = $lbl;
+        }
+        return $worst;
+    }
+
+    private static function siteIdFor(array $host): string {
+        foreach ($host['hostgroups'] ?? [] as $g) {
+            if (str_starts_with((string) $g['name'], 'Site/')) {
+                $name = substr($g['name'], strlen('Site/'));
+                return strtoupper(substr(preg_replace('/[^a-z0-9]+/i', '', $name), 0, 3) ?: 'SITE');
+            }
+        }
+        return '—';
     }
 
     /** Shape consumed by xiq-bridge.jsx — also used by ActionXiq for SSR boot. */
