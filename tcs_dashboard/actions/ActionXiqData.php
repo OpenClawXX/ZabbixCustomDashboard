@@ -34,13 +34,12 @@ use Modules\TcsDashboard\Lib\XIQFleetClient;
  */
 class ActionXiqData extends ActionDataBase {
 
-    /** APCu key for the parsed master-item snapshot. TTL matches the upstream
-     *  poll interval — the Zabbix Script item runs every 5 minutes. */
-    private const FLEET_CACHE_TTL = 60;
-    private const FLEET_CACHE_KEY = 'tcs_dashboard:xiq_fleet:v5';
+    /** APCu cache for the parsed fleet snapshot. */
+    private const FLEET_CACHE_TTL = 30;
+    private const FLEET_CACHE_KEY = 'tcs_dashboard:xiq_fleet:v6';
 
-    /** Master item key on the fleet host (see template "Extreme XIQ APs by API"). */
-    private const MASTER_ITEM_KEY = 'xiq.devices.raw';
+    /** Host group prefix the template's host prototype puts each AP under. */
+    private const SITE_PREFIX = 'Site/Wireless/';
 
     /** Tag on per-AP hosts created by the host prototype. */
     private const AP_HOST_TAG = ['tag' => 'target', 'value' => 'xiq'];
@@ -52,7 +51,9 @@ class ActionXiqData extends ActionDataBase {
     protected function doAction(): void {
         $payload = self::emptyPayload();
 
-        // Layer 1: Zabbix master-item snapshot — the bulk of the data.
+        // Layer 1: Zabbix-side fleet discovery — Site/Wireless/<building>/<floor>
+        // host groups plus tag target=xiq. xiq.ap.* fleet items (when present)
+        // enrich each AP with connected / clients / version straight from XIQ.
         try {
             $fleet = self::collectFleet();
             if (!empty($fleet['devices'])) {
@@ -67,7 +68,7 @@ class ActionXiqData extends ActionDataBase {
             } else {
                 $payload['sources']['zbx'] = 'empty';
                 $payload['error']          = $payload['error']
-                    ?? 'No XIQ master item found in Zabbix. Expected an item with key "' . self::MASTER_ITEM_KEY . '" on the fleet host (template "Extreme XIQ APs by API").';
+                    ?? 'No XIQ APs found in Zabbix. Looked for hosts under "' . self::SITE_PREFIX . '<building>/<floor>" with tag target=xiq.';
             }
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq.data zbx fleet: ' . $e->getMessage());
@@ -152,7 +153,14 @@ class ActionXiqData extends ActionDataBase {
     // ── Layer 1: master-item snapshot ───────────────────────────────────────
 
     /**
-     * Read xiq.devices.raw, decode, and project into the shapes the page wants.
+     * Build the fleet snapshot from Zabbix host metadata.
+     *
+     * Discovery: hosts in any Site/Wireless/* host group with tag target=xiq.
+     * Per-AP enrichment (optional): xiq.ap.connected[<serial>], xiq.ap.clients[<serial>],
+     * and xiq.ap.version[<serial>] from wherever the template's fleet host
+     * exposes them. Fall back to interface availability + 0 clients when those
+     * items aren't present.
+     *
      * Returns { devices, apTotals, clientTotal, sites, firmware, firmwareTotals, bands }.
      */
     private static function collectFleet(): array {
@@ -170,61 +178,114 @@ class ActionXiqData extends ActionDataBase {
     }
 
     private static function collectFleetUncached(): array {
-        $empty = ['devices' => [], 'apTotals' => self::emptyPayload()['totals']['aps'],
-                  'clientTotal' => 0, 'sites' => [], 'firmware' => ['versions' => []],
-                  'firmwareTotals' => self::emptyPayload()['totals']['firmware'],
-                  'bands' => self::bandShells()];
+        $empty = [
+            'devices' => [], 'apTotals' => self::emptyPayload()['totals']['aps'],
+            'clientTotal' => 0, 'sites' => [], 'firmware' => ['versions' => []],
+            'firmwareTotals' => self::emptyPayload()['totals']['firmware'],
+            'bands' => self::bandShells()
+        ];
 
-        // Find the master item. There should only be one in a typical deployment
-        // (the fleet host). If there are several we take the freshest.
-        $items = API::Item()->get([
-            'output'      => ['itemid', 'hostid', 'lastvalue', 'lastclock'],
-            'filter'      => ['key_' => self::MASTER_ITEM_KEY],
-            'limit'       => 5,
-            'sortfield'   => 'lastclock',
-            'sortorder'   => 'DESC',
+        // Step 1: Site/Wireless/* host groups.
+        $siteGroups = API::HostGroup()->get([
+            'output'      => ['groupid', 'name'],
+            'search'      => ['name' => self::SITE_PREFIX],
+            'startSearch' => true,
         ]) ?: [];
-        if (!$items) return $empty;
+        if (!$siteGroups) return $empty;
+        $groupids = array_column($siteGroups, 'groupid');
 
-        $raw = (string) ($items[0]['lastvalue'] ?? '');
-        if ($raw === '') return $empty;
+        // Step 2: per-AP hosts. Match on either group membership OR the
+        // target=xiq tag — operators may have one without the other,
+        // and we want to surface anything reasonable.
+        $hosts = API::Host()->get([
+            'output'           => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
+            'selectHostGroups' => ['groupid', 'name'],
+            'selectTags'       => ['tag', 'value'],
+            'selectInterfaces' => ['interfaceid', 'main', 'type', 'available'],
+            'selectInventory'  => ['model'],
+            'groupids'         => $groupids,
+            'tags'             => [self::AP_HOST_TAG + ['operator' => 1]],
+            'evaltype'         => 0,
+            'inheritedTags'    => true,
+            'preservekeys'     => true,
+        ]) ?: [];
+        // Fallback — same group filter without the tag requirement, in case the
+        // tag hasn't been propagated yet (e.g. operator created hosts manually).
+        if (!$hosts) {
+            $hosts = API::Host()->get([
+                'output'           => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
+                'selectHostGroups' => ['groupid', 'name'],
+                'selectTags'       => ['tag', 'value'],
+                'selectInterfaces' => ['interfaceid', 'main', 'type', 'available'],
+                'selectInventory'  => ['model'],
+                'groupids'         => $groupids,
+                'preservekeys'     => true,
+            ]) ?: [];
+        }
+        if (!$hosts) return $empty;
 
-        $devices = json_decode($raw, true);
-        if (!is_array($devices) || !$devices) return $empty;
+        // Step 3: optional enrichment — xiq.ap.<type>[<serial>] items from the
+        // fleet host. Single API::Item.get; group by serial in PHP.
+        $bySerial = self::collectApItems();
 
-        // ── Totals ──────────────────────────────────────────────────────────
-        $total = count($devices);
-        $online = 0; $offline = 0; $idle = 0;
-        $clientTotal = 0;
+        // Step 4: build a normalized device record per host.
         $now = time();
+        $devices = [];
+        foreach ($hosts as $hid => $h) {
+            $tags = self::tagsByName($h['tags'] ?? []);
+            $serial   = (string) ($tags['ap_serial'] ?? '');
+            $extra    = $serial !== '' ? ($bySerial[$serial] ?? []) : [];
+            $model    = (string) ($tags['ap_model'] ?? $extra['model'] ?? ($h['inventory']['model'] ?? '—'));
+            $building = (string) ($tags['building']  ?? $extra['building'] ?? self::buildingFromGroups($h['hostgroups'] ?? []));
+            $floor    = (string) ($tags['floor']     ?? $extra['floor'] ?? '');
+            $version  = (string) ($extra['version']  ?? '');
+            $clients  = isset($extra['clients']) && $extra['clients'] !== '' ? (int) $extra['clients'] : 0;
+
+            // State: prefer xiq.ap.connected (XIQ's view), fall back to
+            // interface availability (Zabbix's view).
+            if (isset($extra['connected']) && $extra['connected'] !== '') {
+                $state = ((int) $extra['connected'] === 1) ? 'online' : 'offline';
+            } else {
+                $state = self::hostReachState($h);
+            }
+
+            $devices[(string) $hid] = [
+                'hostid'    => (string) $hid,
+                'name'      => (string) ($h['name'] ?: $h['host']),
+                'serial'    => $serial,
+                'model'     => $model,
+                'building'  => $building,
+                'floor'     => $floor,
+                'version'   => $version,
+                'clients'   => $clients,
+                'state'     => $state,
+                'connected' => $state === 'online' ? 1 : ($state === 'offline' ? 0 : null),
+            ];
+        }
+
+        // Step 5: roll up into the React-side shapes.
+        $total = count($devices);
+        $online = $offline = $idle = $clientTotal = 0;
         foreach ($devices as $d) {
-            $connected = (int) ($d['connected'] ?? 0);
-            $last      = (int) ($d['last_connect'] ?? 0);
-            // last_connect can be unix ms — normalize.
-            if ($last > 9999999999) $last = (int) ($last / 1000);
-
-            if ($connected === 1) $online++;
-            elseif ($connected === 0 && $last > 0 && ($now - $last) < 24 * 3600) $offline++;
-            elseif ($connected === 0) $idle++;
-            else $idle++;
-
-            $clientTotal += (int) ($d['clients'] ?? 0);
+            $clientTotal += $d['clients'];
+            if      ($d['state'] === 'online')   $online++;
+            elseif  ($d['state'] === 'offline')  $offline++;
+            elseif  ($d['state'] === 'idle')     $idle++;
+            // 'disabled' falls through — not counted in online/offline
         }
         $apTotals = [
             'total'    => $total,
             'online'   => $online,
             'offline'  => $offline,
-            'critical' => 0,            // refined later from problem severities
+            'critical' => 0,                // refined by collectProblemContext
             'idle'     => $idle,
         ];
 
-        // ── Sites: group by building, count online via connected flag ───────
+        // Sites — bucket by building, severity from offline ratio.
         $siteAcc = [];
         foreach ($devices as $d) {
-            $building = trim((string) ($d['building'] ?? ''));
-            if ($building === '') $building = trim((string) ($d['location'] ?? '')); // fall back
+            $building = $d['building'];
             if ($building === '') continue;
-
             $siteAcc[$building] = $siteAcc[$building] ?? [
                 'id'      => self::siteIdFromName($building),
                 'name'    => $building,
@@ -236,10 +297,9 @@ class ActionXiqData extends ActionDataBase {
                 'top'     => '—',
             ];
             $siteAcc[$building]['aps']++;
-            if ((int) ($d['connected'] ?? 0) === 1) $siteAcc[$building]['online']++;
-            $siteAcc[$building]['clients'] += (int) ($d['clients'] ?? 0);
+            if ($d['state'] === 'online') $siteAcc[$building]['online']++;
+            $siteAcc[$building]['clients'] += $d['clients'];
         }
-        // Outage flag — site has ≥25% offline.
         foreach ($siteAcc as &$s) {
             $offPct = $s['aps'] > 0 ? (($s['aps'] - $s['online']) / $s['aps']) : 0.0;
             if ($offPct >= 0.25) {
@@ -252,13 +312,13 @@ class ActionXiqData extends ActionDataBase {
             }
         }
         unset($s);
-        usort($siteAcc, fn($a, $b) => self::sevRank($b['sev']) <=> self::sevRank($a['sev']) ?: strcmp($a['name'], $b['name']));
         $sites = array_values($siteAcc);
+        usort($sites, fn($a, $b) => self::sevRank($b['sev']) <=> self::sevRank($a['sev']) ?: strcmp($a['name'], $b['name']));
 
-        // ── Firmware histogram ──────────────────────────────────────────────
+        // Firmware histogram.
         $versionCounts = [];
         foreach ($devices as $d) {
-            $v = trim((string) ($d['version'] ?? ''));
+            $v = trim($d['version']);
             if ($v === '') continue;
             $versionCounts[$v] = ($versionCounts[$v] ?? 0) + 1;
         }
@@ -281,17 +341,15 @@ class ActionXiqData extends ActionDataBase {
             'target'    => $target !== '' ? $target : '—',
         ];
 
-        // ── Bands: AP counts (every XIQ AP broadcasts at least 5 + 2.4) ─────
+        // Bands — total AP counts (every XIQ AP broadcasts at least 5 + 2.4).
         $bands = self::bandShells();
         foreach ($bands as &$b) {
             if ($b['id'] === '5' || $b['id'] === '2_4') {
                 $b['aps'] = $total;
             } else {
-                // 6 GHz: only newer models. Heuristic — APs whose product_type
-                // contains an "X" or starts with AP4/AP5 usually support 6E.
                 $b['aps'] = 0;
                 foreach ($devices as $d) {
-                    $m = strtoupper((string) ($d['model'] ?? ''));
+                    $m = strtoupper($d['model']);
                     if (preg_match('/^AP(4|5)\d+/', $m) || str_ends_with($m, 'X')) $b['aps']++;
                 }
             }
@@ -307,6 +365,51 @@ class ActionXiqData extends ActionDataBase {
             'firmwareTotals' => $firmwareTotals,
             'bands'          => $bands,
         ];
+    }
+
+    /**
+     * Pull every xiq.ap.* item from any host, index by serial.
+     * Returns: [serial => [type => lastvalue]], e.g.
+     *   ['ABC123' => ['connected' => '1', 'clients' => '34', 'version' => '32.7.0.5']]
+     * Missing items just yield missing keys — callers default each field.
+     */
+    private static function collectApItems(): array {
+        $items = API::Item()->get([
+            'output'      => ['key_', 'lastvalue'],
+            'search'      => ['key_' => 'xiq.ap.'],
+            'startSearch' => true,
+            'limit'       => 50000,
+        ]) ?: [];
+        $bySerial = [];
+        foreach ($items as $it) {
+            if (!preg_match('/^xiq\.ap\.([a-z]+)\[(.+)\]$/i', (string) $it['key_'], $m)) continue;
+            $type   = $m[1];
+            $serial = $m[2];
+            $bySerial[$serial][$type] = (string) ($it['lastvalue'] ?? '');
+        }
+        return $bySerial;
+    }
+
+    /** @return array<string, string> */
+    private static function tagsByName(array $tags): array {
+        $out = [];
+        foreach ($tags as $t) {
+            if (isset($t['tag'])) $out[(string) $t['tag']] = (string) ($t['value'] ?? '');
+        }
+        return $out;
+    }
+
+    /** Pull the <building> segment from the first Site/Wireless/<building>/... group. */
+    private static function buildingFromGroups(array $groups): string {
+        foreach ($groups as $g) {
+            $name = (string) ($g['name'] ?? '');
+            if (!str_starts_with($name, self::SITE_PREFIX)) continue;
+            $rest = substr($name, strlen(self::SITE_PREFIX));
+            $segments = explode('/', $rest, 2);
+            $b = trim($segments[0] ?? '');
+            if ($b !== '') return $b;
+        }
+        return '';
     }
 
     // ── Layer 2: problems + events on per-AP hosts ──────────────────────────
@@ -537,6 +640,26 @@ class ActionXiqData extends ActionDataBase {
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Classify a host as online | offline | idle | disabled from
+     * interface availability. Used when xiq.ap.connected[<serial>] isn't
+     * available for this AP.
+     */
+    private static function hostReachState(array $host): string {
+        if ((int) ($host['status'] ?? 0) !== 0) return 'disabled';
+        if ((int) ($host['maintenance_status'] ?? 0) === 1) return 'online';
+
+        $sawAvailable = false; $sawUnavailable = false;
+        foreach ($host['interfaces'] ?? [] as $iface) {
+            $a = (int) ($iface['available'] ?? 0);
+            if ($a === 1) $sawAvailable = true;
+            if ($a === 2) $sawUnavailable = true;
+        }
+        if ($sawAvailable)   return 'online';
+        if ($sawUnavailable) return 'offline';
+        return 'idle';
+    }
 
     private static function zabbixSevToLabel(int $sev): string {
         return [0 => 'info', 1 => 'info', 2 => 'warning', 3 => 'warning', 4 => 'high', 5 => 'disaster'][$sev] ?? 'info';
