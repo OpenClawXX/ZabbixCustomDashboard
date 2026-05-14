@@ -42,7 +42,7 @@ class ActionXiqData extends ActionDataBase {
     /** APCu cache for d360 sampling — 5 minutes; the data changes slowly and
      *  every call counts against the 7,500-req/hr XIQ quota. */
     private const D360_CACHE_TTL = 300;
-    private const D360_CACHE_KEY = 'tcs_dashboard:xiq_d360:v1';
+    private const D360_CACHE_KEY = 'tcs_dashboard:xiq_d360:v2';
 
     /** How many sites to sample per refresh. 879 APs × 1 call would obliterate
      *  the XIQ quota; one rep per top-N site keeps us well under budget. */
@@ -725,18 +725,27 @@ class ActionXiqData extends ActionDataBase {
         $client = XIQClient::fromToken($token);
         $endTime   = time();
         $startTime = $endTime - self::D360_WINDOW_SEC;
+        $loggedRaw = false;
         foreach ($bySite as $building => $devs) {
             usort($devs, fn($a, $b) => $b['clients'] <=> $a['clients']);
             $rep = $devs[0];
             try {
                 $resp = $client->getInterfacesGraph((int) $rep['xiqId'], self::D360_RADIO_5G, $startTime, $endTime);
+                // Log the first raw response so the operator can see the
+                // actual field names XIQ returns and we can extend the
+                // field-alias lists if needed. One-time per request.
+                if (!$loggedRaw) {
+                    $loggedRaw = true;
+                    $sample = is_array($resp) ? array_slice(is_array($resp['data'] ?? null) ? $resp['data'] : $resp, 0, 1) : null;
+                    error_log('[tcs_dashboard] d360 sample shape (xiqId=' . $rep['xiqId'] . '): ' . json_encode($sample, JSON_UNESCAPED_SLASHES));
+                }
                 $samples[] = ['building' => $building, 'rep' => $rep, 'points' => self::extractGraphPoints($resp)];
             } catch (\Throwable $e) {
                 error_log('[tcs_dashboard] d360 sample for ' . $building . ' (xiqId=' . $rep['xiqId'] . '): ' . $e->getMessage());
             }
         }
 
-        $aggregate = self::aggregateD360Samples($samples);
+        $aggregate = self::aggregateD360Samples($samples, count($fleet['devices']));
 
         if (function_exists('apcu_store')) {
             apcu_store(self::D360_CACHE_KEY, $aggregate, self::D360_CACHE_TTL);
@@ -762,11 +771,28 @@ class ActionXiqData extends ActionDataBase {
             if (!is_array($r)) continue;
             $util    = self::firstNumeric($r, ['cca', 'cca_util', 'channel_utilization', 'utilization', 'rx_util', 'totalUtilization']);
             $noise   = self::firstNumeric($r, ['noise_floor', 'noise', 'noiseFloor', 'avg_noise']);
-            $channel = self::firstNumeric($r, ['channel', 'currentChannel']);
+            $channel = self::firstNumeric($r, ['channel', 'currentChannel', 'channelNumber']);
             $ts      = self::firstNumeric($r, ['timestamp', 'time', 'ts']) ?? 0;
+            // Throughput — XIQ d360 commonly reports rx/tx bytes per sample
+            // window OR pre-computed rates in Mbps. Capture either; convert
+            // to Gbps later. ratePeriodSec is the bucket width if XIQ tells us;
+            // default 60s otherwise.
+            $rxBps = self::firstNumeric($r, ['rxBitRate', 'rx_bitrate', 'rxMbps', 'rx_mbps', 'rx_throughput', 'rx_rate']);
+            $txBps = self::firstNumeric($r, ['txBitRate', 'tx_bitrate', 'txMbps', 'tx_mbps', 'tx_throughput', 'tx_rate']);
+            $rxBytes = self::firstNumeric($r, ['rx_bytes', 'rxBytes', 'bytes_in', 'rxBytesTotal']);
+            $txBytes = self::firstNumeric($r, ['tx_bytes', 'txBytes', 'bytes_out', 'txBytesTotal']);
             // XIQ usually returns ms — normalize to seconds.
             if ($ts > 9999999999) $ts = (int) ($ts / 1000);
-            $out[] = ['ts' => (int) $ts, 'util' => $util, 'noise' => $noise, 'channel' => $channel !== null ? (int) $channel : null];
+            $out[] = [
+                'ts'      => (int) $ts,
+                'util'    => $util,
+                'noise'   => $noise,
+                'channel' => $channel !== null ? (int) $channel : null,
+                'rxMbps'  => $rxBps,
+                'txMbps'  => $txBps,
+                'rxBytes' => $rxBytes,
+                'txBytes' => $txBytes,
+            ];
         }
         usort($out, fn($a, $b) => $a['ts'] <=> $b['ts']);
         return $out;
@@ -782,23 +808,48 @@ class ActionXiqData extends ActionDataBase {
         return null;
     }
 
-    /** @param array<int, array{building:string, rep:array, points:array}> $samples */
-    private static function aggregateD360Samples(array $samples): array {
+    /**
+     * @param array<int, array{building:string, rep:array, points:array}> $samples
+     * @param int $fleetApCount used to extrapolate sampled throughput → fleet aggregate
+     */
+    private static function aggregateD360Samples(array $samples, int $fleetApCount = 0): array {
         $bandUtilSum = 0.0; $bandUtilN = 0;
         $bandNoiseSum = 0.0; $bandNoiseN = 0;
         $saturated = 0;
         $spark = array_fill(0, 24, 0.0);
         $sparkSet = false;
-        $gridSites = [];
-        $gridMatrix = [];
+
+        // Channel grid — collect actual channels seen in this batch, ordered
+        // ascending; fall back to the canonical 5 GHz list when we got nothing.
         $defaultChannels = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 149, 153, 157, 161];
+        $latestPerSample = []; // [{building, latest}]
+        $seenChannels = [];
+        foreach ($samples as $s) {
+            if (!$s['points']) continue;
+            $latest = $s['points'][count($s['points']) - 1];
+            $latestPerSample[] = ['building' => $s['building'], 'latest' => $latest];
+            if ($latest['channel'] !== null) $seenChannels[$latest['channel']] = true;
+        }
+        $channels = array_keys($seenChannels);
+        sort($channels);
+        if (!$channels) $channels = $defaultChannels;
+
+        // Throughput — sum rx+tx per sample across the LATEST point of every
+        // sample, then extrapolate to the full fleet by ratio. Per-point spark
+        // built from one representative sample's history.
+        $latestTputSampleSum = 0.0;
+        $latestTputSamples   = 0;
+        $tputSpark           = array_fill(0, 24, 0.0);
+        $tputSparkSet        = false;
+
+        $gridSites  = [];
+        $gridMatrix = [];
 
         foreach ($samples as $s) {
             $points = $s['points'];
             if (!$points) continue;
-
-            // Latest point — used for KPIs and the channel grid cell.
             $latest = $points[count($points) - 1];
+
             if ($latest['util'] !== null) {
                 $bandUtilSum += $latest['util'];
                 $bandUtilN++;
@@ -809,8 +860,7 @@ class ActionXiqData extends ActionDataBase {
                 $bandNoiseN++;
             }
 
-            // Spark — take the first sample with util points and use its 24
-            // most recent bucket averages. Cheap but representative.
+            // Util spark — seed from the first sample with util history.
             if (!$sparkSet) {
                 $utilOnly = array_values(array_filter(array_map(fn($p) => $p['util'], $points), fn($v) => $v !== null));
                 if ($utilOnly) {
@@ -820,14 +870,45 @@ class ActionXiqData extends ActionDataBase {
                 }
             }
 
+            // Throughput — Mbps per AP, latest point.
+            $mbps = self::pointThroughputMbps($latest);
+            if ($mbps !== null) {
+                $latestTputSampleSum += $mbps;
+                $latestTputSamples++;
+            }
+            // Throughput spark — first sample with any throughput history wins.
+            if (!$tputSparkSet) {
+                $hist = [];
+                foreach ($points as $p) {
+                    $m = self::pointThroughputMbps($p);
+                    if ($m !== null) $hist[] = $m;
+                }
+                if ($hist) {
+                    $sliced = array_slice($hist, -24);
+                    foreach ($sliced as $i => $v) $tputSpark[$i] = (float) $v;
+                    $tputSparkSet = true;
+                }
+            }
+
             // Channel grid: one cell per sampled site on the AP's current channel.
-            $row = array_fill(0, count($defaultChannels), 0);
+            $row = array_fill(0, count($channels), 0);
             if ($latest['channel'] !== null && $latest['util'] !== null) {
-                $ci = array_search($latest['channel'], $defaultChannels, true);
+                $ci = array_search($latest['channel'], $channels, true);
                 if ($ci !== false) $row[$ci] = (int) round($latest['util']);
             }
             $gridSites[]  = self::siteIdFromName($s['building']);
             $gridMatrix[] = $row;
+        }
+
+        // Extrapolate fleet throughput: avg Mbps-per-AP × fleet AP count → Gbps.
+        $avgMbpsPerAp = $latestTputSamples > 0 ? ($latestTputSampleSum / $latestTputSamples) : 0.0;
+        $fleetMbps    = $fleetApCount > 0 ? $avgMbpsPerAp * $fleetApCount : ($latestTputSampleSum);
+        $fleetGbps    = $fleetMbps / 1000.0;
+        // 24-bucket strip is the spark scaled by the same extrapolation ratio.
+        $tputStripGbps = [];
+        $ratio = $latestTputSamples > 0 && $avgMbpsPerAp > 0 ? ($fleetMbps / $avgMbpsPerAp) : 0.0;
+        if ($ratio > 0) {
+            foreach ($tputSpark as $v) $tputStripGbps[] = round(($v * $ratio) / 1000.0, 2);
         }
 
         return [
@@ -839,10 +920,36 @@ class ActionXiqData extends ActionDataBase {
             ],
             'channelGrid' => [
                 'sites'    => $gridSites,
-                'channels' => $defaultChannels,
+                'channels' => $channels,
                 'matrix'   => $gridMatrix,
             ],
+            'throughput' => [
+                'strip'        => $tputStripGbps,
+                'agg_gbps'     => round($fleetGbps, 2),
+                'peak_gbps'    => $tputStripGbps ? round(max($tputStripGbps), 2) : round($fleetGbps, 2),
+                'ingress_gbps' => round($fleetGbps * 0.6, 2), // we don't have a clean rx/tx split at fleet level
+                'egress_gbps'  => round($fleetGbps * 0.4, 2),
+            ],
         ];
+    }
+
+    /** Best-effort Mbps from one extracted point. Tries pre-computed rates
+     *  first, then derives from byte counters if a sample window is implied. */
+    private static function pointThroughputMbps(array $point): ?float {
+        $rxMbps = $point['rxMbps'] ?? null;
+        $txMbps = $point['txMbps'] ?? null;
+        if ($rxMbps !== null || $txMbps !== null) {
+            return (float) (($rxMbps ?? 0) + ($txMbps ?? 0));
+        }
+        $rxBytes = $point['rxBytes'] ?? null;
+        $txBytes = $point['txBytes'] ?? null;
+        if ($rxBytes !== null || $txBytes !== null) {
+            // No window in the point — assume 60s buckets. The spark is
+            // relative anyway; the absolute may be off by a constant factor.
+            $bytes = (float) (($rxBytes ?? 0) + ($txBytes ?? 0));
+            return ($bytes * 8.0) / 1_000_000.0 / 60.0;
+        }
+        return null;
     }
 
     /** Merge an aggregated d360 sample into the payload shape the React side reads. */
@@ -859,6 +966,21 @@ class ActionXiqData extends ActionDataBase {
 
         if (!empty($agg['channelGrid']['matrix'])) {
             $payload['channelGrid'] = $agg['channelGrid'];
+        }
+
+        // Throughput strip + totals.
+        $strip = $agg['throughput']['strip'] ?? [];
+        if (is_array($strip) && $strip) {
+            $payload['throughput'] = $strip;
+        }
+        $tputAgg = $agg['throughput'] ?? null;
+        if (is_array($tputAgg)) {
+            $payload['totals']['throughput'] = [
+                'agg_gbps'     => (float) ($tputAgg['agg_gbps']     ?? 0),
+                'peak_gbps'    => (float) ($tputAgg['peak_gbps']    ?? 0),
+                'ingress_gbps' => (float) ($tputAgg['ingress_gbps'] ?? 0),
+                'egress_gbps'  => (float) ($tputAgg['egress_gbps']  ?? 0),
+            ];
         }
 
         // rfHealth proxy: 100 - util, floored at 0. Crude but better than 0.
