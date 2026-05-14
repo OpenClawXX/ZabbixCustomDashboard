@@ -4,7 +4,6 @@ namespace Modules\TcsDashboard\Actions;
 
 use API;
 use CControllerResponseData;
-use Modules\TcsDashboard\Lib\XIQClient;
 use Modules\TcsDashboard\Lib\XIQFleetClient;
 
 /**
@@ -42,17 +41,11 @@ class ActionXiqData extends ActionDataBase {
     /** APCu cache for d360 sampling — 5 minutes; the data changes slowly and
      *  every call counts against the 7,500-req/hr XIQ quota. */
     private const D360_CACHE_TTL = 300;
-    private const D360_CACHE_KEY = 'tcs_dashboard:xiq_d360:v2';
+    private const D360_CACHE_KEY = 'tcs_dashboard:xiq_d360:v3';
 
-    /** How many sites to sample per refresh. 879 APs × 1 call would obliterate
-     *  the XIQ quota; one rep per top-N site keeps us well under budget. */
+    /** How many sites to sample for the channel heatmap. Fleet util / noise
+     *  pull the whole fleet (paged); only the heatmap is sampled. */
     private const D360_SITE_SAMPLE = 8;
-
-    /** XIQ radio selector for 5 GHz (TCS fleet operates 5-only). */
-    private const D360_RADIO_5G = 'WIFI1';
-
-    /** Lookback for the interfaces-graph call — XIQ requires >= 10 min. */
-    private const D360_WINDOW_SEC = 1800;
 
     /** Host group prefix the template's host prototype puts each AP under. */
     private const SITE_PREFIX = 'Site/Wireless/';
@@ -689,14 +682,24 @@ class ActionXiqData extends ActionDataBase {
     // ── Layer 4: d360 sampling (RF util / noise / channel grid) ─────────────
 
     /**
-     * Pull /d360/wireless/interfaces-graph for a representative AP per site
-     * (top {@see self::D360_SITE_SAMPLE} sites by AP count) and project the
-     * results into:
-     *   bands[5].util / .noise / .saturated / .spark
-     *   channelGrid.sites / .matrix (sparse — one entry per sampled AP)
+     * Populate bands[5].{util,noise,saturated,spark} and channelGrid from XIQ.
      *
-     * Cached in APCu for 5 minutes (D360_CACHE_TTL) so a hot dashboard
-     * refresh hits cache, not the XIQ API.
+     * Two endpoints (confirmed shapes per the XIQ OpenAPI spec):
+     *
+     *   1. POST /dashboard/wireless/usage-capacity/grid — paged fleet-wide
+     *      list with radio_5g_utilization_score and wifi1_noise per AP.
+     *      Drives band 5 GHz util (mean), noise (mean), saturated (count
+     *      with util > 75) across the WHOLE fleet — no sampling.
+     *      Cost: ceil(879/100) = 9 calls per cache miss.
+     *
+     *   2. GET /d360/wireless/interfaces-stats?deviceId=... — per-AP wifi1
+     *      snapshot (channel, channel_utilization). Sampled per top-N site
+     *      to fill the channel heatmap rows. Cost: 8 calls per cache miss.
+     *
+     * APCu-cached for 5 min so a hot dashboard refresh costs zero XIQ
+     * calls. Throughput is NOT in the spec for wireless — we leave the
+     * ThroughputStrip in its "not yet wired" state until a wireless-
+     * throughput endpoint shows up.
      */
     private static function overlayXiqD360(array &$payload, string $token, array $fleet): void {
         if (function_exists('apcu_fetch')) {
@@ -707,45 +710,25 @@ class ActionXiqData extends ActionDataBase {
             }
         }
 
-        // Pick one device per site — prefer the AP with the most clients
-        // (most active = most representative). Limit to top N sites by size.
-        $bySite = [];
-        foreach ($fleet['devices'] as $d) {
-            if (($d['xiqId'] ?? 0) <= 0)       continue;
-            if (($d['state'] ?? '') !== 'online') continue;
-            $bySite[$d['building']][] = $d;
-        }
-        // Rank sites by AP count.
-        uksort($bySite, function ($a, $b) use ($bySite) {
-            return count($bySite[$b]) <=> count($bySite[$a]);
-        });
-        $bySite = array_slice($bySite, 0, self::D360_SITE_SAMPLE, true);
+        $aggregate = ['band5' => null, 'channelGrid' => null];
 
-        $samples = []; // [{building, sample: device, points}]
-        $client = XIQClient::fromToken($token);
-        $endTime   = time();
-        $startTime = $endTime - self::D360_WINDOW_SEC;
-        $loggedRaw = false;
-        foreach ($bySite as $building => $devs) {
-            usort($devs, fn($a, $b) => $b['clients'] <=> $a['clients']);
-            $rep = $devs[0];
-            try {
-                $resp = $client->getInterfacesGraph((int) $rep['xiqId'], self::D360_RADIO_5G, $startTime, $endTime);
-                // Log the first raw response so the operator can see the
-                // actual field names XIQ returns and we can extend the
-                // field-alias lists if needed. One-time per request.
-                if (!$loggedRaw) {
-                    $loggedRaw = true;
-                    $sample = is_array($resp) ? array_slice(is_array($resp['data'] ?? null) ? $resp['data'] : $resp, 0, 1) : null;
-                    error_log('[tcs_dashboard] d360 sample shape (xiqId=' . $rep['xiqId'] . '): ' . json_encode($sample, JSON_UNESCAPED_SLASHES));
-                }
-                $samples[] = ['building' => $building, 'rep' => $rep, 'points' => self::extractGraphPoints($resp)];
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] d360 sample for ' . $building . ' (xiqId=' . $rep['xiqId'] . '): ' . $e->getMessage());
+        // ── Layer 4a: fleet-wide usage & capacity grid ──────────────────────
+        try {
+            $fleetClient = XIQFleetClient::fromToken($token);
+            $rows = $fleetClient->getUsageCapacityGrid(0); // we cache outside
+            if ($rows) {
+                $aggregate['band5'] = self::aggregateBandFromGrid($rows);
             }
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] usage-capacity grid: ' . $e->getMessage());
         }
 
-        $aggregate = self::aggregateD360Samples($samples, count($fleet['devices']));
+        // ── Layer 4b: per-site channel sampling for the heatmap ────────────
+        try {
+            $aggregate['channelGrid'] = self::sampleChannelGrid($token, $fleet);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] channel grid sample: ' . $e->getMessage());
+        }
 
         if (function_exists('apcu_store')) {
             apcu_store(self::D360_CACHE_KEY, $aggregate, self::D360_CACHE_TTL);
@@ -754,238 +737,129 @@ class ActionXiqData extends ActionDataBase {
     }
 
     /**
-     * Flatten one /d360/wireless/interfaces-graph response into a uniform
-     * point list. XIQ's exact shape isn't contractually documented; handle
-     * the two common variants — root-level array or {data: [...]} envelope —
-     * and look for util / noise fields under a handful of plausible names.
-     *
-     * @return array<int, array{ts:int, util:?float, noise:?float, channel:?int}>
+     * Aggregate band 5 GHz health from the full usage-capacity grid.
+     * Fields per row (per XIQ spec):
+     *   radio_5g_utilization_score: 0–100
+     *   wifi1_noise: dBm
+     *   has_usage_capacity_issue: bool
      */
-    private static function extractGraphPoints($resp): array {
-        if (!is_array($resp)) return [];
-        $rows = $resp['data'] ?? $resp;
-        if (!is_array($rows)) return [];
-
-        $out = [];
+    private static function aggregateBandFromGrid(array $rows): array {
+        $utilSum = 0; $utilN = 0;
+        $noiseSum = 0; $noiseN = 0;
+        $saturated = 0;
+        $issues = 0;
         foreach ($rows as $r) {
             if (!is_array($r)) continue;
-            $util    = self::firstNumeric($r, ['cca', 'cca_util', 'channel_utilization', 'utilization', 'rx_util', 'totalUtilization']);
-            $noise   = self::firstNumeric($r, ['noise_floor', 'noise', 'noiseFloor', 'avg_noise']);
-            $channel = self::firstNumeric($r, ['channel', 'currentChannel', 'channelNumber']);
-            $ts      = self::firstNumeric($r, ['timestamp', 'time', 'ts']) ?? 0;
-            // Throughput — XIQ d360 commonly reports rx/tx bytes per sample
-            // window OR pre-computed rates in Mbps. Capture either; convert
-            // to Gbps later. ratePeriodSec is the bucket width if XIQ tells us;
-            // default 60s otherwise.
-            $rxBps = self::firstNumeric($r, ['rxBitRate', 'rx_bitrate', 'rxMbps', 'rx_mbps', 'rx_throughput', 'rx_rate']);
-            $txBps = self::firstNumeric($r, ['txBitRate', 'tx_bitrate', 'txMbps', 'tx_mbps', 'tx_throughput', 'tx_rate']);
-            $rxBytes = self::firstNumeric($r, ['rx_bytes', 'rxBytes', 'bytes_in', 'rxBytesTotal']);
-            $txBytes = self::firstNumeric($r, ['tx_bytes', 'txBytes', 'bytes_out', 'txBytesTotal']);
-            // XIQ usually returns ms — normalize to seconds.
-            if ($ts > 9999999999) $ts = (int) ($ts / 1000);
-            $out[] = [
-                'ts'      => (int) $ts,
-                'util'    => $util,
-                'noise'   => $noise,
-                'channel' => $channel !== null ? (int) $channel : null,
-                'rxMbps'  => $rxBps,
-                'txMbps'  => $txBps,
-                'rxBytes' => $rxBytes,
-                'txBytes' => $txBytes,
-            ];
+            if (isset($r['radio_5g_utilization_score'])) {
+                $u = (int) $r['radio_5g_utilization_score'];
+                $utilSum += $u; $utilN++;
+                if ($u > 75) $saturated++;
+            }
+            if (isset($r['wifi1_noise'])) {
+                $n = (int) $r['wifi1_noise'];
+                if ($n !== 0) { $noiseSum += $n; $noiseN++; }
+            }
+            if (!empty($r['has_usage_capacity_issue'])) $issues++;
         }
-        usort($out, fn($a, $b) => $a['ts'] <=> $b['ts']);
-        return $out;
-    }
-
-    /** First field in $row whose value is numeric. Returns null when none match. */
-    private static function firstNumeric(array $row, array $keys): ?float {
-        foreach ($keys as $k) {
-            if (!isset($row[$k])) continue;
-            $v = $row[$k];
-            if (is_numeric($v)) return (float) $v;
-        }
-        return null;
-    }
-
-    /**
-     * @param array<int, array{building:string, rep:array, points:array}> $samples
-     * @param int $fleetApCount used to extrapolate sampled throughput → fleet aggregate
-     */
-    private static function aggregateD360Samples(array $samples, int $fleetApCount = 0): array {
-        $bandUtilSum = 0.0; $bandUtilN = 0;
-        $bandNoiseSum = 0.0; $bandNoiseN = 0;
-        $saturated = 0;
-        $spark = array_fill(0, 24, 0.0);
-        $sparkSet = false;
-
-        // Channel grid — collect actual channels seen in this batch, ordered
-        // ascending; fall back to the canonical 5 GHz list when we got nothing.
-        $defaultChannels = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 149, 153, 157, 161];
-        $latestPerSample = []; // [{building, latest}]
-        $seenChannels = [];
-        foreach ($samples as $s) {
-            if (!$s['points']) continue;
-            $latest = $s['points'][count($s['points']) - 1];
-            $latestPerSample[] = ['building' => $s['building'], 'latest' => $latest];
-            if ($latest['channel'] !== null) $seenChannels[$latest['channel']] = true;
-        }
-        $channels = array_keys($seenChannels);
-        sort($channels);
-        if (!$channels) $channels = $defaultChannels;
-
-        // Throughput — sum rx+tx per sample across the LATEST point of every
-        // sample, then extrapolate to the full fleet by ratio. Per-point spark
-        // built from one representative sample's history.
-        $latestTputSampleSum = 0.0;
-        $latestTputSamples   = 0;
-        $tputSpark           = array_fill(0, 24, 0.0);
-        $tputSparkSet        = false;
-
-        $gridSites  = [];
-        $gridMatrix = [];
-
-        foreach ($samples as $s) {
-            $points = $s['points'];
-            if (!$points) continue;
-            $latest = $points[count($points) - 1];
-
-            if ($latest['util'] !== null) {
-                $bandUtilSum += $latest['util'];
-                $bandUtilN++;
-                if ($latest['util'] > 75) $saturated++;
-            }
-            if ($latest['noise'] !== null) {
-                $bandNoiseSum += $latest['noise'];
-                $bandNoiseN++;
-            }
-
-            // Util spark — seed from the first sample with util history.
-            if (!$sparkSet) {
-                $utilOnly = array_values(array_filter(array_map(fn($p) => $p['util'], $points), fn($v) => $v !== null));
-                if ($utilOnly) {
-                    $sliced = array_slice($utilOnly, -24);
-                    foreach ($sliced as $i => $v) $spark[$i] = (float) $v;
-                    $sparkSet = true;
-                }
-            }
-
-            // Throughput — Mbps per AP, latest point.
-            $mbps = self::pointThroughputMbps($latest);
-            if ($mbps !== null) {
-                $latestTputSampleSum += $mbps;
-                $latestTputSamples++;
-            }
-            // Throughput spark — first sample with any throughput history wins.
-            if (!$tputSparkSet) {
-                $hist = [];
-                foreach ($points as $p) {
-                    $m = self::pointThroughputMbps($p);
-                    if ($m !== null) $hist[] = $m;
-                }
-                if ($hist) {
-                    $sliced = array_slice($hist, -24);
-                    foreach ($sliced as $i => $v) $tputSpark[$i] = (float) $v;
-                    $tputSparkSet = true;
-                }
-            }
-
-            // Channel grid: one cell per sampled site on the AP's current channel.
-            $row = array_fill(0, count($channels), 0);
-            if ($latest['channel'] !== null && $latest['util'] !== null) {
-                $ci = array_search($latest['channel'], $channels, true);
-                if ($ci !== false) $row[$ci] = (int) round($latest['util']);
-            }
-            $gridSites[]  = self::siteIdFromName($s['building']);
-            $gridMatrix[] = $row;
-        }
-
-        // Extrapolate fleet throughput: avg Mbps-per-AP × fleet AP count → Gbps.
-        $avgMbpsPerAp = $latestTputSamples > 0 ? ($latestTputSampleSum / $latestTputSamples) : 0.0;
-        $fleetMbps    = $fleetApCount > 0 ? $avgMbpsPerAp * $fleetApCount : ($latestTputSampleSum);
-        $fleetGbps    = $fleetMbps / 1000.0;
-        // 24-bucket strip is the spark scaled by the same extrapolation ratio.
-        $tputStripGbps = [];
-        $ratio = $latestTputSamples > 0 && $avgMbpsPerAp > 0 ? ($fleetMbps / $avgMbpsPerAp) : 0.0;
-        if ($ratio > 0) {
-            foreach ($tputSpark as $v) $tputStripGbps[] = round(($v * $ratio) / 1000.0, 2);
-        }
-
         return [
-            'band5' => [
-                'util'      => $bandUtilN  > 0 ? (int) round($bandUtilSum  / $bandUtilN)  : 0,
-                'noise'     => $bandNoiseN > 0 ? (int) round($bandNoiseSum / $bandNoiseN) : 0,
-                'saturated' => $saturated,
-                'spark'     => $spark,
-            ],
-            'channelGrid' => [
-                'sites'    => $gridSites,
-                'channels' => $channels,
-                'matrix'   => $gridMatrix,
-            ],
-            'throughput' => [
-                'strip'        => $tputStripGbps,
-                'agg_gbps'     => round($fleetGbps, 2),
-                'peak_gbps'    => $tputStripGbps ? round(max($tputStripGbps), 2) : round($fleetGbps, 2),
-                'ingress_gbps' => round($fleetGbps * 0.6, 2), // we don't have a clean rx/tx split at fleet level
-                'egress_gbps'  => round($fleetGbps * 0.4, 2),
-            ],
+            'util'      => $utilN  > 0 ? (int) round($utilSum / $utilN) : 0,
+            'noise'     => $noiseN > 0 ? (int) round($noiseSum / $noiseN) : 0,
+            'saturated' => $saturated,
+            'spark'     => array_fill(0, 24, 0), // no time series in this endpoint
+            'issues'    => $issues,
+            'n'         => $utilN,
         ];
     }
 
-    /** Best-effort Mbps from one extracted point. Tries pre-computed rates
-     *  first, then derives from byte counters if a sample window is implied. */
-    private static function pointThroughputMbps(array $point): ?float {
-        $rxMbps = $point['rxMbps'] ?? null;
-        $txMbps = $point['txMbps'] ?? null;
-        if ($rxMbps !== null || $txMbps !== null) {
-            return (float) (($rxMbps ?? 0) + ($txMbps ?? 0));
+    /**
+     * Sample one AP per top-N site, call /d360/wireless/interfaces-stats
+     * and read wifi1.{channel,channel_utilization}. Build a heatmap row
+     * per sampled site.
+     */
+    private static function sampleChannelGrid(string $token, array $fleet): array {
+        $fleetClient = XIQFleetClient::fromToken($token);
+
+        // Group by site, rank by AP count, take top N.
+        $bySite = [];
+        foreach ($fleet['devices'] as $d) {
+            if (($d['xiqId'] ?? 0) <= 0)             continue;
+            if (($d['state'] ?? '') !== 'online')    continue;
+            $bySite[$d['building']][] = $d;
         }
-        $rxBytes = $point['rxBytes'] ?? null;
-        $txBytes = $point['txBytes'] ?? null;
-        if ($rxBytes !== null || $txBytes !== null) {
-            // No window in the point — assume 60s buckets. The spark is
-            // relative anyway; the absolute may be off by a constant factor.
-            $bytes = (float) (($rxBytes ?? 0) + ($txBytes ?? 0));
-            return ($bytes * 8.0) / 1_000_000.0 / 60.0;
+        uksort($bySite, fn($a, $b) => count($bySite[$b]) <=> count($bySite[$a]));
+        $bySite = array_slice($bySite, 0, self::D360_SITE_SAMPLE, true);
+
+        $samples = [];
+        $loggedRaw = false;
+        foreach ($bySite as $building => $devs) {
+            usort($devs, fn($a, $b) => $b['clients'] <=> $a['clients']);
+            $rep = $devs[0];
+            try {
+                $resp = $fleetClient->getInterfacesStats((int) $rep['xiqId']);
+                if (!$loggedRaw) {
+                    $loggedRaw = true;
+                    error_log('[tcs_dashboard] interfaces-stats wifi1 (xiqId=' . $rep['xiqId'] . '): '
+                        . json_encode($resp['wifi1'] ?? null, JSON_UNESCAPED_SLASHES));
+                }
+                $w1 = $resp['wifi1'] ?? null;
+                if (is_array($w1)) {
+                    $samples[] = [
+                        'building' => $building,
+                        'channel'  => isset($w1['channel'])             ? (int) $w1['channel']             : null,
+                        'util'     => isset($w1['channel_utilization']) ? (int) $w1['channel_utilization'] : null,
+                    ];
+                }
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] interfaces-stats ' . $building . ' (xiqId=' . $rep['xiqId'] . '): ' . $e->getMessage());
+            }
         }
-        return null;
+
+        // Build the channel union (sorted) so the heatmap columns are exactly
+        // the channels we actually saw.
+        $channels = [];
+        foreach ($samples as $s) if ($s['channel'] !== null) $channels[$s['channel']] = true;
+        $channels = array_keys($channels);
+        sort($channels);
+        if (!$channels) {
+            $channels = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 149, 153, 157, 161];
+        }
+
+        $sites = []; $matrix = [];
+        foreach ($samples as $s) {
+            $row = array_fill(0, count($channels), 0);
+            if ($s['channel'] !== null && $s['util'] !== null) {
+                $ci = array_search($s['channel'], $channels, true);
+                if ($ci !== false) $row[$ci] = $s['util'];
+            }
+            $sites[]  = self::siteIdFromName($s['building']);
+            $matrix[] = $row;
+        }
+        return ['sites' => $sites, 'channels' => $channels, 'matrix' => $matrix];
     }
 
-    /** Merge an aggregated d360 sample into the payload shape the React side reads. */
+    /** Merge a d360 aggregate into the payload shape the React side reads. */
     private static function applyD360(array &$payload, array $agg): void {
-        foreach ($payload['bands'] as &$b) {
-            if ($b['id'] !== '5') continue;
-            $b['util']      = (int)   ($agg['band5']['util']      ?? 0);
-            $b['noise']     = (int)   ($agg['band5']['noise']     ?? 0);
-            $b['saturated'] = (int)   ($agg['band5']['saturated'] ?? 0);
-            $sp = $agg['band5']['spark'] ?? [];
-            if (is_array($sp) && $sp) $b['spark'] = $sp;
-        }
-        unset($b);
+        $band5 = $agg['band5'] ?? null;
+        if (is_array($band5)) {
+            foreach ($payload['bands'] as &$b) {
+                if ($b['id'] !== '5') continue;
+                $b['util']      = (int) ($band5['util']      ?? 0);
+                $b['noise']     = (int) ($band5['noise']     ?? 0);
+                $b['saturated'] = (int) ($band5['saturated'] ?? 0);
+                $sp = $band5['spark'] ?? [];
+                if (is_array($sp) && $sp) $b['spark'] = $sp;
+            }
+            unset($b);
 
-        if (!empty($agg['channelGrid']['matrix'])) {
-            $payload['channelGrid'] = $agg['channelGrid'];
-        }
-
-        // Throughput strip + totals.
-        $strip = $agg['throughput']['strip'] ?? [];
-        if (is_array($strip) && $strip) {
-            $payload['throughput'] = $strip;
-        }
-        $tputAgg = $agg['throughput'] ?? null;
-        if (is_array($tputAgg)) {
-            $payload['totals']['throughput'] = [
-                'agg_gbps'     => (float) ($tputAgg['agg_gbps']     ?? 0),
-                'peak_gbps'    => (float) ($tputAgg['peak_gbps']    ?? 0),
-                'ingress_gbps' => (float) ($tputAgg['ingress_gbps'] ?? 0),
-                'egress_gbps'  => (float) ($tputAgg['egress_gbps']  ?? 0),
-            ];
+            // rfHealth proxy: 100 - util.
+            $util = (int) ($band5['util'] ?? 0);
+            $payload['totals']['rfHealth'] = ['score' => max(0, 100 - $util), 'target' => 90];
         }
 
-        // rfHealth proxy: 100 - util, floored at 0. Crude but better than 0.
-        $util = (int) ($agg['band5']['util'] ?? 0);
-        $payload['totals']['rfHealth'] = ['score' => max(0, 100 - $util), 'target' => 90];
+        $grid = $agg['channelGrid'] ?? null;
+        if (is_array($grid) && !empty($grid['matrix'])) {
+            $payload['channelGrid'] = $grid;
+        }
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────

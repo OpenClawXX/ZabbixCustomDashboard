@@ -81,6 +81,71 @@ final class XIQFleetClient {
         });
     }
 
+    /**
+     * Whole-fleet wireless usage & capacity grid. ONE call per page returns
+     * up to 100 APs each with:
+     *
+     *   device_id, hostname, mac_address, site, building, floor,
+     *   radio_5g_utilization_score (0–100),
+     *   wifi1_noise (dBm),
+     *   wifi1_interference_score, wifi1_packet_loss, wifi1_retry_score,
+     *   healthy_clients, unhealthy_clients,
+     *   has_usage_capacity_issue, link_error5g
+     *
+     * Eliminates the need to sample /d360/wireless/interfaces-graph per AP —
+     * we get exact fleet-wide 5 GHz util / noise / saturation in O(pages).
+     *
+     * POST endpoint with a body filter (we pass {} to fetch the whole fleet).
+     */
+    public function getUsageCapacityGrid(int $cacheTtl = 120, string $sortField = 'RADIO_5G_UTILIZATION_SCORE'): array {
+        $bucket = 'ucGrid_' . $sortField;
+        return $this->cached($bucket, $cacheTtl, function () use ($sortField) {
+            $all  = [];
+            $page = 1;
+            do {
+                $query = [
+                    'page'      => $page,
+                    'limit'     => self::PAGE_LIMIT,
+                    'sortField' => $sortField,
+                    'sortOrder' => 'DESC',
+                ];
+                $resp = $this->postJson('/dashboard/wireless/usage-capacity/grid', $query, new \stdClass());
+                $rows = $resp['data'] ?? [];
+                if (!is_array($rows) || !$rows) break;
+                foreach ($rows as $r) $all[] = $r;
+                $totalPages = (int) ($resp['total_pages'] ?? 0);
+                if ($totalPages > 0) {
+                    if ($page >= $totalPages) break;
+                } elseif (count($rows) < self::PAGE_LIMIT) {
+                    break;
+                }
+                $page++;
+                if ($page > self::MAX_PAGES) break;
+            } while (true);
+            return $all;
+        });
+    }
+
+    /**
+     * Per-AP current wireless interface snapshot.
+     *
+     * GET /d360/wireless/interfaces-stats — returns wifi0/wifi1/wifi2, each
+     * with channel, channel_utilization, channel_width, number_of_clients,
+     * channel_utilization_details. One snapshot value, not a time series.
+     *
+     * Time window must be at least 10 minutes per XIQ docs (G6); we pass
+     * a 15-min trailing window like XIQClient::getWifiStats.
+     */
+    public function getInterfacesStats(int $deviceId): array {
+        $end   = time();
+        $start = $end - 900;
+        return $this->getJson('/d360/wireless/interfaces-stats', [
+            'deviceId'  => $deviceId,
+            'startTime' => $start * 1000,
+            'endTime'   => $end   * 1000,
+        ]);
+    }
+
     // ── Internals ────────────────────────────────────────────────────────────
 
     /** @param callable():array $producer */
@@ -127,19 +192,40 @@ final class XIQFleetClient {
     }
 
     /** @return array<string, mixed> */
-    private function getJson(string $path, array $query): array {
+    public function getJson(string $path, array $query): array {
+        return $this->request('GET', $path, $query, null);
+    }
+
+    /** @return array<string, mixed> */
+    public function postJson(string $path, array $query, $body): array {
+        return $this->request('POST', $path, $query, $body);
+    }
+
+    /** @return array<string, mixed> */
+    private function request(string $method, string $path, array $query, $body): array {
         $url = self::BASE_URL . $path . ($query ? '?' . http_build_query($query) : '');
         $ch  = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_HTTPHEADER     => [
-                'Authorization: Bearer ' . $this->token,
-                'Accept: application/json',
-            ],
+        $headers = [
+            'Authorization: Bearer ' . $this->token,
+            'Accept: application/json',
+        ];
+        $opts = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER         => true,
             CURLOPT_TIMEOUT        => self::HTTP_TIMEOUT,
             CURLOPT_FOLLOWLOCATION => false,
-        ]);
+        ];
+        if ($method === 'POST') {
+            $opts[CURLOPT_POST] = true;
+            $opts[CURLOPT_POSTFIELDS] = json_encode($body ?? new \stdClass(), JSON_UNESCAPED_SLASHES);
+            $headers[] = 'Content-Type: application/json';
+        }
+        $opts[CURLOPT_HTTPHEADER] = $headers;
+        curl_setopt_array($ch, $opts);
+        return $this->execAndParse($ch, $path);
+    }
+
+    private function execAndParse($ch, string $path): array {
 
         $raw = curl_exec($ch);
         if ($raw === false) {
