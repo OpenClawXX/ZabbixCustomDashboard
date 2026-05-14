@@ -252,9 +252,6 @@ class ActionGlobalData extends ActionDataBase {
         $debug_by_site = [];
         foreach ($problems as $p) {
             $sev = (int) $p['severity'];
-            // Health map only counts warning+ — info noise (sev 0/1) was
-            // dwarfing real signal on big unassigned buckets.
-            if ($sev < 2) continue;
             $touched = [];
             foreach ($p['hosts'] ?? [] as $h) {
                 $sid = $host_to_site[(string) $h['hostid']] ?? null;
@@ -289,7 +286,7 @@ class ActionGlobalData extends ActionDataBase {
                 'limit'      => 200
             ],
             'problem_get_total_rows' => count($problems),
-            'warning_plus_by_site'   => $debug_by_site
+            'by_site'                => $debug_by_site
         ];
 
         $out = [];
