@@ -572,6 +572,25 @@ const XIQEvents = () => (
   </div>
 );
 
+// ───────── Banner (error / rate-limit warning) ─────────
+const XIQBanner = () => {
+  const b = window.XIQ_BANNER;
+  if (!b || !b.msg) return null;
+  const bg = b.kind === "error" ? "rgba(242,95,92,0.14)" : "rgba(245,179,0,0.14)";
+  const fg = b.kind === "error" ? "var(--err)" : "var(--warn)";
+  const bd = b.kind === "error" ? "rgba(242,95,92,0.40)" : "rgba(245,179,0,0.40)";
+  return (
+    <div style={{
+      margin: "10px 14px 0", padding: "10px 14px", borderRadius: 4,
+      background: bg, border: `1px solid ${bd}`, color: fg,
+      fontSize: 12, lineHeight: 1.45, display: "flex", alignItems: "center", gap: 10
+    }}>
+      <Icon name={b.kind === "error" ? "alert" : "alert"} size={14} />
+      <span>{b.msg}</span>
+    </div>
+  );
+};
+
 // ───────── App shell ─────────
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "density": "balanced",
@@ -606,6 +625,7 @@ const App = () => {
           search="Find AP, SSID, BSSID, client MAC…"
         />
         <XIQHeader now={now} timeRange={timeRange} setTimeRange={setTimeRange} />
+        <XIQBanner />
         <div className="body">
           <KPIStrip />
           <ThroughputStrip />

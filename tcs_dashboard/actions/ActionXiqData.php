@@ -4,6 +4,7 @@ namespace Modules\TcsDashboard\Actions;
 
 use API;
 use CControllerResponseData;
+use Modules\TcsDashboard\Lib\XIQFleetClient;
 
 /**
  * GET zabbix.php?action=tcs.xiq.data
@@ -38,10 +39,9 @@ class ActionXiqData extends ActionDataBase {
 
     protected function doAction(): void {
         $payload = self::syntheticPayload();
+        $payload['sources'] = ['zbx' => 'unknown', 'xiq' => 'unknown'];
 
-        // Overlay Zabbix-side facts on top of the synthetic shell. On failure
-        // we keep the synthetic numbers so the page never blanks — the error
-        // surfaces in the server log instead.
+        // Layer 1: Zabbix-side overlay (host counts, sites, problems, events).
         try {
             $fleet = self::collectFleet();
             if ($fleet['hostids']) {
@@ -49,15 +49,229 @@ class ActionXiqData extends ActionDataBase {
                 $payload['sites']         = $fleet['sites'];
                 $payload['problemAps']    = $fleet['problemAps'];
                 $payload['events']        = self::collectEvents($fleet['hostids'], $fleet['hostNames']);
+                $payload['sources']['zbx'] = 'live';
+            } else {
+                $payload['sources']['zbx'] = 'empty';
             }
         } catch (\Throwable $e) {
-            error_log('[tcs_dashboard] xiq.data: ' . $e->getMessage());
+            error_log('[tcs_dashboard] xiq.data zbx overlay: ' . $e->getMessage());
+            $payload['sources']['zbx'] = 'error';
+            $payload['error'] = $payload['error'] ?? ('Zabbix fleet query failed: ' . $e->getMessage());
+        }
+
+        // Layer 2: ExtremeCloud IQ overlay (clients, firmware, SSIDs, mix).
+        $token = self::xiqToken();
+        if ($token === null) {
+            $payload['sources']['xiq'] = 'no-token';
+            $payload['error'] = $payload['error']
+                ?? 'XIQ data not loaded — global macro {$XIQ_API_TOKEN} is not set. Some panels show synthetic numbers until the token is added.';
+        } else {
+            try {
+                self::overlayXiq($payload, $token);
+                $payload['sources']['xiq'] = 'live';
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] xiq.data XIQ overlay: ' . $e->getMessage());
+                $payload['sources']['xiq'] = 'error';
+                $payload['error'] = $payload['error'] ?? ('XIQ query failed: ' . $e->getMessage());
+            }
         }
 
         $payload['ts'] = time();
         $this->setResponse(new CControllerResponseData([
             'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
         ]));
+    }
+
+    /** Returns the {$XIQ_API_TOKEN} global macro value, or null when unset/empty. */
+    private static function xiqToken(): ?string {
+        $rows = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => '{$XIQ_API_TOKEN}'],
+        ]) ?: [];
+        $v = trim((string) ($rows[0]['value'] ?? ''));
+        return $v === '' ? null : $v;
+    }
+
+    /**
+     * Layer XIQ-side facts onto the payload. Mutates $payload in place.
+     *
+     * Sections wired:
+     *   totals.clients               from /clients/active (count + radio_type buckets)
+     *   totals.firmware              target = most-common software_version
+     *   totals.controllers.lastSync  approximate (now), tenant info best-effort
+     *   firmware.versions            from /devices software_version histogram
+     *   clientMix.standards          from /clients/active radio_type
+     *   clientMix.os                 from /clients/active os_type
+     *   ssids[].clients              join /clients/active.ssid into synthetic SSID rows
+     *   bands[].aps                  XIQ AP counts reporting each band (proxied from product_type)
+     */
+    private static function overlayXiq(array &$payload, string $token): void {
+        $client = XIQFleetClient::fromToken($token);
+
+        $devices = $client->getDevices();
+        $clients = $client->getActiveClients();
+
+        // ── clientMix.standards / totals.clients (PHY breakdown) ─────────────
+        // XIQ exposes radio_type per client; map to the design's standard buckets.
+        $std = ['ax' => 0, 'ac' => 0, 'n' => 0, 'legacy' => 0];
+        $osCounts = [];
+        $ssidClients = [];
+        foreach ($clients as $c) {
+            $radio = strtoupper((string) ($c['radio_type'] ?? ''));
+            if (str_contains($radio, 'AX') || str_contains($radio, '11AX') || str_contains($radio, '6E')) $std['ax']++;
+            elseif (str_contains($radio, 'AC')) $std['ac']++;
+            elseif (str_contains($radio, '11N') || $radio === 'N')  $std['n']++;
+            else $std['legacy']++;
+
+            $os = self::normalizeOs((string) ($c['os_type'] ?? $c['os'] ?? ''));
+            $osCounts[$os] = ($osCounts[$os] ?? 0) + 1;
+
+            $ssid = (string) ($c['ssid'] ?? '');
+            if ($ssid !== '') $ssidClients[$ssid] = ($ssidClients[$ssid] ?? 0) + 1;
+        }
+        $totalClients = array_sum($std);
+
+        $stdColors = ['ax' => 'var(--ext)', 'ac' => 'var(--info)', 'n' => 'var(--warn)', 'legacy' => 'var(--err)'];
+        $stdLabels = ['ax' => 'Wi-Fi 6 / 6E (ax)', 'ac' => 'Wi-Fi 5 (ac)', 'n' => 'Wi-Fi 4 (n)', 'legacy' => 'Legacy a/b/g'];
+        $standards = [];
+        foreach ($std as $id => $count) {
+            $standards[] = [
+                'id'    => $id,
+                'label' => $stdLabels[$id],
+                'count' => $count,
+                'pct'   => $totalClients > 0 ? round($count / $totalClients * 100, 1) : 0.0,
+                'color' => $stdColors[$id],
+            ];
+        }
+
+        $osRows = [];
+        arsort($osCounts);
+        foreach ($osCounts as $label => $count) {
+            $osRows[] = [
+                'id'    => strtolower(preg_replace('/[^a-z0-9]+/i', '', $label) ?: 'os'),
+                'label' => $label,
+                'count' => $count,
+                'pct'   => $totalClients > 0 ? round($count / $totalClients * 100, 1) : 0.0,
+            ];
+        }
+
+        $payload['totals']['clients'] = [
+            'total'   => $totalClients,
+            'dot11ax' => $std['ax'],
+            'dot11ac' => $std['ac'],
+            'legacy'  => $std['n'] + $std['legacy'],
+        ];
+        $payload['clientMix'] = ['standards' => $standards, 'os' => $osRows];
+
+        // ── firmware histogram + totals.firmware ─────────────────────────────
+        $versionCounts = [];
+        foreach ($devices as $d) {
+            $v = trim((string) ($d['software_version'] ?? ''));
+            if ($v === '') continue;
+            $versionCounts[$v] = ($versionCounts[$v] ?? 0) + 1;
+        }
+        arsort($versionCounts);
+        // Target = most-common version. Anything higher = ahead; lower = behind.
+        $target = (string) (array_key_first($versionCounts) ?? '');
+        $fwVersions = [];
+        $compliant = $behind = $ahead = 0;
+        foreach ($versionCounts as $v => $count) {
+            $cmp = self::compareSemver($v, $target);
+            $status = $cmp === 0 ? 'target' : ($cmp < 0 ? 'behind' : 'ahead');
+            if ($status === 'target')      $compliant = $count;
+            elseif ($status === 'behind')  $behind  += $count;
+            else                           $ahead   += $count;
+            $fwVersions[] = ['v' => $v, 'count' => $count, 'status' => $status, 'note' => ''];
+        }
+        $payload['totals']['firmware'] = [
+            'compliant' => $compliant,
+            'behind'    => $behind,
+            'ahead'     => $ahead,
+            'target'    => $target ?: '—',
+        ];
+        $payload['firmware'] = ['versions' => $fwVersions];
+
+        // ── ssids[].clients overlay ──────────────────────────────────────────
+        // Walk the synthetic SSID list and replace `clients` with the live
+        // count where the SSID label matches what XIQ reports. SSIDs XIQ
+        // reports but the synthetic list doesn't carry are appended.
+        $matched = [];
+        $newSsids = [];
+        foreach ($payload['ssids'] as $row) {
+            $label = (string) $row['label'];
+            if (isset($ssidClients[$label])) {
+                $row['clients'] = $ssidClients[$label];
+                $matched[$label] = true;
+            } else {
+                $row['clients'] = 0;
+            }
+            $newSsids[] = $row;
+        }
+        foreach ($ssidClients as $label => $count) {
+            if (!isset($matched[$label])) {
+                $newSsids[] = [
+                    'id'         => strtolower(preg_replace('/[^a-z0-9]+/i', '-', $label) ?: 'ssid'),
+                    'label'      => $label,
+                    'auth'       => '—',
+                    'vlan'       => 0,
+                    'clients'    => $count,
+                    'success'    => 0.0,
+                    'throughput' => 0.0,
+                    'role'       => 'unknown',
+                ];
+            }
+        }
+        $payload['ssids'] = $newSsids;
+        $payload['totals']['ssids'] = ['total' => count($newSsids), 'broadcast' => count(array_filter($newSsids, fn($s) => empty($s['hidden'])))];
+
+        // ── bands[].aps from XIQ device list ─────────────────────────────────
+        // We don't have per-radio utilization without d360 calls (per-device,
+        // expensive). Just populate the AP counts so the design's structure
+        // stays accurate; util/noise/saturated stay synthetic.
+        $countAps = count($devices);
+        foreach ($payload['bands'] as &$b) {
+            $b['aps']     = $countAps;
+            $b['clients'] = $b['id'] === '5'   ? $std['ax'] + $std['ac']
+                          : ($b['id'] === '2_4' ? $std['n']  + $std['legacy']
+                          : 0); // 6 GHz: leave at 0 unless we can detect from radio_type
+        }
+        unset($b);
+
+        // ── controllers.lastSync ────────────────────────────────────────────
+        $payload['totals']['controllers']['lastSync'] = 'just now';
+
+        // Rate-limit awareness for the banner.
+        $rem = $client->getRateLimitRemaining();
+        if ($rem >= 0 && $client->isRateLimitLow()) {
+            $payload['warning'] = "XIQ rate-limit low: $rem requests left this hour.";
+        }
+    }
+
+    private static function normalizeOs(string $raw): string {
+        $s = strtoupper(trim($raw));
+        if ($s === '') return 'Other';
+        if (str_contains($s, 'CHROME'))                return 'ChromeOS';
+        if (str_contains($s, 'WIN'))                   return 'Windows';
+        if (str_contains($s, 'IPAD') || str_contains($s, 'IPHONE') || str_contains($s, 'IOS')) return 'iPadOS';
+        if (str_contains($s, 'MAC') || str_contains($s, 'OSX')) return 'macOS';
+        if (str_contains($s, 'ANDROID'))               return 'Android';
+        if (str_contains($s, 'LINUX'))                 return 'Linux';
+        return ucfirst(strtolower($raw));
+    }
+
+    /** Compare two dotted version strings. Returns -1/0/1. Non-numeric falls back to strcmp. */
+    private static function compareSemver(string $a, string $b): int {
+        if ($a === $b) return 0;
+        $pa = array_map('intval', preg_split('/[.\-_]/', $a) ?: []);
+        $pb = array_map('intval', preg_split('/[.\-_]/', $b) ?: []);
+        $len = max(count($pa), count($pb));
+        for ($i = 0; $i < $len; $i++) {
+            $x = $pa[$i] ?? 0;
+            $y = $pb[$i] ?? 0;
+            if ($x !== $y) return $x <=> $y;
+        }
+        return strcmp($a, $b);
     }
 
     /**

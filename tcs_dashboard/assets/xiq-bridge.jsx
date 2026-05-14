@@ -30,6 +30,14 @@
             const v = payload[src];
             window[dst] = (v !== undefined && v !== null) ? v : (window[dst] || fallback);
         }
+        // Banner state — App renders if non-null. error wins over warning so
+        // the user sees the most important condition.
+        window.XIQ_BANNER = payload.error
+            ? { kind: "error",   msg: payload.error }
+            : payload.warning
+            ? { kind: "warning", msg: payload.warning }
+            : null;
+        window.XIQ_SOURCES = payload.sources || null;
         window.dispatchEvent(new CustomEvent("tcs:xiq-data", { detail: { ts: payload.ts || Date.now() } }));
     }
 
