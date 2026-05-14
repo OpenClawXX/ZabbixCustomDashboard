@@ -590,7 +590,7 @@ const App = () => {
 
   return (
     <div className="app" data-density={t.density} data-screen-label="XIQ Wireless Status">
-      <GlobalSidebar active="wireless" />
+      <GlobalSidebar active="xiq" />
       <div className="main">
         <GlobalTopbar
           crumb={["Tuscaloosa City Schools", "Wireless", "XIQ · Status"]}

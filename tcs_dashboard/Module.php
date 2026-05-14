@@ -31,7 +31,8 @@ class Module extends CModule {
         $submenu = $monitoring->getSubmenu();
 
         $submenu->add((new CMenuItem(_('TCS Global')))->setAction('tcs.global.view'));
-        $submenu->add((new CMenuItem(_('TCS Wireless APs')))->setAction('tcs.xiq.view'));
+        $submenu->add((new CMenuItem(_('TCS Wireless APs')))->setAction('tcs.dashboard.view'));
+        $submenu->add((new CMenuItem(_('TCS XIQ Status')))->setAction('tcs.xiq.view'));
         $submenu->add((new CMenuItem(_('TCS Switches')))->setAction('tcs.switches.view'));
         $submenu->add((new CMenuItem(_('TCS Servers')))->setAction('tcs.servers.view'));
         $submenu->add((new CMenuItem(_('TCS Surveillance')))->setAction('tcs.surveillance.view'));
