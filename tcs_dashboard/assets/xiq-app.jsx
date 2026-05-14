@@ -97,14 +97,14 @@ const XIQHeader = ({ now, timeRange, setTimeRange }) => (
 // ───────── KPI strip (6 cells) ─────────
 const KPIStrip = () => {
   const t = XIQ_TOTALS;
-  const onlinePct = (t.aps.online / t.aps.total) * 100;
+  const onlinePct = t.aps.total > 0 ? (t.aps.online / t.aps.total) * 100 : 0;
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="xiq-kpi">
         <div className="xiq-kpi-cell">
           <div className="xiq-kpi-h"><span className="xiq-kpi-lbl">Access Points</span><SourceBadge src="ext" /></div>
           <div className="xiq-kpi-v">{t.aps.total.toLocaleString()}</div>
-          <div className="xiq-kpi-foot">across 26 sites · 4 models</div>
+          <div className="xiq-kpi-foot">across {XIQ_SITES.length} site{XIQ_SITES.length === 1 ? "" : "s"}</div>
         </div>
         <div className="xiq-kpi-cell ok">
           <div className="xiq-kpi-h"><span className="xiq-kpi-lbl">Online</span><SourceBadge src="ext" /></div>
@@ -141,15 +141,32 @@ const KPIStrip = () => {
 // ───────── Throughput 24h strip ─────────
 const ThroughputStrip = () => {
   const data = XIQ_THROUGHPUT;
+  if (!data || data.length === 0) {
+    return (
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-h">
+          <h3>Aggregate Throughput · 24h</h3>
+          <SourceBadge src="ext" />
+          <div className="h-spacer" />
+          <span className="h-meta">no XIQ throughput history yet</span>
+        </div>
+        <CardLoading
+          label={window.XIQ_LOADING ? "Loading throughput…" : "Throughput history requires XIQ d360 data (not yet wired)."}
+          spinning={!!window.XIQ_LOADING}
+        />
+      </div>
+    );
+  }
   const max = Math.max(...data);
   const total = data.reduce((a,b) => a+b, 0);
+  const last = data[data.length-1] ?? 0;
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="card-h">
         <h3>Aggregate Throughput · 24h</h3>
         <SourceBadge src="ext" />
         <div className="h-spacer" />
-        <span className="h-meta">{(total).toFixed(0)} Gbps·h transferred · peak {XIQ_TOTALS.throughput.peak_gbps.toFixed(1)} Gbps @ 12:00</span>
+        <span className="h-meta">{(total).toFixed(0)} Gbps·h transferred · peak {(XIQ_TOTALS.throughput?.peak_gbps ?? 0).toFixed(1)} Gbps @ 12:00</span>
       </div>
       <div className="tput-row">
         <div className="tput-bars">
@@ -163,7 +180,7 @@ const ThroughputStrip = () => {
         <div className="tput-side">
           <div className="tput-stat">
             <div className="tput-stat-lbl"><span className="dot" style={{ background: "var(--zbx)" }} /> Right now</div>
-            <div className="tput-stat-v">{data[data.length-1].toFixed(2)}<span className="u">Gbps</span></div>
+            <div className="tput-stat-v">{last.toFixed(2)}<span className="u">Gbps</span></div>
           </div>
           <div className="tput-stat">
             <div className="tput-stat-lbl">Mean (24h)</div>
@@ -171,7 +188,7 @@ const ThroughputStrip = () => {
           </div>
           <div className="tput-stat">
             <div className="tput-stat-lbl">Clients / AP</div>
-            <div className="tput-stat-v">{(XIQ_TOTALS.clients.total/XIQ_TOTALS.aps.online).toFixed(1)}</div>
+            <div className="tput-stat-v">{(XIQ_TOTALS.aps?.online > 0 ? (XIQ_TOTALS.clients.total / XIQ_TOTALS.aps.online) : 0).toFixed(1)}</div>
           </div>
         </div>
       </div>
@@ -428,7 +445,7 @@ const FirmwareCompliance = () => {
   const fw = XIQ_FIRMWARE;
   const total = fw.versions.reduce((n, v) => n + v.count, 0);
   const compliant = fw.versions.find(v => v.status === "target")?.count || 0;
-  const pct = (compliant / total) * 100;
+  const pct = total > 0 ? (compliant / total) * 100 : 0;
   return (
     <div className="card">
       <div className="card-h">
@@ -442,7 +459,7 @@ const FirmwareCompliance = () => {
               label={`${pct.toFixed(1)}%`} sub="on target" />
         <div className="fw-list">
           {fw.versions.map(v => {
-            const pct = (v.count / total) * 100;
+            const pct = total > 0 ? (v.count / total) * 100 : 0;
             const color = v.status === "target" ? "var(--ok)" : v.status === "behind" ? "var(--warn)" : "var(--ext)";
             return (
               <div className={"fw-row " + v.status} key={v.v}>
@@ -551,7 +568,7 @@ const RoamingHealth = () => {
         <div className="roam-stack">
           {r.buckets.map((b, i) => (
             <div key={i} title={`${b.range}: ${b.count.toLocaleString()}`}
-                 style={{ width: `${(b.count/total)*100}%`, background: b.color, opacity: 0.85 }} />
+                 style={{ width: `${total > 0 ? (b.count/total)*100 : 0}%`, background: b.color, opacity: 0.85 }} />
           ))}
         </div>
         <div className="roam-legend">
