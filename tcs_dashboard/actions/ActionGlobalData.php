@@ -23,6 +23,13 @@ class ActionGlobalData extends ActionDataBase {
     /** Host-group name prefix that marks a "site" rollup group. */
     private const SITE_GROUP_PREFIX = 'Site/';
 
+    /** Aggregator hosts whose problems must not roll up onto the per-site
+     *  heatmap — they carry fleet-wide alerts (e.g. one row per AP) that
+     *  would collapse onto whichever single tile the aggregator lives in.
+     *  These hosts still count in the severity strip and domain cards;
+     *  they'll get their own overview tile elsewhere. */
+    private const HEATMAP_EXCLUDE_HOSTS = ['XIQ_AP'];
+
     /** Template-name substrings that bucket a host into a domain card. */
     private const DOMAIN_PATTERNS = [
         'wireless' => ['XIQ', 'Extreme AP', 'WLC', 'wireless'],
@@ -79,19 +86,32 @@ class ActionGlobalData extends ActionDataBase {
         // Zabbix 7.0+ renamed proxy.host to proxy.name. Use 'name'.
         $proxies = $this->safeGet(fn() => API::Proxy()->get(['output' => ['proxyid', 'name']]));
 
+        // Build the hostids whitelist for problem.get. Aggregator hosts
+        // (XIQ_AP, etc.) host fleet-wide problems that would otherwise
+        // dominate the 200-row budget and starve real per-host alerts.
+        // Filtering at the API level rather than in PHP means the 200
+        // slots are spent entirely on per-host problems.
+        $heatmap_hostids = [];
+        foreach ($hosts as $h) {
+            if (in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)) continue;
+            $heatmap_hostids[] = $h['hostid'];
+        }
+
         // Zabbix 7.2 removed selectHosts from problem.get / event.get. We
         // pull objectid (triggerid) here and resolve the trigger→hosts map
         // in one trigger.get call below. suppressed=false drops problems
         // currently silenced by a maintenance window so they don't inflate
         // the health-map tiles.
-        $problems = $this->safeGet(fn() => API::Problem()->get([
+        $problem_args = [
             'output'     => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged', 'r_eventid'],
             'recent'     => false,
             'suppressed' => false,
             'sortfield'  => ['eventid'],
             'sortorder'  => 'DESC',
             'limit'      => 200
-        ]));
+        ];
+        if ($heatmap_hostids) $problem_args['hostids'] = $heatmap_hostids;
+        $problems = $this->safeGet(fn() => API::Problem()->get($problem_args));
         // Strip resolved rows so totals / sites / domains never double-count
         // recently-recovered problems as still open.
         $problems = array_values(array_filter(
@@ -217,10 +237,16 @@ class ActionGlobalData extends ActionDataBase {
 
     private function buildSites(array $hosts, array $problems): array {
         // Bucket hosts by site group. Hosts in zero site-prefix groups go
-        // to "Unassigned".
+        // to "Unassigned". Aggregator hosts (XIQ_AP, etc.) never enter the
+        // map at all — their problems are filtered below.
         $host_to_site = [];
+        $excluded_hostids = [];
         $sites = [];
         foreach ($hosts as $h) {
+            if (in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)) {
+                $excluded_hostids[(string) $h['hostid']] = true;
+                continue;
+            }
             $site_group = null;
             foreach ($h['hostgroups'] ?? [] as $g) {
                 if (str_starts_with($g['name'], self::SITE_GROUP_PREFIX)) {
@@ -250,15 +276,46 @@ class ActionGlobalData extends ActionDataBase {
         // expression spans N hosts in the same site must not inflate that
         // site's tile by N.
         $debug_by_site = [];
+        $excluded_problems = 0;
+        $unmapped_problems = 0;
         foreach ($problems as $p) {
             $sev = (int) $p['severity'];
-            // Health map only counts warning+ — info noise (sev 0/1) was
-            // dwarfing real signal on big unassigned buckets.
-            if ($sev < 2) continue;
+            $hosts_on_trigger = $p['hosts'] ?? [];
+            // Match by host technical name too — the aggregator may not be
+            // in host.get if it's filtered out by monitored_hosts, in which
+            // case the hostid-based excluded_hostids map is empty.
+            $all_excluded = $hosts_on_trigger !== [] && array_reduce(
+                $hosts_on_trigger,
+                fn($acc, $h) => $acc
+                    && (isset($excluded_hostids[(string) $h['hostid']])
+                        || in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)),
+                true
+            );
+            if ($all_excluded) {
+                $excluded_problems++;
+                continue;
+            }
             $touched = [];
-            foreach ($p['hosts'] ?? [] as $h) {
+            foreach ($hosts_on_trigger as $h) {
                 $sid = $host_to_site[(string) $h['hostid']] ?? null;
                 if ($sid !== null) $touched[$sid] = true;
+            }
+            // Trigger references hosts that host.get didn't return (template
+            // host, disabled, suppressed, etc.). Surface them under the
+            // Unassigned tile rather than silently dropping — the operator
+            // needs to see the alert, not lose it.
+            if (!$touched) {
+                $unmapped_problems++;
+                if (!isset($sites['unassigned'])) {
+                    $sites['unassigned'] = [
+                        'id'       => 'unassigned',
+                        'name'     => 'Unassigned',
+                        'hosts'    => 0,
+                        'problems' => 0,
+                        '_sev'     => -1
+                    ];
+                }
+                $touched['unassigned'] = true;
             }
             foreach (array_keys($touched) as $sid) {
                 $sites[$sid]['problems']++;
@@ -286,10 +343,17 @@ class ActionGlobalData extends ActionDataBase {
             'problem_get_args' => [
                 'recent'     => false,
                 'suppressed' => false,
-                'limit'      => 200
+                'limit'      => 200,
+                'hostids'    => 'non-aggregator only'
             ],
             'problem_get_total_rows' => count($problems),
-            'warning_plus_by_site'   => $debug_by_site
+            'aggregator_excluded'    => [
+                'hosts'        => self::HEATMAP_EXCLUDE_HOSTS,
+                'api_filtered' => true,
+                'problems'     => $excluded_problems
+            ],
+            'unmapped_to_unassigned' => $unmapped_problems,
+            'by_site'                => $debug_by_site
         ];
 
         $out = [];
