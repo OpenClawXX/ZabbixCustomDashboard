@@ -24,7 +24,7 @@ The module lives in [tcs_dashboard/](tcs_dashboard) and is dropped into a Zabbix
 2. In Zabbix go to **Administration → General → Modules**, click **Scan directory**, find "TCS Dashboard", and toggle **Enabled**.
 3. Hit any page via its `zabbix.php?action=tcs.*` URL, or use the new entry under **Monitoring**.
 
-Tested against Zabbix **6.0 LTS**, **6.4**, and **7.0**.
+Tested against Zabbix **7.4**.
 
 ## Project layout
 
