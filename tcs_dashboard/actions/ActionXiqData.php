@@ -766,23 +766,34 @@ class ActionXiqData extends ActionDataBase {
         $sampleSize    = count($sampleIds);
         $extrapolation = $sampleSize > 0 ? ($totalClients / $sampleSize) : 1.0;
 
-        $now   = time();
-        $strip = [];
+        // Build all 24 hour-bucket windows up front, dispatch in parallel.
+        // Sequential round-trips dominated cold-load time (24 × ~300ms = 7-15s);
+        // curl_multi collapses that to one wall-clock RTT.
+        $now     = time();
+        $windows = [];
         for ($i = self::THROUGHPUT_BUCKETS - 1; $i >= 0; $i--) {
             $bucketEnd   = $now - $i * self::THROUGHPUT_BUCKET_SEC;
             $bucketStart = $bucketEnd - self::THROUGHPUT_BUCKET_SEC;
-            try {
-                $rows = $fleetClient->getClientsUsage($sampleIds, $bucketStart * 1000, $bucketEnd * 1000);
-                $sampleBytes = 0;
-                foreach ($rows as $r) $sampleBytes += (int) ($r['usage'] ?? 0);
-                $fleetBytes  = $sampleBytes * $extrapolation;
-                // bytes / 3600 sec × 8 bits/byte / 1e9 = Gbps
-                $gbps = ($fleetBytes * 8.0) / 3600.0 / 1_000_000_000.0;
-                $strip[] = round($gbps, 2);
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] clients/usage bucket ' . $i . ': ' . $e->getMessage());
-                $strip[] = 0.0;
-            }
+            $windows[$i] = [$bucketStart * 1000, $bucketEnd * 1000];
+        }
+
+        try {
+            $batched = $fleetClient->getClientsUsageMulti($sampleIds, $windows);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] clients/usage multi: ' . $e->getMessage());
+            $batched = [];
+        }
+
+        $strip = [];
+        for ($i = self::THROUGHPUT_BUCKETS - 1; $i >= 0; $i--) {
+            $rows = $batched[$i] ?? null;
+            if (!is_array($rows)) { $strip[] = 0.0; continue; }
+            $sampleBytes = 0;
+            foreach ($rows as $r) $sampleBytes += (int) ($r['usage'] ?? 0);
+            $fleetBytes  = $sampleBytes * $extrapolation;
+            // bytes / 3600 sec × 8 bits/byte / 1e9 = Gbps
+            $gbps = ($fleetBytes * 8.0) / 3600.0 / 1_000_000_000.0;
+            $strip[] = round($gbps, 2);
         }
 
         $aggGbps  = $strip ? array_sum($strip) / count($strip) : 0.0;
@@ -934,28 +945,40 @@ class ActionXiqData extends ActionDataBase {
         uksort($bySite, fn($a, $b) => count($bySite[$b]) <=> count($bySite[$a]));
         $bySite = array_slice($bySite, 0, self::D360_SITE_SAMPLE, true);
 
-        $samples = [];
-        $loggedRaw = false;
+        // Pick one representative AP per site, then dispatch all interfaces-stats
+        // calls in parallel (curl_multi). Was: D360_SITE_SAMPLE sequential RTTs.
+        $repByBuilding = [];
+        $deviceIds     = [];
         foreach ($bySite as $building => $devs) {
             usort($devs, fn($a, $b) => $b['clients'] <=> $a['clients']);
             $rep = $devs[0];
-            try {
-                $resp = $fleetClient->getInterfacesStats((int) $rep['xiqId']);
-                if (!$loggedRaw) {
-                    $loggedRaw = true;
-                    error_log('[tcs_dashboard] interfaces-stats wifi1 (xiqId=' . $rep['xiqId'] . '): '
-                        . json_encode($resp['wifi1'] ?? null, JSON_UNESCAPED_SLASHES));
-                }
-                $w1 = $resp['wifi1'] ?? null;
-                if (is_array($w1)) {
-                    $samples[] = [
-                        'building' => $building,
-                        'channel'  => isset($w1['channel'])             ? (int) $w1['channel']             : null,
-                        'util'     => isset($w1['channel_utilization']) ? (int) $w1['channel_utilization'] : null,
-                    ];
-                }
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] interfaces-stats ' . $building . ' (xiqId=' . $rep['xiqId'] . '): ' . $e->getMessage());
+            $repByBuilding[$building] = $rep;
+            $deviceIds[$building]     = (int) $rep['xiqId'];
+        }
+
+        $responses = $deviceIds ? $fleetClient->getInterfacesStatsMulti($deviceIds) : [];
+
+        $samples = [];
+        $loggedRaw = false;
+        foreach ($repByBuilding as $building => $rep) {
+            $resp = $responses[$building] ?? null;
+            if (is_string($resp)) {
+                error_log('[tcs_dashboard] interfaces-stats ' . $building . ' (xiqId=' . $rep['xiqId'] . '): ' . $resp);
+                continue;
+            }
+            if (!is_array($resp)) continue;
+            if (!$loggedRaw) {
+                $loggedRaw = true;
+                error_log('[tcs_dashboard] interfaces-stats wifi1 (xiqId=' . $rep['xiqId'] . '): '
+                    . json_encode($resp['wifi1'] ?? null, JSON_UNESCAPED_SLASHES));
+            }
+            $w1 = $resp['wifi1'] ?? null;
+            if (is_array($w1)) {
+                $samples[] = [
+                    'building' => $building,
+                    'channel'  => isset($w1['channel'])             ? (int) $w1['channel']             : null,
+                    'util'     => isset($w1['channel_utilization']) ? (int) $w1['channel_utilization'] : null,
+                ];
             }
         }
 
