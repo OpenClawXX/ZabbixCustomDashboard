@@ -1,6 +1,7 @@
 // Unified sidebar + topbar used by every page in the project.
 // Pass `active` to highlight the current page. Values:
 //   "global"        — Global Dashboard
+//   "xiq"           — XIQ Wireless Status (fleet overview)
 //   "wireless"      — Wireless APs (AP Detail / Zabbix Dashboard)
 //   "switches"      — Switches Dashboard
 //   "zbx-servers"   — Servers Dashboard
@@ -16,6 +17,7 @@ window.TCS_NAV = window.TCS_NAV || {
   zabbixDefault: "zabbix.php?action=dashboard.view",
   global:        "zabbix.php?action=tcs.global.view",
   apDetail:      "zabbix.php?action=tcs.dashboard.view",
+  xiqStatus:     "zabbix.php?action=tcs.xiq.view",
   switches:      "zabbix.php?action=tcs.switches.view",
   servers:       "zabbix.php?action=tcs.servers.view",
   problems:      "zabbix.php?action=tcs.problems.view",
@@ -84,8 +86,8 @@ const GlobalSidebar = ({ active }) => {
       <div className="nav-section">
         <div className="nav-label">Monitoring</div>
         {item("global",      NAV.global,        "map",      "Global Dashboard")}
-        {item("hosts",       NAV.global,        "ap",       "Hosts",        "2,418")}
-        {item("wireless",    NAV.apDetail,      "wifi",     "Wireless APs", "1,184")}
+        {item("xiq",         NAV.xiqStatus,     "ap",       "XIQ · Status", "1,184")}
+        {item("wireless",    NAV.apDetail,      "wifi",     "Wireless APs")}
         {item("switches",    NAV.switches,      "ethernet", "Switches",     "312")}
         {item("zbx-servers", NAV.servers,       "ap",       "Servers",      "17")}
         {item("problems",    NAV.problems,      "alert",    "Problems")}

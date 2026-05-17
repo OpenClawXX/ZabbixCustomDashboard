@@ -38,6 +38,16 @@
             "view": "switches.view",
             "layout": "layout.htmlpage"
         },
+        "tcs.xiq.view": {
+            "class": "ActionXiq",
+            "view": "xiq.view",
+            "layout": "layout.htmlpage"
+        },
+        "tcs.xiq.data": {
+            "class": "ActionXiqData",
+            "layout": "layout.json",
+            "view": null
+        },
         "tcs.switches.fleet.data": {
             "class": "ActionSwitchesFleetData",
             "layout": "layout.json",
