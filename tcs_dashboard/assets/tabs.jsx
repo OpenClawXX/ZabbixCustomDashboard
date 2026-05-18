@@ -602,43 +602,104 @@ const EventsTab = () => {
 };
 
 // ───────── Alerts tab ─────────
-const AlertsTab = () => (
-  <div className="row" style={{ gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-    <div className="card">
-      <div className="card-h"><h3>Active Triggers</h3><SourceBadge src="zbx" /></div>
-      <div style={{ padding: 30, textAlign: "center", color: "var(--muted)" }}>
-        <Icon name="check" size={32} />
-        <div style={{ marginTop: 8, fontSize: 14, color: "var(--ok)" }}>No active Zabbix triggers</div>
-        <div style={{ fontSize: 11, marginTop: 4 }}>4 triggers monitored · last fired 10h ago</div>
-      </div>
-    </div>
-    <div className="card">
-      <div className="card-h"><h3>NAC Violations (24h)</h3><SourceBadge src="pf" /></div>
-      <div style={{ padding: 18 }}>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
-          <div style={{ width: 8, height: 8, borderRadius: 50, background: "var(--warn)" }} />
-          <div style={{ fontFamily: "var(--mono)", fontSize: 16, fontWeight: 600 }}>2 active</div>
-          <div className="muted" style={{ fontSize: 11 }}>· 7 resolved</div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <ViolationRow mac="F4:5C:89:0B:32:71" rule="OS version below policy" since="14m" action="Quarantine VLAN 666" />
-          <ViolationRow mac="9C:8E:CD:11:B0:42" rule="Repeated EAP cert failures" since="14m" action="Auth blocked" />
-        </div>
-      </div>
-    </div>
-  </div>
-);
+const AlertsTab = () => {
+  const A = window.ALERTS_DETAIL || { activeTriggers: [], triggerCount: 0, last24h: { count: 0, bySeverity: {} }, lastFiredAgo: null };
+  const active = Array.isArray(A.activeTriggers) ? A.activeTriggers : [];
+  const sev = A.last24h && A.last24h.bySeverity ? A.last24h.bySeverity : {};
+  const totalLast24h = (A.last24h && A.last24h.count) || 0;
+  const maxBar = Math.max(1, sev.disaster || 0, sev.high || 0, sev.warning || 0, sev.info || 0);
 
-const ViolationRow = ({ mac, rule, since, action }) => (
-  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 10, background: "var(--bg-2)", borderRadius: 6, border: "1px solid var(--line)" }}>
-    <Icon name="alert" size={14} />
-    <div style={{ flex: 1 }}>
-      <div className="mono" style={{ fontSize: 12 }}>{mac}</div>
-      <div style={{ fontSize: 11, color: "var(--muted)" }}>{rule} · {action}</div>
+  return (
+    <div className="row" style={{ gridTemplateColumns: "1.4fr 1fr", gap: 14 }}>
+      <div className="card">
+        <div className="card-h">
+          <h3>Active Triggers</h3>
+          <SourceBadge src="zbx" />
+          <div className="h-spacer" />
+          <span className="h-meta">
+            {active.length === 0
+              ? `0 firing · ${A.triggerCount} monitored${A.lastFiredAgo ? ` · last fired ${A.lastFiredAgo} ago` : ""}`
+              : `${active.length} firing · ${A.triggerCount} monitored`}
+          </span>
+        </div>
+        {active.length === 0 ? (
+          <div style={{ padding: 30, textAlign: "center", color: "var(--muted)" }}>
+            <Icon name="check" size={32} />
+            <div style={{ marginTop: 8, fontSize: 14, color: "var(--ok)" }}>No active Zabbix triggers</div>
+            <div style={{ fontSize: 11, marginTop: 4 }}>
+              {A.triggerCount > 0 ? `${A.triggerCount} triggers monitored` : "No triggers linked to this host"}
+              {A.lastFiredAgo ? ` · last fired ${A.lastFiredAgo} ago` : ""}
+            </div>
+          </div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width: 90 }}>Severity</th>
+                <th>Trigger</th>
+                <th style={{ width: 90 }}>Age</th>
+                <th style={{ width: 80, textAlign: "right" }}>State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {active.map(t => (
+                <tr key={t.id}>
+                  <td><Sev level={t.severity} /></td>
+                  <td className="fg">
+                    {t.name}
+                    {t.scope && <div style={{ color: "var(--muted)", fontSize: 10.5 }}>scope · {t.scope}</div>}
+                  </td>
+                  <td className="mono">{t.age}</td>
+                  <td style={{ textAlign: "right" }}>
+                    {t.ack
+                      ? <span className="role-tag av" style={{ fontSize: 9, padding: "0 6px" }}>ACKED</span>
+                      : <span className="role-tag guest" style={{ fontSize: 9, padding: "0 6px" }}>OPEN</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-h">
+          <h3>24h Alert Volume</h3>
+          <SourceBadge src="zbx" />
+          <div className="h-spacer" />
+          <span className="h-meta">{totalLast24h} problem events</span>
+        </div>
+        <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[
+            ["disaster", "Disaster", "var(--err)"],
+            ["high",     "High",     "var(--err)"],
+            ["warning",  "Warning",  "var(--warn)"],
+            ["info",     "Info",     "var(--info)"]
+          ].map(([k, label, color]) => {
+            const n = sev[k] || 0;
+            return (
+              <div key={k} style={{ display: "grid", gridTemplateColumns: "80px 1fr 40px", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+                  <Sev level={k} />
+                  <span>{label}</span>
+                </div>
+                <div style={{ background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4, height: 10, overflow: "hidden" }}>
+                  <div style={{ width: `${(n / maxBar) * 100}%`, height: "100%", background: color }} />
+                </div>
+                <div className="mono" style={{ textAlign: "right", fontSize: 12, color: n > 0 ? "var(--fg)" : "var(--muted)" }}>{n}</div>
+              </div>
+            );
+          })}
+          {totalLast24h === 0 && (
+            <div style={{ color: "var(--muted)", fontSize: 11, textAlign: "center", paddingTop: 6 }}>
+              No problem events recorded for this host in the last 24 hours.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
-    <div className="mono muted" style={{ fontSize: 11 }}>{since}</div>
-  </div>
-);
+  );
+};
 
 window.OverviewTab = OverviewTab;
 window.WirelessTab = WirelessTab;

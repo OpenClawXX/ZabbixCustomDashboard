@@ -111,6 +111,9 @@
         window.WIRED_PORTS   = Array.isArray(b.wiredPorts)  ? b.wiredPorts  : [];
         window.SSIDS         = Array.isArray(b.ssids)       ? b.ssids       : [];
         window.TCS_CLIENTS_DEBUG = (b.clientsDebug && typeof b.clientsDebug === 'object') ? b.clientsDebug : {};
+        window.ALERTS_DETAIL = (b.alertsDetail && typeof b.alertsDetail === 'object') ? b.alertsDetail : {
+            activeTriggers: [], triggerCount: 0, last24h: { count: 0, bySeverity: {} }, lastFiredAgo: null
+        };
         window.AP_SITES      = buildApSites(b, window.ZBX_HOST);
         window.ALERTS_SUMMARY = b.alerts || {
             associationFailures: 0, authFailures: 0,
@@ -190,7 +193,8 @@
                 alerts:     fresh.alerts     ?? window.ALERTS_SUMMARY,
                 wiredPorts: fresh.wiredPorts ?? window.WIRED_PORTS,
                 ssids:      fresh.ssids      ?? window.SSIDS,
-                pfClients:  fresh.pfClients  ?? window.PF_CLIENTS
+                pfClients:  fresh.pfClients  ?? window.PF_CLIENTS,
+                alertsDetail: fresh.alertsDetail ?? window.ALERTS_DETAIL
             });
             recordFetch(true, null, fresh);
             window.dispatchEvent(new CustomEvent("tcs:data", { detail: fresh }));

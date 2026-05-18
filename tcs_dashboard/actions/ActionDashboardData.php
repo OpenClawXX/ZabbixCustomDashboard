@@ -57,6 +57,7 @@ class ActionDashboardData extends ActionDataBase {
             'wiredPorts'  => $invoke('collectWiredPorts',   [$hostid]),
             'ssids'       => $invoke('collectSsidList',     [$hostid]),
             'pfClients'   => $invoke('collectXiqClients',   [$hostid]),
+            'alertsDetail'=> $invoke('collectAlertsDetail', [$hostid]),
             'ts'          => time()
         ];
 

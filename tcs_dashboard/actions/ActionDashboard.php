@@ -57,6 +57,12 @@ class ActionDashboard extends ActionBase {
             'wiredPorts'  => [],
             'ssids'       => [],
             'clientsDebug'=> [],
+            'alertsDetail'=> [
+                'activeTriggers' => [],
+                'triggerCount'   => 0,
+                'last24h'        => ['count' => 0, 'bySeverity' => []],
+                'lastFiredAgo'   => null
+            ],
             // AP Navigator: every wireless host grouped by school. Always
             // collected (independent of $hostid) so the left rail is
             // populated even when the page is opened without a hostid.
@@ -72,6 +78,7 @@ class ActionDashboard extends ActionBase {
             $boot['alerts']      = $this->collectAlertsSummary($hostid);
             $boot['wiredPorts']  = $this->collectWiredPorts($hostid);
             $boot['ssids']       = $this->collectSsidList($hostid);
+            $boot['alertsDetail']= $this->collectAlertsDetail($hostid);
 
             // Fold per-AP fields from the XIQ fleet host into the host
             // record so device card / page header have clients/location/
@@ -623,6 +630,130 @@ class ActionDashboard extends ActionBase {
             'totalClients'        => 0, // populated from PacketFence in caller if wired
             'activeClients'       => 0
         ];
+    }
+
+    /**
+     * Detail data for the Alerts tab: currently-firing triggers on the host,
+     * total trigger count, last-fired-ago, and the 24h problem-event count
+     * bucketed by severity. Output mirrors the dashboard's existing
+     * severity buckets so the UI can colour bars without remapping.
+     *
+     * @return array{
+     *     activeTriggers: array<int, array{id:string,name:string,severity:string,lastChange:int,age:string,ack:bool,scope:string}>,
+     *     triggerCount:   int,
+     *     last24h:        array{count:int, bySeverity: array<string,int>},
+     *     lastFiredAgo:   string|null
+     * }
+     */
+    private function collectAlertsDetail(string $hostid): array {
+        $sev_label = [
+            0 => 'info', 1 => 'info', 2 => 'warning',
+            3 => 'warning', 4 => 'high', 5 => 'disaster'
+        ];
+
+        // All triggers monitored on this host — for the "N triggers
+        // monitored" subtitle.
+        $allTriggers = API::Trigger()->get([
+            'output'    => ['triggerid'],
+            'hostids'   => [$hostid],
+            'monitored' => true
+        ]) ?: [];
+
+        // Currently-firing triggers — value=1, with the most-recent change
+        // time so we can sort by age.
+        $firing = API::Trigger()->get([
+            'output'        => ['triggerid', 'description', 'priority', 'lastchange'],
+            'hostids'       => [$hostid],
+            'filter'        => ['value' => 1, 'status' => 0],
+            'only_true'     => true,
+            'monitored'     => true,
+            'skipDependent' => true,
+            'selectTags'    => ['tag', 'value'],
+            'selectLastEvent' => ['eventid', 'acknowledged']
+        ]) ?: [];
+
+        $active = [];
+        $newestChange = 0;
+        foreach ($firing as $t) {
+            $changed = (int) ($t['lastchange'] ?? 0);
+            if ($changed > $newestChange) $newestChange = $changed;
+            $scope = '';
+            foreach (($t['tags'] ?? []) as $tg) {
+                if (($tg['tag'] ?? '') === 'scope' && !empty($tg['value'])) {
+                    $scope = (string) $tg['value'];
+                    break;
+                }
+            }
+            $acked = false;
+            if (isset($t['lastEvent']) && is_array($t['lastEvent'])) {
+                $acked = (int) ($t['lastEvent']['acknowledged'] ?? 0) === 1;
+            }
+            $active[] = [
+                'id'         => (string) $t['triggerid'],
+                'name'       => (string) ($t['description'] ?? ''),
+                'severity'   => $sev_label[(int) ($t['priority'] ?? 0)] ?? 'info',
+                'lastChange' => $changed,
+                'age'        => $changed > 0 ? $this->formatAge(time() - $changed) : '—',
+                'ack'        => $acked,
+                'scope'      => $scope
+            ];
+        }
+        usort($active, fn($a, $b) => $b['lastChange'] <=> $a['lastChange']);
+
+        // 24h problem-event volume, bucketed by severity. PROBLEM events
+        // only (value=1) so we don't double-count the recovery.
+        $now = time();
+        $events24h = API::Event()->get([
+            'output'    => ['severity'],
+            'hostids'   => [$hostid],
+            'time_from' => $now - 86400,
+            'value'     => 1,
+            'limit'     => 1000
+        ]) ?: [];
+        $bySev = ['disaster' => 0, 'high' => 0, 'warning' => 0, 'info' => 0];
+        foreach ($events24h as $e) {
+            $bucket = $sev_label[(int) $e['severity']] ?? 'info';
+            $bySev[$bucket] = ($bySev[$bucket] ?? 0) + 1;
+        }
+
+        // Optional: most-recently-fired-ever, even if not currently active.
+        $lastFiredAgo = null;
+        if (!$firing) {
+            $latestEvent = API::Event()->get([
+                'output'    => ['clock'],
+                'hostids'   => [$hostid],
+                'sortfield' => ['eventid'],
+                'sortorder' => 'DESC',
+                'value'     => 1,
+                'limit'     => 1
+            ]) ?: [];
+            if ($latestEvent) {
+                $age = $now - (int) $latestEvent[0]['clock'];
+                $lastFiredAgo = $this->formatAge($age);
+            }
+        }
+        elseif ($newestChange > 0) {
+            $lastFiredAgo = $this->formatAge($now - $newestChange);
+        }
+
+        return [
+            'activeTriggers' => $active,
+            'triggerCount'   => count($allTriggers),
+            'last24h'        => [
+                'count'      => count($events24h),
+                'bySeverity' => $bySev
+            ],
+            'lastFiredAgo'   => $lastFiredAgo
+        ];
+    }
+
+    /** Short "Nd Nh"/"Nh Nm"/"Nm"/"Ns" duration string for ages. */
+    private function formatAge(int $s): string {
+        $s = max(0, $s);
+        if ($s < 60)    return "{$s}s";
+        if ($s < 3600)  return intdiv($s, 60).'m';
+        if ($s < 86400) return intdiv($s, 3600).'h '.intdiv($s % 3600, 60).'m';
+        return intdiv($s, 86400).'d '.intdiv($s % 86400, 3600).'h';
     }
 
     private function collectWiredPorts(string $hostid): array {
