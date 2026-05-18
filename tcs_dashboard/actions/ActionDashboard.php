@@ -1434,22 +1434,22 @@ class ActionDashboard extends ActionBase {
         }
 
         try {
-            $pf  = PFClient::fromMacros($macros);
+            $pf = PFClient::fromMacros($macros);
 
-            // Try the singleton location endpoint first; PF v11 returns the
-            // newest open locationlog row for the MAC.
-            $loc = $pf->locationFor($mac);
+            // Pull a window of recent locationlog rows, sorted DESC, instead
+            // of trusting locationFor()'s "newest row wins" — an AP MAC can
+            // get logged from a non-uplink source (transient learn on a
+            // trunk, neighbor switch reflecting LLDP, another stack member
+            // briefly seeing the MAC), which left the device card pointing
+            // at a random switch IP. Filter the window to find the actual
+            // uplink, then fall back to the newest if nothing qualifies.
+            $rows = $pf->recentLocationsForMac($mac, 20);
+            $loc  = self::pickApUplinkRow($rows);
 
-            // Fallback: locationsByMac() hits /api/v1/locationlogs/search with
-            // an equals query and sort=start_time DESC. Catches the case
-            // where /locationlogs?mac= matches strictly on still-open
-            // sessions but the latest row has end_time set.
             if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
-                $bulk = $pf->locationsByMac([$mac]);
-                $row  = $bulk[$mac] ?? null;
-                if (is_array($row) && !self::pfLocRowEmpty($row)) {
-                    $loc = $row;
-                }
+                // Final fallback so we don't regress operators who had a
+                // working card with the old code: ask the singleton endpoint.
+                $loc = $pf->locationFor($mac);
             }
 
             if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
@@ -1468,6 +1468,50 @@ class ActionDashboard extends ActionBase {
             error_log('[tcs_dashboard] PF AP uplink lookup ('.$mac.'): '.$e->getMessage());
             return null;
         }
+    }
+
+    /**
+     * Pick the locationlog row that represents the AP's actual wired
+     * uplink, from a DESC-sorted list of recent rows for one MAC.
+     *
+     * Scoring (highest wins):
+     *   +4  session still open (end_time empty / zero-date)
+     *   +3  connection_type is wired (Ethernet, etc — not Wireless)
+     *   +2  row has a real switch hostname (not just an IP)
+     *   +1  port string is non-empty
+     *   -3  connection_type is Wireless (this is the AP serving clients,
+     *       not the AP plugging in — exclude unless nothing else exists)
+     *
+     * On ties the input order (DESC by start_time) wins, so newer rows
+     * trump older equivalents.
+     */
+    private static function pickApUplinkRow(array $rows): ?array {
+        if (!$rows) return null;
+        $best = null;
+        $bestScore = PHP_INT_MIN;
+        foreach ($rows as $r) {
+            if (!is_array($r)) continue;
+            $score = 0;
+            $end = trim((string) ($r['end_time'] ?? ''));
+            if ($end === '' || $end === '0000-00-00 00:00:00') $score += 4;
+
+            $type = strtolower((string) ($r['connection_type'] ?? ''));
+            if ($type !== '' && str_contains($type, 'wireless')) {
+                $score -= 3;
+            } elseif ($type !== '') {
+                // Ethernet, Ethernet-NoEAP, Ethernet-EAP, etc.
+                $score += 3;
+            }
+
+            if (trim((string) ($r['switch'] ?? '')) !== '')    $score += 2;
+            if (trim((string) ($r['port']   ?? '')) !== '')    $score += 1;
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best = $r;
+            }
+        }
+        return $best;
     }
 
     /** PF v11+ canonical MAC format: 12 lowercase hex digits in colon pairs. */
