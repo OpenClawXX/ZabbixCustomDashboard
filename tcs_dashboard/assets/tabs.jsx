@@ -391,6 +391,7 @@ const WiredTab = () => {
 const ClientsTab = ({ filter, setFilter }) => {
   const all = Array.isArray(window.PF_CLIENTS) ? window.PF_CLIENTS : [];
   const authFails = Array.isArray(window.PF_AUTH_FAILS) ? window.PF_AUTH_FAILS : [];
+  const [selectedMac, setSelectedMac] = React.useState(null);
   const source = (all[0] && (all[0].source === "xiq+pf")) ? "xiq+pf"
                : (all[0] && all[0].source === "xiq") ? "xiq"
                : (all[0] && all[0].source === "pf")  ? "pf"
@@ -404,6 +405,7 @@ const ClientsTab = ({ filter, setFilter }) => {
     if (filter === "guests") return role.includes("Guest");
     return true;
   });
+  const selected = selectedMac ? all.find(c => c.mac === selectedMac) : null;
   return (
     <div>
       <div className="card" style={{ marginBottom: 14 }}>
@@ -446,11 +448,20 @@ const ClientsTab = ({ filter, setFilter }) => {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(c => <ClientRow key={c.mac || c.host} c={c} />)}
+              {filtered.map(c => (
+                <ClientRow
+                  key={c.mac || c.host}
+                  c={c}
+                  active={c.mac === selectedMac}
+                  onClick={() => setSelectedMac(c.mac === selectedMac ? null : c.mac)}
+                />
+              ))}
             </tbody>
           </table>
         )}
       </div>
+
+      {selected && <ClientDetailCard c={selected} onClose={() => setSelectedMac(null)} />}
 
       <div className="card">
         <div className="card-h">
@@ -484,25 +495,34 @@ const ClientsTab = ({ filter, setFilter }) => {
   );
 };
 
-const ClientRow = ({ c }) => {
+const roleClassFor = (role) => {
+  const r = String(role ?? "");
+  if (r === "Faculty") return "faculty";
+  if (r.startsWith("Student-9-12")) return "student";
+  if (r === "Student-BYOD") return "byod";
+  if (r.includes("Guest")) return "guest";
+  if (r === "AV-Equipment") return "av";
+  if (r === "Quarantine") return "quarantine";
+  return "unknown";
+};
+
+const ClientRow = ({ c, active, onClick }) => {
   const role = String(c.role ?? "");
-  const roleClass = (() => {
-    if (role === "Faculty") return "faculty";
-    if (role.startsWith("Student-9-12")) return "student";
-    if (role === "Student-BYOD") return "byod";
-    if (role.includes("Guest")) return "guest";
-    if (role === "AV-Equipment") return "av";
-    if (role === "Quarantine") return "quarantine";
-    return "unknown";
-  })();
   const rssi = typeof c.rssi === "number" && c.rssi !== 0 ? c.rssi : null;
   const bars = rssi == null ? 0 : rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
   return (
-    <tr>
+    <tr
+      onClick={onClick}
+      style={{
+        cursor: "pointer",
+        background: active ? "rgba(95,168,211,0.10)" : undefined,
+        boxShadow: active ? "inset 3px 0 0 var(--zbx)" : undefined
+      }}
+    >
       <td><StatusDot state={c.posture || "n/a"} /></td>
       <td><div className="fg">{c.host || c.mac}</div><div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.mac}</div></td>
       <td>{c.user || "—"}</td>
-      <td><span className={`role-tag ${roleClass}`}>{role || "—"}</span></td>
+      <td><span className={`role-tag ${roleClassFor(role)}`}>{role || "—"}</span></td>
       <td>{c.vlan || "—"}</td>
       <td>{c.ssid || "—"}<div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.auth || ""}</div></td>
       <td>
@@ -516,8 +536,90 @@ const ClientRow = ({ c }) => {
       <td>{c.band || "—"}</td>
       <td>{c.os || "—"}</td>
       <td>{c.since || "—"}</td>
-      <td><Icon name="more" size={14}/></td>
+      <td><Icon name={active ? "chevron" : "more"} size={14}/></td>
     </tr>
+  );
+};
+
+// Detail card surfaced when a client row is selected. Mirrors the
+// switch tab's PacketFenceDevicePane shape so the two screens feel
+// consistent: identity strip, KV grid of PF + XIQ fields, then the
+// locationlog row at the bottom.
+const ClientDetailCard = ({ c, onClose }) => {
+  const pf  = c.pf  || {};
+  const loc = c.pfLoc || {};
+  const reg = (pf.reg || (c.posture === "compliant" ? "REG" : c.posture === "non-compliant" ? "UNREG" : "")).toUpperCase();
+  const role = String(c.role ?? "");
+  const sourceLabel = c.source === "xiq+pf" ? "XIQ + PacketFence"
+                    : c.source === "xiq"    ? "XIQ only"
+                    : c.source === "pf"     ? "PacketFence only"
+                    : "—";
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <div className="card-h">
+        <h3>Client Detail</h3>
+        {(c.source === "xiq" || c.source === "xiq+pf") && <SourceBadge src="ext" />}
+        {(c.source === "pf"  || c.source === "xiq+pf") && <SourceBadge src="pf"  />}
+        <div className="h-spacer" />
+        <span className="h-meta" style={{ marginRight: 8 }}>{sourceLabel}</span>
+        <button className="btn sm ghost" onClick={onClose}>Close</button>
+      </div>
+      <div className="card-b">
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 600 }}>{c.mac}</div>
+          {reg && (
+            <span className={"reg-badge " + (reg === "REG" ? "reg" : "unreg")} style={{ fontSize: 10, padding: "1px 8px", border: "1px solid", borderRadius: 3 }}>
+              {reg}
+            </span>
+          )}
+          <span className={`role-tag ${roleClassFor(role)}`}>{role || "—"}</span>
+          <StatusDot state={c.posture || "n/a"} />
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>{c.posture || "n/a"}</span>
+        </div>
+
+        <div className="kv" style={{ gridTemplateColumns: "120px 1fr 120px 1fr", rowGap: 0 }}>
+          <div className="k">Hostname</div>     <div className="v">{c.host || pf.host || "—"}</div>
+          <div className="k">IP address</div>   <div className="v mono">{pf.ip || "—"}</div>
+
+          <div className="k">User</div>         <div className="v">{c.user || "—"}</div>
+          <div className="k">Owner (PF pid)</div><div className="v">{pf.owner || "—"}</div>
+
+          <div className="k">SSID</div>         <div className="v">{c.ssid || "—"}</div>
+          <div className="k">VLAN</div>         <div className="v mono">{c.vlan || loc.vlan || "—"}</div>
+
+          <div className="k">Protocol</div>     <div className="v mono">{c.auth || "—"}</div>
+          <div className="k">Band</div>         <div className="v mono">{c.band || "—"}</div>
+
+          <div className="k">RSSI</div>         <div className="v mono">{typeof c.rssi === "number" && c.rssi !== 0 ? `${c.rssi} dBm` : "—"}</div>
+          <div className="k">Connected</div>    <div className="v mono">{c.since || "—"}</div>
+
+          <div className="k">OS</div>           <div className="v">{c.os || pf.os || "—"}</div>
+          <div className="k">Vendor</div>       <div className="v">{pf.vendor || "—"}</div>
+
+          <div className="k">DHCP fingerprint</div><div className="v" style={{ fontSize: 11 }}>{pf.dhcpFp || "—"}</div>
+          <div className="k">Last seen</div>    <div className="v mono">{pf.lastSeen || "—"}</div>
+
+          <div className="k">Last ARP</div>     <div className="v mono">{pf.lastArp || "—"}</div>
+          <div className="k">Last DHCP</div>    <div className="v mono">{pf.lastDhcp || "—"}</div>
+        </div>
+
+        {(loc.switch || loc.port || loc.connection_type || loc.dot1x_username) && (
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.6, color: "var(--muted)", marginBottom: 8 }}>
+              PacketFence locationlog (latest)
+            </div>
+            <div className="kv" style={{ gridTemplateColumns: "120px 1fr 120px 1fr", rowGap: 0 }}>
+              <div className="k">Switch / AP</div>      <div className="v mono">{loc.switch || "—"} {loc.switch_ip && <span style={{ color: "var(--muted)" }}>· {loc.switch_ip}</span>}</div>
+              <div className="k">Port / ifDesc</div>    <div className="v mono">{loc.port || loc.ifDesc || "—"}</div>
+              <div className="k">Connection</div>       <div className="v">{loc.connection_type || "—"}{loc.connection_sub_type ? ` · ${loc.connection_sub_type}` : ""}</div>
+              <div className="k">802.1X user</div>      <div className="v">{loc.dot1x_username || "—"}{loc.realm ? `@${loc.realm}` : ""}</div>
+              <div className="k">Session start</div>    <div className="v mono">{loc.start_time || "—"}</div>
+              <div className="k">Session end</div>      <div className="v mono">{loc.end_time || "—"}</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 };
 

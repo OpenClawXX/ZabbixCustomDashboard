@@ -1016,6 +1016,8 @@ class ActionDashboard extends ActionBase {
 
         // Merge PF data per client. PF wins for hostname/role/user — XIQ
         // sees only what the client advertised; PF has registration data.
+        // The raw PF row is also attached as $c['pf'] so the Clients tab
+        // detail pane can show the full record without a second lookup.
         foreach ($clients as &$c) {
             $m   = strtolower((string) $c['mac']);
             if ($m === '') continue;
@@ -1034,6 +1036,10 @@ class ActionDashboard extends ActionBase {
                 if ($reg === 'REG')   $c['posture'] = 'compliant';
                 if ($reg === 'UNREG') $c['posture'] = 'non-compliant';
                 $c['source'] = 'xiq+pf';
+                // Stash the resolved role label alongside the raw row so
+                // the detail pane can render either.
+                $pfn['roleLabel'] = $c['role'];
+                $c['pf'] = $pfn;
             }
             if ($loc) {
                 if ($c['role'] === '' && !empty($loc['role'])) {
@@ -1044,6 +1050,8 @@ class ActionDashboard extends ActionBase {
                 }
                 if ($c['ssid'] === '' && !empty($loc['ssid']))     $c['ssid'] = (string) $loc['ssid'];
                 if ($c['vlan'] === null && !empty($loc['vlan']))   $c['vlan'] = (string) $loc['vlan'];
+                // Surface the freshest locationlog row for the detail pane.
+                $c['pfLoc'] = $loc;
             }
             // Final cleanup — render placeholders for fields the UI shows
             // raw so consumers don't need a fallback every time.
