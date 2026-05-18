@@ -10,8 +10,8 @@ use Modules\TcsDashboard\Lib\XIQFleetClient;
  * GET zabbix.php?action=tcs.xiq.data
  *
  * Returns the rollup payload consumed by xiq-bridge.jsx (XIQ_TOTALS, XIQ_SITES,
- * XIQ_BANDS, XIQ_SSIDS, XIQ_PROBLEM_APS, XIQ_CHANNEL_GRID, XIQ_CLIENT_MIX,
- * XIQ_THROUGHPUT, XIQ_FIRMWARE, XIQ_ROAMING, XIQ_EVENTS).
+ * XIQ_SSIDS, XIQ_PROBLEM_APS, XIQ_CHANNEL_GRID, XIQ_CLIENT_MIX,
+ * XIQ_FIRMWARE, XIQ_ROAMING, XIQ_EVENTS).
  *
  * Data flow:
  *   1. Read the fleet master item xiq.devices.raw — a JSON array of every AP
@@ -46,15 +46,6 @@ class ActionXiqData extends ActionDataBase {
     /** How many sites to sample for the channel heatmap. Fleet util / noise
      *  pull the whole fleet (paged); only the heatmap is sampled. */
     private const D360_SITE_SAMPLE = 8;
-
-    /** Aggregate throughput: 24 hourly buckets over the last 24h. */
-    private const THROUGHPUT_CACHE_TTL    = 300;
-    private const THROUGHPUT_CACHE_KEY    = 'tcs_dashboard:xiq_throughput:v1';
-    private const THROUGHPUT_BUCKETS      = 24;
-    private const THROUGHPUT_BUCKET_SEC   = 3600;
-    /** Cap on client IDs per bucket. ~500 IDs keeps URL length under 5 KB and
-     *  fleet bytes-per-bucket gets extrapolated by (total / sampleSize). */
-    private const THROUGHPUT_SAMPLE_MAX   = 500;
 
     /** Host group prefix the template's host prototype puts each AP under. */
     private const SITE_PREFIX = 'Site/Wireless/';
@@ -151,15 +142,6 @@ class ActionXiqData extends ActionDataBase {
                 // stays at 0 util. Log only.
             }
 
-            // Layer 5: aggregate throughput strip — 24 hourly buckets over the
-            // last 24h, computed from /clients/usage with a 500-client sample
-            // extrapolated to fleet scale. Cached 5min.
-            try {
-                self::overlayXiqThroughput($payload, $token);
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] xiq.data throughput overlay: ' . $e->getMessage());
-            }
-
             // Layer 6: merge XIQ-side problem signal into Top Problem APs and
             // Recent Events. Reuses the usage-capacity grid (already fetched by
             // Layer 4a) and the fleet's offline devices — no extra XIQ calls.
@@ -185,7 +167,6 @@ class ActionXiqData extends ActionDataBase {
             'totals'  => [
                 'aps'         => ['total' => 0, 'online' => 0, 'offline' => 0, 'critical' => 0, 'idle' => 0],
                 'clients'     => ['total' => 0, 'dot11ax' => 0, 'dot11ac' => 0, 'legacy' => 0],
-                'throughput'  => ['agg_gbps' => 0.0, 'peak_gbps' => 0.0, 'ingress_gbps' => 0.0, 'egress_gbps' => 0.0],
                 'ssids'       => ['total' => 0, 'broadcast' => 0],
                 'rfHealth'    => ['score' => 0, 'target' => 90],
                 'firmware'    => ['compliant' => 0, 'behind' => 0, 'ahead' => 0, 'target' => '—'],
@@ -197,7 +178,6 @@ class ActionXiqData extends ActionDataBase {
             'problemAps'  => [],
             'channelGrid' => ['sites' => [], 'channels' => [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 149, 153, 157, 161], 'matrix' => []],
             'clientMix'   => ['standards' => [], 'os' => []],
-            'throughput'  => [],
             'firmware'    => ['versions' => []],
             'roaming'     => ['buckets' => [], 'rate24h' => 0.0],
             'events'      => [],
@@ -880,120 +860,6 @@ class ActionXiqData extends ActionDataBase {
             $rem = $client->getRateLimitRemaining();
             $payload['warning'] = "XIQ rate-limit low: $rem requests left this hour.";
         }
-    }
-
-    // ── Layer 5: Aggregate throughput (24-bucket strip) ─────────────────────
-
-    /**
-     * Build the Aggregate Throughput · 24h strip from /clients/usage.
-     *
-     * Algorithm:
-     *   1. Pull active clients (already cached by overlayXiqClients).
-     *   2. Sample up to {@see self::THROUGHPUT_SAMPLE_MAX} client IDs.
-     *   3. For each of 24 hourly buckets ending now, call /clients/usage
-     *      with the sample IDs + that hour's window. Sum response.usage
-     *      across the sample → bytes/hour for the sample.
-     *   4. Extrapolate to fleet by ratio: fleet_bytes = sample_bytes ×
-     *      (totalClients / sampleSize).
-     *   5. Convert bytes/hour → Gbps (×8 / 3600 / 1e9).
-     *   6. Write the strip + agg/peak/ingress/egress to the payload.
-     *
-     * Cost: 24 calls per cache miss, APCu-cached 5min → 288 calls/hr in the
-     * worst case. Fits in the 7,500/hr XIQ quota with huge headroom.
-     *
-     * Ingress vs egress: /clients/usage gives a single combined byte count,
-     * no rx/tx split. We approximate 60% ingress / 40% egress (a typical
-     * school WLAN download-heavy mix). When XIQ exposes a split we can fix.
-     */
-    private static function overlayXiqThroughput(array &$payload, string $token): void {
-        if (function_exists('apcu_fetch')) {
-            $hit = apcu_fetch(self::THROUGHPUT_CACHE_KEY, $ok);
-            if ($ok && is_array($hit)) {
-                self::applyThroughput($payload, $hit);
-                return;
-            }
-        }
-
-        $fleetClient = XIQFleetClient::fromToken($token);
-        $clients = $fleetClient->getActiveClients();
-        if (!$clients) return;
-
-        $ids = [];
-        foreach ($clients as $c) {
-            // /clients/active responses use `id`; older shapes use `client_id`.
-            $id = $c['id'] ?? $c['client_id'] ?? null;
-            if ($id !== null && (int) $id > 0) $ids[] = (int) $id;
-        }
-        if (!$ids) return;
-
-        $totalClients = count($ids);
-        $sampleIds    = $ids;
-        if ($totalClients > self::THROUGHPUT_SAMPLE_MAX) {
-            shuffle($sampleIds);
-            $sampleIds = array_slice($sampleIds, 0, self::THROUGHPUT_SAMPLE_MAX);
-        }
-        $sampleSize    = count($sampleIds);
-        $extrapolation = $sampleSize > 0 ? ($totalClients / $sampleSize) : 1.0;
-
-        // Build all 24 hour-bucket windows up front, dispatch in parallel.
-        // Sequential round-trips dominated cold-load time (24 × ~300ms = 7-15s);
-        // curl_multi collapses that to one wall-clock RTT.
-        $now     = time();
-        $windows = [];
-        for ($i = self::THROUGHPUT_BUCKETS - 1; $i >= 0; $i--) {
-            $bucketEnd   = $now - $i * self::THROUGHPUT_BUCKET_SEC;
-            $bucketStart = $bucketEnd - self::THROUGHPUT_BUCKET_SEC;
-            $windows[$i] = [$bucketStart * 1000, $bucketEnd * 1000];
-        }
-
-        try {
-            $batched = $fleetClient->getClientsUsageMulti($sampleIds, $windows);
-        } catch (\Throwable $e) {
-            error_log('[tcs_dashboard] clients/usage multi: ' . $e->getMessage());
-            $batched = [];
-        }
-
-        $strip = [];
-        for ($i = self::THROUGHPUT_BUCKETS - 1; $i >= 0; $i--) {
-            $rows = $batched[$i] ?? null;
-            if (!is_array($rows)) { $strip[] = 0.0; continue; }
-            $sampleBytes = 0;
-            foreach ($rows as $r) $sampleBytes += (int) ($r['usage'] ?? 0);
-            $fleetBytes  = $sampleBytes * $extrapolation;
-            // bytes / 3600 sec × 8 bits/byte / 1e9 = Gbps
-            $gbps = ($fleetBytes * 8.0) / 3600.0 / 1_000_000_000.0;
-            $strip[] = round($gbps, 2);
-        }
-
-        $aggGbps  = $strip ? array_sum($strip) / count($strip) : 0.0;
-        $peakGbps = $strip ? max($strip) : 0.0;
-
-        $aggregate = [
-            'strip'        => $strip,
-            'agg_gbps'     => round($aggGbps,  2),
-            'peak_gbps'    => round($peakGbps, 2),
-            'ingress_gbps' => round($aggGbps * 0.6, 2),
-            'egress_gbps'  => round($aggGbps * 0.4, 2),
-            'totalClients' => $totalClients,
-            'sampleSize'   => $sampleSize,
-        ];
-
-        if (function_exists('apcu_store')) {
-            apcu_store(self::THROUGHPUT_CACHE_KEY, $aggregate, self::THROUGHPUT_CACHE_TTL);
-        }
-        self::applyThroughput($payload, $aggregate);
-    }
-
-    private static function applyThroughput(array &$payload, array $agg): void {
-        if (!empty($agg['strip']) && is_array($agg['strip'])) {
-            $payload['throughput'] = $agg['strip'];
-        }
-        $payload['totals']['throughput'] = [
-            'agg_gbps'     => (float) ($agg['agg_gbps']     ?? 0),
-            'peak_gbps'    => (float) ($agg['peak_gbps']    ?? 0),
-            'ingress_gbps' => (float) ($agg['ingress_gbps'] ?? 0),
-            'egress_gbps'  => (float) ($agg['egress_gbps']  ?? 0),
-        ];
     }
 
     // ── Layer 4: d360 sampling (RF util / noise / channel grid) ─────────────
