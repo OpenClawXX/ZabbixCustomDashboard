@@ -274,6 +274,7 @@ body {
   color: var(--fg-2);
 }
 .tab .badge.warn { color: var(--warn); border-color: rgba(245, 179, 0, 0.4); background: rgba(245, 179, 0, 0.08); }
+.tab .badge.err  { color: var(--err);  border-color: rgba(242, 95, 92, 0.45); background: rgba(242, 95, 92, 0.10); }
 
 /* ───────── Page body ───────── */
 .body { padding: 18px 22px 40px; }

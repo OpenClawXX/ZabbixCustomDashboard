@@ -51,23 +51,32 @@ const PageHeader = ({ timeRange, setTimeRange, host }) => (
 );
 
 const Tabs = ({ tab, setTab }) => {
+  // Re-read globals on every render so the badges follow live refreshes
+  // dispatched by data-bridge.jsx.
+  const clientCount  = Array.isArray(window.PF_CLIENTS) ? window.PF_CLIENTS.length : 0;
+  const wiredCount   = Array.isArray(window.WIRED_PORTS) ? window.WIRED_PORTS.length : 0;
+  const ssidCount    = Array.isArray(window.SSIDS) ? window.SSIDS.length : 0;
+  const eventCount   = Array.isArray(window.ZBX_EVENTS) ? window.ZBX_EVENTS.filter(e => e && e.value === 1).length : 0;
+  const A            = window.ALERTS_DETAIL || {};
+  const triggerCount = Array.isArray(A.activeTriggers) ? A.activeTriggers.length : 0;
+
   const tabs = [
-    ["overview", "Overview", null],
-    ["wireless", "Wireless", null],
-    ["wired", "Wired", null],
-    ["clients", "Clients", "271"],
-    ["events", "Events", null],
-    ["alerts", "Alerts", "2"],
-    ["graphs", "Graphs", null],
-    ["latest", "Latest Data", null],
-    ["config", "Configuration", null],
+    ["overview", "Overview",      null,                         null],
+    ["wireless", "Wireless",      ssidCount    > 0 ? ssidCount    : null, null],
+    ["wired",    "Wired",         wiredCount   > 0 ? wiredCount   : null, null],
+    ["clients",  "Clients",       clientCount  > 0 ? clientCount  : null, null],
+    ["events",   "Events",        eventCount   > 0 ? eventCount   : null, eventCount   > 0 ? "warn" : null],
+    ["alerts",   "Alerts",        triggerCount > 0 ? triggerCount : null, triggerCount > 0 ? "err"  : null],
+    ["graphs",   "Graphs",        null, null],
+    ["latest",   "Latest Data",   null, null],
+    ["config",   "Configuration", null, null],
   ];
   return (
     <div className="tabs">
-      {tabs.map(([k, l, b]) => (
+      {tabs.map(([k, l, b, tone]) => (
         <div key={k} className={`tab ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>
           {l}
-          {b && <span className={`badge ${k === "alerts" ? "warn" : ""}`}>{b}</span>}
+          {b !== null && b !== undefined && <span className={`badge${tone ? " "+tone : ""}`}>{b}</span>}
         </div>
       ))}
     </div>
