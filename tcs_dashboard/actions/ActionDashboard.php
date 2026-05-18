@@ -559,19 +559,24 @@ class ActionDashboard extends ActionBase {
 
         $hostids = array_column($hosts, 'hostid');
 
-        // Open-problem count per host (one Problem.get for all of them).
+        // Active-trigger count per host. Problem.get in Zabbix 7 doesn't
+        // accept selectHosts, so route the per-host bridge through
+        // Trigger.get instead — only_true=true + filter.value=1 gives the
+        // currently-firing triggers, which is what "problems" means here.
         $prob_count = [];
         if ($hostids) {
-            $problems = API::Problem()->get([
-                'output'      => ['eventid', 'r_eventid'],
+            $triggers = API::Trigger()->get([
+                'output'      => ['triggerid'],
                 'hostids'     => $hostids,
                 'selectHosts' => ['hostid'],
-                'recent'      => false
+                'filter'      => ['value' => 1, 'status' => 0],
+                'only_true'   => true,
+                'monitored'   => true,
+                'skipDependent' => true
             ]) ?: [];
-            foreach ($problems as $p) {
-                if (!empty($p['r_eventid']) && (int) $p['r_eventid'] !== 0) continue;
-                foreach ($p['hosts'] ?? [] as $ph) {
-                    $hid = $ph['hostid'];
+            foreach ($triggers as $t) {
+                foreach ($t['hosts'] ?? [] as $th) {
+                    $hid = $th['hostid'];
                     $prob_count[$hid] = ($prob_count[$hid] ?? 0) + 1;
                 }
             }
