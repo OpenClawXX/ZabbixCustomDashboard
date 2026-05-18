@@ -155,8 +155,28 @@ const DeviceSidecar = ({ host }) => {
 
       <div className="dev-h-block">
         <div className="label">Clients</div>
-        <div className="v" style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 600 }}>
+        <div
+          className="v"
+          style={{
+            fontFamily: "var(--mono)", fontSize: 18, fontWeight: 600,
+            color: host.loadLevel === "high" ? "var(--err)"
+                 : host.loadLevel === "warn" ? "var(--warn)"
+                 : "var(--fg)",
+            display: "flex", alignItems: "center", gap: 6
+          }}
+          title={
+            host.loadLevel === "high" ? "HIGH client load · over 50 clients"
+            : host.loadLevel === "warn" ? "Elevated client load · over 35 clients"
+            : null
+          }
+        >
           {(host.clients ?? 0).toLocaleString()}
+          {host.loadLevel === "high" && (
+            <span className="role-tag guest" style={{ fontSize: 9, padding: "0 6px" }}>HIGH</span>
+          )}
+          {host.loadLevel === "warn" && (
+            <span className="role-tag av"    style={{ fontSize: 9, padding: "0 6px" }}>WARN</span>
+          )}
         </div>
       </div>
 
@@ -248,26 +268,37 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                 <span className="site-name">{site.name}</span>
                 <span className="site-count">{matchedAps.length}</span>
                 {site.problems > 0 && <span className="site-prob">{site.problems}</span>}
+                {site.overloaded > 0 && (
+                  <span className="site-load" title={`${site.overloaded} AP${site.overloaded === 1 ? "" : "s"} with high client load`}>
+                    {site.overloaded}↑
+                  </span>
+                )}
               </div>
               <div className={"ap-nav-children" + (expanded ? "" : " hidden")}>
                 {matchedAps.map(ap => {
                   const dotColor = ap.status === "ok"   ? "var(--ok)"
                                  : ap.status === "warn" ? "var(--warn)"
                                  : "var(--err)";
+                  const loadColor = ap.loadLevel === "high" ? "var(--err)"
+                                  : ap.loadLevel === "warn" ? "var(--warn)"
+                                  : "var(--fg)";
+                  const loadTitle = ap.loadLevel === "high" ? "Client load HIGH (> 50 clients)"
+                                  : ap.loadLevel === "warn" ? "Client load WARN (> 35 clients)"
+                                  : `${ap.clients} clients`;
                   return (
                     <div
                       key={ap.id}
                       className={"ap-nav-host" + (ap.id === activeId ? " active" : "")}
                       onClick={() => onSelect(ap)}
-                      title={`${ap.id} · ${ap.ip} · ${ap.model}`}
+                      title={`${ap.id} · ${ap.ip} · ${ap.model} · ${loadTitle}`}
                     >
                       <span className="ap-led" style={{ background: dotColor, boxShadow: ap.status === "ok" ? `0 0 4px ${dotColor}` : "none" }} />
                       <div className="ap-meta-col">
                         <div className="ap-id">{ap.id}</div>
                         <div className="ap-sub">{ap.floor} · {ap.model}</div>
                       </div>
-                      <div className="ap-cli">
-                        <div className="n">{ap.clients}</div>
+                      <div className="ap-cli" title={loadTitle}>
+                        <div className="n" style={{ color: loadColor, fontWeight: ap.loadLevel === "ok" ? 500 : 700 }}>{ap.clients}</div>
                         <div className="u">cli</div>
                       </div>
                       {ap.problems > 0 && <span className="ap-prob">{ap.problems}</span>}

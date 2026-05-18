@@ -18,6 +18,10 @@ use Modules\TcsDashboard\Lib\XIQClient;
  */
 class ActionDashboard extends ActionBase {
 
+    /** Client-load thresholds shown in the AP Navigator + device card. */
+    private const AP_CLIENT_WARN = 35;
+    private const AP_CLIENT_HIGH = 50;
+
     protected function checkInput(): bool {
         $fields = [
             'hostid' => 'string'
@@ -91,6 +95,8 @@ class ActionDashboard extends ActionBase {
                     'connected', 'configmismatch', 'xiqid', 'mac', 'policy'
                 ]);
                 $boot['host']['clients']        = (int) ($fleet['clients'] ?? 0);
+                $boot['host']['loadLevel']      = $boot['host']['clients'] > self::AP_CLIENT_HIGH ? 'high'
+                                                : ($boot['host']['clients'] > self::AP_CLIENT_WARN ? 'warn' : 'ok');
                 $boot['host']['site']           = $fleet['building'] ?? ($boot['host']['site'] ?? '');
                 $boot['host']['floor']          = $fleet['floor']    ?? ($boot['host']['floor'] ?? '');
                 $boot['host']['location']       = $fleet['location'] ?? '';
@@ -1275,29 +1281,39 @@ class ActionDashboard extends ActionBase {
             $clients = isset($fleet['clients']) ? (int) $fleet['clients'] : 0;
             $model   = $fleet['model'] ?? '';
 
+            // Client-load thresholds: > 50 = high, > 35 = warn, else ok.
+            // Kept here so the frontend doesn't have to know the numbers.
+            $loadLevel = $clients > self::AP_CLIENT_HIGH ? 'high'
+                       : ($clients > self::AP_CLIENT_WARN ? 'warn' : 'ok');
+
             if (!isset($by_school[$school])) {
                 $by_school[$school] = [
-                    'id'       => $school,
-                    'name'     => $school,
+                    'id'         => $school,
+                    'name'       => $school,
                     // Collapsed by default — the frontend expands the
                     // section containing the active AP at mount time.
-                    'expanded' => false,
-                    'problems' => 0,
-                    'aps'      => []
+                    'expanded'   => false,
+                    'problems'   => 0,
+                    'overloaded' => 0,
+                    'aps'        => []
                 ];
             }
             $by_school[$school]['aps'][] = [
-                'hostid'   => $h['hostid'],
-                'id'       => $h['name'] ?: $h['host'],
-                'ip'       => $primary_ip,
-                'model'    => $model,
-                'floor'    => $floor !== '' ? $floor : '—',
-                'status'   => $status,
-                'clients'  => $clients,
-                'problems' => $prob,
-                'serial'   => $serial
+                'hostid'    => $h['hostid'],
+                'id'        => $h['name'] ?: $h['host'],
+                'ip'        => $primary_ip,
+                'model'     => $model,
+                'floor'     => $floor !== '' ? $floor : '—',
+                'status'    => $status,
+                'clients'   => $clients,
+                'loadLevel' => $loadLevel,
+                'problems'  => $prob,
+                'serial'    => $serial
             ];
             $by_school[$school]['problems'] += $prob;
+            if ($loadLevel !== 'ok') {
+                $by_school[$school]['overloaded']++;
+            }
         }
 
         // Sort schools alphabetically; sort APs within each school by id.
