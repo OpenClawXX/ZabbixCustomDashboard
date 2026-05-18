@@ -391,7 +391,8 @@ const WiredTab = () => {
 const ClientsTab = ({ filter, setFilter }) => {
   const all = Array.isArray(window.PF_CLIENTS) ? window.PF_CLIENTS : [];
   const authFails = Array.isArray(window.PF_AUTH_FAILS) ? window.PF_AUTH_FAILS : [];
-  const source = (all[0] && all[0].source === "xiq") ? "xiq"
+  const source = (all[0] && (all[0].source === "xiq+pf")) ? "xiq+pf"
+               : (all[0] && all[0].source === "xiq") ? "xiq"
                : (all[0] && all[0].source === "pf")  ? "pf"
                : "none";
   const filtered = all.filter(c => {
@@ -408,10 +409,11 @@ const ClientsTab = ({ filter, setFilter }) => {
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="card-h">
           <h3>Connected Clients</h3>
-          {source === "xiq" ? <SourceBadge src="ext" /> : <SourceBadge src="pf" />}
+          {(source === "xiq" || source === "xiq+pf") && <SourceBadge src="ext" />}
+          {(source === "pf"  || source === "xiq+pf") && <SourceBadge src="pf"  />}
           <div className="h-spacer" />
           <span className="h-meta" style={{ marginRight: 8 }}>
-            {all.length} associated{source === "xiq" ? " · XIQ /clients/active" : source === "pf" ? " · PacketFence" : ""}
+            {all.length} associated{source === "xiq+pf" ? " · XIQ + PacketFence" : source === "xiq" ? " · XIQ /clients/active" : source === "pf" ? " · PacketFence" : ""}
           </span>
           <div style={{ display: "flex", gap: 4 }}>
             {[["all","All"],["issues","Issues"],["students","Students"],["faculty","Faculty"],["guests","Guests"]].map(([k,l]) =>

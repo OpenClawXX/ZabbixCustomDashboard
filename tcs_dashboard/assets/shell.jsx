@@ -469,6 +469,19 @@ const DebugPanel = () => {
             ))}
           </DebugSection>
 
+          <DebugSection title="Clients pipeline (XIQ → PF enrich)">
+            {(() => {
+              const cd = window.TCS_CLIENTS_DEBUG || {};
+              const entries = Object.entries(cd);
+              if (entries.length === 0) {
+                return <div style={{ color: "var(--muted)" }}>(no diagnostic — collector didn't run; load with ?hostid=N)</div>;
+              }
+              return entries.map(([k, v]) => (
+                <DebugKV key={k} k={k} v={String(v)} tone={(k === "stage" || k === "pfStage") ? "warn" : null} />
+              ));
+            })()}
+          </DebugSection>
+
           <DebugSection title="Collection sizes">
             {Object.entries(collections).map(([k, v]) => (
               <DebugKV key={k} k={k} v={String(v)} tone={v === 0 ? "warn" : null} />

@@ -56,6 +56,7 @@ class ActionDashboard extends ActionBase {
             'pfAuthFails' => [],
             'wiredPorts'  => [],
             'ssids'       => [],
+            'clientsDebug'=> [],
             // AP Navigator: every wireless host grouped by school. Always
             // collected (independent of $hostid) so the left rail is
             // populated even when the page is opened without a hostid.
@@ -93,12 +94,13 @@ class ActionDashboard extends ActionBase {
             }
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
-            // Prefer XIQ /clients/active for the Clients tab — it's the
-            // canonical per-AP source and works without PacketFence being
-            // configured. Falls back to PF when XIQ isn't available.
+            // Prefer XIQ /clients/active enriched with PacketFence for the
+            // Clients tab — canonical per-AP source, works without PF being
+            // configured. Falls back to PF-only when XIQ isn't available.
             $xiqClients          = $this->collectXiqClients($hostid);
             $boot['pfClients']   = $xiqClients !== [] ? $xiqClients : $pfClients;
             $boot['pfAuthFails'] = $pfAuthFails;
+            $boot['clientsDebug'] = $this->clientsDebug;
 
             // Fold PF client counts into the alerts summary. activeClients is
             // anything PF currently has in a non-rejected/non-quarantined
@@ -665,10 +667,16 @@ class ActionDashboard extends ActionBase {
     private function collectXiqClients(string $hostid): array {
         $deviceId = $this->readHostMacro($hostid, '{$XIQ_DEVICE_ID}');
         if ($deviceId === null || !is_numeric($deviceId) || (int) $deviceId <= 0) {
+            $this->clientsDebug['stage']  = 'no_xiq_device_id';
+            $this->clientsDebug['detail'] = 'Host macro {$XIQ_DEVICE_ID} is empty or missing.';
             return [];
         }
+        $this->clientsDebug['deviceId'] = (int) $deviceId;
+
         $token = self::xiqGlobalToken();
         if ($token === null) {
+            $this->clientsDebug['stage']  = 'no_xiq_token';
+            $this->clientsDebug['detail'] = 'Global macro {$XIQ_API_TOKEN} (or {$XIQ_TOKEN}) is unset. SECRET_TEXT macros are unreadable by the API — set a non-secret read-side copy.';
             return [];
         }
 
@@ -677,11 +685,23 @@ class ActionDashboard extends ActionBase {
             $rows   = $client->getClients((int) $deviceId);
         }
         catch (\Throwable $e) {
-            error_log('[tcs_dashboard] XIQClient::getClients failed: '.$e->getMessage());
+            $msg = $e->getMessage();
+            error_log('[tcs_dashboard] XIQClient::getClients failed: '.$msg);
+            $this->clientsDebug['stage']  = 'xiq_call_failed';
+            $this->clientsDebug['detail'] = $msg;
+            return [];
+        }
+        $this->clientsDebug['xiqRowCount'] = count($rows);
+
+        if (!$rows) {
+            $this->clientsDebug['stage']  = 'xiq_empty';
+            $this->clientsDebug['detail'] = 'XIQ /clients/active returned no rows for device '.$deviceId.'.';
             return [];
         }
 
-        $out = [];
+        // Shape XIQ rows into the dashboard's client record. PF enrichment
+        // follows below.
+        $clients = [];
         foreach ($rows as $r) {
             $health  = (int) ($r['client_health'] ?? 0);
             $posture = $health >= 80 ? 'compliant'
@@ -690,32 +710,131 @@ class ActionDashboard extends ActionBase {
             $secs  = (int) ($r['connected_seconds'] ?? 0);
             $since = $this->formatDuration($secs);
 
-            // Best-effort role-tag class — the Clients tab styles known
-            // PacketFence role names; XIQ user_profile_name is free-form so
-            // we just pass it through and the UI lands on the "unknown"
-            // role tag, which is fine.
-            $role = (string) ($r['user_profile'] ?? '');
-            if ($role === '') $role = 'XIQ Client';
-
-            $out[] = [
+            $clients[] = [
                 'host'    => (string) ($r['hostname'] !== '' ? $r['hostname'] : ($r['ip'] ?? $r['mac'])),
                 'mac'     => (string) ($r['mac'] ?? ''),
-                'user'    => (string) ($r['username'] !== '' ? $r['username'] : '—'),
-                'role'    => $role,
-                'vlan'    => (int)    ($r['vlan'] ?? 0) ?: '—',
-                'ssid'    => (string) ($r['ssid'] !== '' ? $r['ssid'] : '—'),
-                'auth'    => (string) ($r['protocol'] !== '' ? $r['protocol'] : '—'),
+                'macRaw'  => strtolower((string) ($r['mac_raw'] ?? '')),
+                'user'    => (string) ($r['username'] ?? ''),
+                'role'    => (string) ($r['user_profile'] ?? ''),
+                'vlan'    => ((int) ($r['vlan'] ?? 0)) ?: null,
+                'ssid'    => (string) ($r['ssid'] ?? ''),
+                'auth'    => (string) ($r['protocol'] ?? ''),
                 'rssi'    => (int)    ($r['rssi'] ?? 0),
                 'rate'    => '',
-                'band'    => (string) ($r['band'] !== '' ? $r['band'] : '—'),
-                'os'      => (string) ($r['os_type'] !== '' ? $r['os_type'] : '—'),
+                'band'    => (string) ($r['band'] ?? ''),
+                'os'      => (string) ($r['os_type'] ?? ''),
                 'since'   => $since,
                 'posture' => $posture,
                 'source'  => 'xiq'
             ];
         }
-        return $out;
+
+        // PacketFence enrichment — same pattern the switch FDB code uses.
+        // Build a list of MACs in PF's preferred form (lowercase, colon-
+        // separated — same form XIQClient::macInsertColons produces), then
+        // bulk-fetch nodes + locationlogs + the role-id dictionary in three
+        // calls regardless of how many clients are connected.
+        $macs = [];
+        foreach ($clients as $c) {
+            $m = strtolower((string) ($c['mac'] ?? ''));
+            if ($m !== '') $macs[$m] = true;
+        }
+        $macList = array_keys($macs);
+
+        $pfMacros = $this->resolvePfMacros($hostid);
+        if ($pfMacros === null) {
+            $this->clientsDebug['pfStage']  = 'no_pf_macros';
+            $this->clientsDebug['pfDetail'] = 'PacketFence macros not set globally or on host — XIQ data only.';
+            return $clients;
+        }
+
+        try {
+            $pf       = PFClient::fromMacros($pfMacros);
+            $byMac    = $macList ? $pf->nodesByMac($macList) : [];
+            $locByMac = [];
+            try {
+                $locByMac = $macList ? $pf->locationsByMac($macList) : [];
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] PF locationsByMac: '.$e->getMessage());
+            }
+            $catMap = [];
+            try {
+                $catMap = $pf->nodeCategories();
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] PF nodeCategories: '.$e->getMessage());
+            }
+            $this->clientsDebug['pfNodeMatches'] = count($byMac);
+            $this->clientsDebug['pfLocMatches']  = count($locByMac);
+        }
+        catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            error_log('[tcs_dashboard] PFClient enrichment failed: '.$msg);
+            $this->clientsDebug['pfStage']  = 'pf_call_failed';
+            $this->clientsDebug['pfDetail'] = $msg;
+            return $clients;
+        }
+
+        // Numeric category_id → human label.
+        $resolveRole = function ($raw) use ($catMap): string {
+            $s = trim((string) $raw);
+            if ($s === '') return '';
+            if (ctype_digit($s) && isset($catMap[$s])) return $catMap[$s];
+            return $s;
+        };
+
+        // Merge PF data per client. PF wins for hostname/role/user — XIQ
+        // sees only what the client advertised; PF has registration data.
+        foreach ($clients as &$c) {
+            $m   = strtolower((string) $c['mac']);
+            if ($m === '') continue;
+            $pfn = $byMac[$m] ?? null;
+            $loc = $locByMac[$m] ?? null;
+
+            if ($pfn) {
+                if (!empty($pfn['host']))   $c['host']  = $pfn['host'];
+                if (!empty($pfn['owner']))  $c['user']  = $pfn['owner'];
+                $roleRaw = (string) ($pfn['role'] ?? '');
+                $role    = $resolveRole($roleRaw);
+                if ($role !== '') $c['role'] = $role;
+                if (!empty($pfn['os']) && $c['os'] === '') $c['os'] = $pfn['os'];
+                // posture: PF "REG" → compliant, "UNREG" → non-compliant.
+                $reg = strtoupper((string) ($pfn['reg'] ?? ''));
+                if ($reg === 'REG')   $c['posture'] = 'compliant';
+                if ($reg === 'UNREG') $c['posture'] = 'non-compliant';
+                $c['source'] = 'xiq+pf';
+            }
+            if ($loc) {
+                if ($c['role'] === '' && !empty($loc['role'])) {
+                    $c['role'] = $resolveRole($loc['role']);
+                }
+                if (!empty($loc['dot1x_username']) && ($c['user'] === '' || $c['user'] === '—')) {
+                    $c['user'] = (string) $loc['dot1x_username'];
+                }
+                if ($c['ssid'] === '' && !empty($loc['ssid']))     $c['ssid'] = (string) $loc['ssid'];
+                if ($c['vlan'] === null && !empty($loc['vlan']))   $c['vlan'] = (string) $loc['vlan'];
+            }
+            // Final cleanup — render placeholders for fields the UI shows
+            // raw so consumers don't need a fallback every time.
+            $c['user'] = $c['user'] === '' ? '—' : $c['user'];
+            $c['role'] = $c['role'] === '' ? 'XIQ Client' : $c['role'];
+            $c['ssid'] = $c['ssid'] === '' ? '—' : $c['ssid'];
+            $c['auth'] = $c['auth'] === '' ? '—' : $c['auth'];
+            $c['band'] = $c['band'] === '' ? '—' : $c['band'];
+            $c['os']   = $c['os']   === '' ? '—' : $c['os'];
+            if ($c['vlan'] === null) $c['vlan'] = '—';
+            unset($c['macRaw']);
+        }
+        unset($c);
+
+        return $clients;
     }
+
+    /**
+     * Per-request scratch space populated by collectXiqClients() so the
+     * frontend Debug panel can see exactly where the pipeline stopped.
+     * @var array<string, mixed>
+     */
+    private array $clientsDebug = [];
 
     /** Read a single host-scoped user macro by name; null when unset. */
     private function readHostMacro(string $hostid, string $macro): ?string {
@@ -1015,14 +1134,40 @@ class ActionDashboard extends ActionBase {
      * @return array{url:string,user:string,pass:string,verify_ssl:bool}|null
      */
     private function resolvePfMacros(string $hostid): ?array {
-        $rows = API::UserMacro()->get([
+        $names = ['{$PF.URL}', '{$PF.USER}', '{$PF.PASSWORD}', '{$PF.VERIFY.SSL}'];
+        // Precedence: globals (lowest) → linked templates → host (highest).
+        // The Extreme AP per-AP host typically doesn't carry PF macros — they
+        // sit on the global scope — so this walk is what makes the PF
+        // enrichment work at all on the AP detail page.
+        $bag = [];
+
+        $globals = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => $names]
+        ]) ?: [];
+        foreach ($globals as $r) {
+            $bag[$r['macro']] = (string) $r['value'];
+        }
+
+        $templateIds = self::collectTemplateAncestry($hostid);
+        if ($templateIds) {
+            $tplMacros = API::UserMacro()->get([
+                'output'  => ['macro', 'value'],
+                'hostids' => $templateIds,
+                'filter'  => ['macro' => $names]
+            ]) ?: [];
+            foreach ($tplMacros as $r) {
+                $bag[$r['macro']] = (string) $r['value'];
+            }
+        }
+
+        $hostMacros = API::UserMacro()->get([
             'output'  => ['macro', 'value'],
             'hostids' => [$hostid],
-            'filter'  => ['macro' => ['{$PF.URL}', '{$PF.USER}', '{$PF.PASSWORD}', '{$PF.VERIFY.SSL}']]
+            'filter'  => ['macro' => $names]
         ]) ?: [];
-
-        $bag = [];
-        foreach ($rows as $r) {
+        foreach ($hostMacros as $r) {
             $bag[$r['macro']] = (string) $r['value'];
         }
 
@@ -1039,6 +1184,50 @@ class ActionDashboard extends ActionBase {
             'pass'       => $pass,
             'verify_ssl' => ($bag['{$PF.VERIFY.SSL}'] ?? '1') !== '0'
         ];
+    }
+
+    /**
+     * Walk full template ancestry (parents + parents-of-parents).
+     * Zabbix's selectParentTemplates is one hop only.
+     *
+     * @return array<int, string>
+     */
+    private static function collectTemplateAncestry(string $hostid): array {
+        $hosts = API::Host()->get([
+            'output'                => ['hostid'],
+            'hostids'               => [$hostid],
+            'selectParentTemplates' => ['templateid']
+        ]) ?: [];
+        $seen  = [];
+        $queue = [];
+        if ($hosts) {
+            foreach (($hosts[0]['parentTemplates'] ?? []) as $t) {
+                $queue[] = (string) $t['templateid'];
+            }
+        }
+        while ($queue) {
+            $batch = [];
+            foreach ($queue as $tid) {
+                if (!isset($seen[$tid])) {
+                    $seen[$tid] = true;
+                    $batch[] = $tid;
+                }
+            }
+            $queue = [];
+            if (!$batch) break;
+            $rows = API::Template()->get([
+                'output'                => ['templateid'],
+                'templateids'           => $batch,
+                'selectParentTemplates' => ['templateid']
+            ]) ?: [];
+            foreach ($rows as $t) {
+                foreach (($t['parentTemplates'] ?? []) as $p) {
+                    $pid = (string) $p['templateid'];
+                    if (!isset($seen[$pid])) $queue[] = $pid;
+                }
+            }
+        }
+        return array_keys($seen);
     }
 
     /* --------------------------------------------------------------------- */

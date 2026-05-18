@@ -110,6 +110,7 @@
         window.ZBX_EVENTS    = Array.isArray(b.events)      ? b.events      : [];
         window.WIRED_PORTS   = Array.isArray(b.wiredPorts)  ? b.wiredPorts  : [];
         window.SSIDS         = Array.isArray(b.ssids)       ? b.ssids       : [];
+        window.TCS_CLIENTS_DEBUG = (b.clientsDebug && typeof b.clientsDebug === 'object') ? b.clientsDebug : {};
         window.AP_SITES      = buildApSites(b, window.ZBX_HOST);
         window.ALERTS_SUMMARY = b.alerts || {
             associationFailures: 0, authFailures: 0,
