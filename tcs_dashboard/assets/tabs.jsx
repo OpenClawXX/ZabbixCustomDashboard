@@ -631,26 +631,31 @@ const ClientDetailCard = ({ c, onClose }) => {
 const ClientPfActionRow = ({ mac, hasPf }) => {
   const [busy, setBusy] = React.useState(null);
   const [msg,  setMsg]  = React.useState({ kind: "", text: "" });
+  // PF stores and matches MACs in lowercase — both the admin UI route
+  // and the API endpoints normalise to lowercase, but several PF versions
+  // 404 on uppercase MAC paths instead of redirecting. Lower-case here
+  // and at every call site to keep behaviour consistent across versions.
+  const pfMac = String(mac || "").toLowerCase();
   const adminBase = (window.PF_ADMIN_BASE || "").replace(/\/+$/, "");
-  const viewHref = adminBase && mac
-    ? `${adminBase}/admin/#/node/${encodeURIComponent(mac)}`
+  const viewHref = adminBase && pfMac
+    ? `${adminBase}/admin/#/node/${encodeURIComponent(pfMac)}`
     : null;
 
   const run = React.useCallback(async (op, label) => {
-    if (!mac || busy) return;
+    if (!pfMac || busy) return;
     if (typeof window.tcsPfDeviceAction !== "function") {
       setMsg({ kind: "err", text: "endpoint missing" });
       return;
     }
     setBusy(op);
     setMsg({ kind: "", text: `${label}…` });
-    const r = await window.tcsPfDeviceAction(mac, op);
+    const r = await window.tcsPfDeviceAction(pfMac, op);
     setBusy(null);
     setMsg(r && r.ok
       ? { kind: "", text: r.message || "ok" }
       : { kind: "err", text: (r && (r.error || r.message)) || "failed" });
     setTimeout(() => setMsg({ kind: "", text: "" }), 6000);
-  }, [mac, busy]);
+  }, [pfMac, busy]);
 
   return (
     <div className="pf-actions" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)" }}>

@@ -217,8 +217,11 @@
         const hostid    = window.ZBX_HOST && window.ZBX_HOST.hostid;
         if (!actionUrl || !hostid) return { ok: false, error: "endpoint not configured" };
         if (!mac || !op)           return { ok: false, error: "mac and op required" };
+        // PF API matches MACs case-sensitively in path-style endpoints —
+        // force lowercase here so callers don't have to remember.
+        const pfMac = String(mac).toLowerCase();
         try {
-            const form = new URLSearchParams({ hostid: String(hostid), mac: String(mac), op: String(op) });
+            const form = new URLSearchParams({ hostid: String(hostid), mac: pfMac, op: String(op) });
             const resp = await fetch(actionUrl, {
                 method: "POST",
                 credentials: "same-origin",
