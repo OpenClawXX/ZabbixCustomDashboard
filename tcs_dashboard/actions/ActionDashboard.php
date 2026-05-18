@@ -106,7 +106,9 @@ class ActionDashboard extends ActionBase {
                 $boot['host']['xiqId']          = $fleet['xiqid']    ?? '';
                 $boot['host']['mac']            = $fleet['mac']      ?? '';
                 $boot['host']['policy']         = $fleet['policy']   ?? '';
-                $boot['host']['pfUplink']       = $this->collectPfApUplink($hostid, (string) ($fleet['mac'] ?? ''));
+                $apMacForPf = (string) ($this->readHostMacro($hostid, '{$XIQ_MAC}') ?? '');
+                if ($apMacForPf === '') $apMacForPf = (string) ($fleet['mac'] ?? '');
+                $boot['host']['pfUplink']       = $this->collectPfApUplink($hostid, $apMacForPf);
             }
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
@@ -1419,33 +1421,68 @@ class ActionDashboard extends ActionBase {
      * @return array{switch:string,switchIp:string,port:string,ifDesc:string}|null
      */
     private function collectPfApUplink(string $hostid, string $apMac): ?array {
-        if ($apMac === '') return null;
+        // Normalize whatever the XIQ macro / fleet item gave us
+        // (AA-BB-CC..., aabbccddeeff, AABB.CCDD.EEFF, mixed case) into the
+        // canonical PF format: lowercase colon-separated hex.
+        $mac = self::normalizeMacForPf($apMac);
+        if ($mac === '') return null;
+
         $macros = $this->resolvePfMacros($hostid);
-        if ($macros === null) return null;
+        if ($macros === null) {
+            error_log('[tcs_dashboard] PF AP uplink: PF macros not configured for host '.$hostid);
+            return null;
+        }
 
         try {
             $pf  = PFClient::fromMacros($macros);
-            $loc = $pf->locationFor(strtolower($apMac));
-            if (!is_array($loc)) return null;
 
-            $switch   = (string) ($loc['switch']    ?? '');
-            $switchIp = (string) ($loc['switch_ip'] ?? '');
-            $port     = (string) ($loc['port']      ?? '');
-            $ifDesc   = (string) ($loc['ifDesc']    ?? '');
-            if ($switch === '' && $switchIp === '' && $port === '' && $ifDesc === '') {
+            // Try the singleton location endpoint first; PF v11 returns the
+            // newest open locationlog row for the MAC.
+            $loc = $pf->locationFor($mac);
+
+            // Fallback: locationsByMac() hits /api/v1/locationlogs/search with
+            // an equals query and sort=start_time DESC. Catches the case
+            // where /locationlogs?mac= matches strictly on still-open
+            // sessions but the latest row has end_time set.
+            if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
+                $bulk = $pf->locationsByMac([$mac]);
+                $row  = $bulk[$mac] ?? null;
+                if (is_array($row) && !self::pfLocRowEmpty($row)) {
+                    $loc = $row;
+                }
+            }
+
+            if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
+                error_log('[tcs_dashboard] PF AP uplink: no locationlog for '.$mac.' (host '.$hostid.')');
                 return null;
             }
+
             return [
-                'switch'   => $switch,
-                'switchIp' => $switchIp,
-                'port'     => $port,
-                'ifDesc'   => $ifDesc,
+                'switch'   => (string) ($loc['switch']    ?? ''),
+                'switchIp' => (string) ($loc['switch_ip'] ?? ''),
+                'port'     => (string) ($loc['port']      ?? ''),
+                'ifDesc'   => (string) ($loc['ifDesc']    ?? ''),
             ];
         }
         catch (\Throwable $e) {
-            error_log('[tcs_dashboard] PF AP uplink lookup: '.$e->getMessage());
+            error_log('[tcs_dashboard] PF AP uplink lookup ('.$mac.'): '.$e->getMessage());
             return null;
         }
+    }
+
+    /** PF v11+ canonical MAC format: 12 lowercase hex digits in colon pairs. */
+    private static function normalizeMacForPf(string $mac): string {
+        $hex = strtolower(preg_replace('/[^0-9a-fA-F]/', '', $mac) ?? '');
+        if (strlen($hex) !== 12) return '';
+        return implode(':', str_split($hex, 2));
+    }
+
+    /** True when a PF locationlog row has no switch / port info to display. */
+    private static function pfLocRowEmpty(array $loc): bool {
+        return trim((string) ($loc['switch']    ?? '')) === ''
+            && trim((string) ($loc['switch_ip'] ?? '')) === ''
+            && trim((string) ($loc['port']      ?? '')) === ''
+            && trim((string) ($loc['ifDesc']    ?? '')) === '';
     }
 
     private function collectPacketFence(string $hostid, ?array $host): array {
