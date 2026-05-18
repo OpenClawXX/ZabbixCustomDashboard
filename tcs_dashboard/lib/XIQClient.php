@@ -946,6 +946,118 @@ final class XIQClient
      *
      * @throws XIQException
      */
+    /**
+     * Fetch alarm / event records for one device, normalised.
+     *
+     * Endpoint: GET /alarms?deviceIds=<id>&views=FULL&page=1&limit=100
+     *
+     * XIQ's alarm API field names vary across versions; this normaliser is
+     * forgiving — it reads from a list of plausible aliases for each
+     * dashboard field and falls back to "" or 0 when none match. The full
+     * raw row is preserved under `raw` so future debugging can see what
+     * the API actually returned.
+     *
+     * The dashboard's Events tab consumes:
+     *   id        — stable string id for React keys
+     *   message   — human-readable summary
+     *   severity  — bucket: disaster / high / warning / info
+     *   clock     — unix-seconds timestamp
+     *   value     — 1 = active alarm, 0 = cleared
+     *   category  — optional grouping label
+     *
+     * @return array<int, array{
+     *     id:       string,
+     *     message:  string,
+     *     severity: string,
+     *     clock:    int,
+     *     value:    int,
+     *     category: string,
+     *     raw:      array<string,mixed>
+     * }>
+     */
+    public function getDeviceAlarms(int $xiqDeviceId, int $limit = 100): array
+    {
+        if ($xiqDeviceId <= 0) {
+            throw new XIQException(
+                "XIQClient::getDeviceAlarms() requires a positive device ID, got {$xiqDeviceId}"
+            );
+        }
+        $limit = max(1, min(100, $limit));
+
+        $data = $this->httpGet(
+            path:   '/alarms',
+            params: [
+                'deviceIds' => $xiqDeviceId,
+                'views'     => 'FULL',
+                'page'      => 1,
+                'limit'     => $limit
+            ]
+        );
+
+        $rows = $data['data'] ?? (array_is_list($data) ? $data : []);
+        if (!is_array($rows)) return [];
+
+        // XIQ severity strings → dashboard bucket.
+        static $sevMap = [
+            'CRITICAL'  => 'disaster',
+            'EMERGENCY' => 'disaster',
+            'ALERT'     => 'disaster',
+            'MAJOR'     => 'high',
+            'ERROR'     => 'high',
+            'MINOR'     => 'warning',
+            'WARNING'   => 'warning',
+            'NOTICE'    => 'info',
+            'INFO'      => 'info',
+            'INFORM'    => 'info'
+        ];
+
+        $firstNonEmpty = function (array $r, array $keys, $default = '') {
+            foreach ($keys as $k) {
+                if (isset($r[$k]) && $r[$k] !== '' && $r[$k] !== null) {
+                    return $r[$k];
+                }
+            }
+            return $default;
+        };
+
+        $out = [];
+        foreach ($rows as $r) {
+            if (!is_array($r)) continue;
+
+            // Timestamp: accept seconds or milliseconds.
+            $tsRaw = $firstNonEmpty($r, [
+                'raised_time', 'event_time', 'created_time', 'created_at',
+                'timestamp', 'last_seen', 'last_seen_time'
+            ], 0);
+            $ts = is_numeric($tsRaw) ? (int) $tsRaw : (int) strtotime((string) $tsRaw);
+            if ($ts > 9999999999) $ts = intdiv($ts, 1000);
+
+            $sevRaw = strtoupper((string) $firstNonEmpty($r, ['severity', 'alarm_severity', 'level']));
+            $sev    = $sevMap[$sevRaw] ?? 'warning';
+
+            $statusRaw = strtoupper((string) $firstNonEmpty($r, ['status', 'alarm_status', 'state']));
+            $cleared   = in_array($statusRaw, ['CLEARED', 'CLOSED', 'RESOLVED', 'OK'], true);
+
+            $id = (string) $firstNonEmpty($r, ['id', 'alarm_id', 'event_id'], '');
+            if ($id === '') {
+                $id = 'xiq-'.$ts.'-'.md5((string) $firstNonEmpty($r, ['alarm_summary', 'message', 'summary'], ''));
+            }
+
+            $out[] = [
+                'id'       => $id,
+                'message'  => (string) $firstNonEmpty($r, [
+                    'alarm_summary', 'summary', 'message', 'description', 'name'
+                ], 'XIQ alarm'),
+                'severity' => $sev,
+                'clock'    => $ts > 0 ? $ts : time(),
+                'value'    => $cleared ? 0 : 1,
+                'category' => (string) $firstNonEmpty($r, ['category', 'alarm_category', 'type']),
+                'raw'      => $r
+            ];
+        }
+        return $out;
+    }
+
     public function getClients(int $xiqDeviceId): array
     {
         if ($xiqDeviceId <= 0) {

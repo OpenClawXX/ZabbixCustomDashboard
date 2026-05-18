@@ -524,6 +524,37 @@ class ActionDashboard extends ActionBase {
             }
         }
 
+        // Merge XIQ-side alarms for this device when {$XIQ_DEVICE_ID} and a
+        // readable XIQ token are available. Same field shape — different
+        // source badge.
+        $deviceId = $this->readHostMacro($hostid, '{$XIQ_DEVICE_ID}');
+        $xiqToken = self::xiqGlobalToken();
+        if ($deviceId !== null && is_numeric($deviceId) && (int) $deviceId > 0 && $xiqToken !== null) {
+            try {
+                $xiq    = XIQClient::fromToken($xiqToken);
+                $alarms = $xiq->getDeviceAlarms((int) $deviceId, 100);
+                foreach ($alarms as $a) {
+                    $clock = (int) $a['clock'];
+                    $date  = date('Y-m-d', $clock);
+                    $out[] = [
+                        'eventid'  => 'xiq-'.$a['id'],
+                        'ts'       => date('H:i:s', $clock),
+                        'date'     => $date,
+                        'today'    => $date === $today,
+                        'clock'    => $clock,
+                        'severity' => (string) $a['severity'],
+                        'source'   => 'XIQ',
+                        'value'    => (int) $a['value'],
+                        'acked'    => false,
+                        'obj'      => (string) $a['category'],
+                        'msg'      => (string) $a['message']
+                    ];
+                }
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] XIQ alarms merge: '.$e->getMessage());
+            }
+        }
+
         // Merge sort by clock DESC, then eventid DESC to keep determinism.
         usort($out, fn($a, $b) => $b['clock'] <=> $a['clock'] ?: strcmp($b['eventid'], $a['eventid']));
         return array_slice($out, 0, 100);

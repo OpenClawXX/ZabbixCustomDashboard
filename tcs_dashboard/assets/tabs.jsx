@@ -532,6 +532,7 @@ const EventsTab = () => {
     if (filter === "resolved" && e.value !== 0) return false;
     if (filter === "unacked"  && (e.value !== 1 || e.acked)) return false;
     if (src === "zbx" && e.source !== "Zabbix") return false;
+    if (src === "xiq" && e.source !== "XIQ")    return false;
     if (src === "pf"  && e.source !== "PF")     return false;
     return true;
   });
@@ -547,6 +548,7 @@ const EventsTab = () => {
       <div className="card-h">
         <h3>All Events</h3>
         <SourceBadge src="zbx" />
+        <SourceBadge src="ext" />
         <SourceBadge src="pf" />
         <div className="h-spacer" />
         <span className="h-meta" style={{ marginRight: 12 }}>
@@ -562,7 +564,7 @@ const EventsTab = () => {
             <button key={k} className={`btn sm ${filter === k ? "primary" : "ghost"}`} onClick={() => setFilter(k)}>{l}</button>
           ))}
           <span style={{ width: 8 }} />
-          {[["all", "ZBX+PF"], ["zbx", "ZBX"], ["pf", "PF"]].map(([k, l]) => (
+          {[["all", "All"], ["zbx", "ZBX"], ["xiq", "XIQ"], ["pf", "PF"]].map(([k, l]) => (
             <button key={k} className={`btn sm ${src === k ? "primary" : "ghost"}`} onClick={() => setSrc(k)}>{l}</button>
           ))}
         </div>
@@ -580,8 +582,8 @@ const EventsTab = () => {
               <div className="ts" title={`${e.date} ${e.ts}`}>
                 {e.today ? e.ts : <>{e.date}<br/><span style={{ color: "var(--muted)", fontSize: 10 }}>{e.ts}</span></>}
               </div>
-              <div className={`src ${e.source === "Zabbix" ? "zbx" : "pf"}`}>
-                {e.source === "Zabbix" ? "ZBX" : "PF"}
+              <div className={`src ${e.source === "Zabbix" ? "zbx" : e.source === "XIQ" ? "ext" : "pf"}`}>
+                {e.source === "Zabbix" ? "ZBX" : e.source === "XIQ" ? "XIQ" : "PF"}
               </div>
               <Sev level={e.severity} />
               <div className="msg">
