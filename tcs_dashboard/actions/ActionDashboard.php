@@ -322,20 +322,44 @@ class ActionDashboard extends ActionBase {
             'extremeap.firmware.0'
         ]);
 
-        // Pull fleet-side fields if this AP is auto-created by the XIQ
-        // template — the {$XIQ_SERIAL} macro tells us which serial to look
-        // up on the fleet host.
-        $fleet = $this->resolveXiqFleetFields($hostid, ['model', 'building', 'floor', 'location', 'adminstate']);
+        // Pull fleet-side fields the XIQ template publishes per AP, plus the
+        // host macros the prototype stamps at creation. Cascading fallbacks
+        // keep every row populated even when one source goes stale.
+        $fleet     = $this->resolveXiqFleetFields($hostid, [
+            'model', 'building', 'floor', 'location', 'adminstate',
+            'version', 'hostname', 'connected'
+        ]);
+        $xiqSerial = (string) ($this->readHostMacro($hostid, '{$XIQ_SERIAL}')    ?? '');
+        $xiqDevice = (string) ($this->readHostMacro($hostid, '{$XIQ_DEVICE_ID}') ?? '');
+
+        $serial   = self::firstNonEmpty([(string) ($live['extremeap.serial.0']   ?? ''), (string) ($inv['serialno_a'] ?? ''), $xiqSerial]);
+        $firmware = self::firstNonEmpty([(string) ($live['extremeap.firmware.0'] ?? ''), (string) ($fleet['version'] ?? ''), (string) ($inv['os'] ?? '')]);
+        $model    = self::firstNonEmpty([(string) ($fleet['model']    ?? ''), (string) ($inv['model'] ?? ''), (string) ($inv['type'] ?? '')]);
+        $building = self::firstNonEmpty([(string) ($fleet['building'] ?? '')]);
+        $floor    = self::firstNonEmpty([(string) ($fleet['floor']    ?? '')]);
+        $adminSt  = self::firstNonEmpty([(string) ($fleet['adminstate'] ?? '')]);
+        $location = self::firstNonEmpty([(string) ($fleet['location'] ?? '')]);
+        $connect  = $fleet['connected'] !== null && $fleet['connected'] !== ''
+            ? ((int) $fleet['connected'] === 1 ? 'connected' : 'disconnected')
+            : '—';
+
+        $hostName    = (string) ($h['host'] ?? '');
+        $visibleName = (string) ($h['name'] ?? '');
+        if ($hostName === '')    $hostName    = '—';
+        if ($visibleName === '') $visibleName = $hostName;
 
         return [
-            ['Host Name',     $h['host'] ?? '—',                                              'zbx'],
-            ['Visible Name',  $h['name'] ?? '—',                                              'zbx'],
-            ['Device Model',  $fleet['model']  ?? ($inv['model'] ?? '—'),                     $fleet['model']  ? 'ext' : 'zbx'],
-            ['Serial Number', $live['extremeap.serial.0']    ?? ($inv['serialno_a'] ?? '—'),  $live['extremeap.serial.0']    ? 'zbx' : 'zbx'],
-            ['Firmware',      $live['extremeap.firmware.0']  ?? ($inv['os']         ?? '—'),  $live['extremeap.firmware.0']  ? 'zbx' : 'zbx'],
-            ['Building',      $fleet['building'] ?? '—',                                       'ext'],
-            ['Floor',         $fleet['floor']    ?? '—',                                       'ext'],
-            ['Admin state',   $fleet['adminstate'] ?? '—',                                     'ext']
+            ['Host Name',      $hostName,                                 'zbx'],
+            ['Visible Name',   $visibleName,                              'zbx'],
+            ['Device Model',   $model,                                    $fleet['model']  ? 'ext' : 'zbx'],
+            ['Serial Number',  $serial,                                   $live['extremeap.serial.0'] ? 'zbx' : ($xiqSerial !== '' ? 'ext' : 'zbx')],
+            ['Firmware',       $firmware,                                 $live['extremeap.firmware.0'] ? 'zbx' : 'ext'],
+            ['Building',       $building,                                 'ext'],
+            ['Floor',          $floor,                                    'ext'],
+            ['Location',       $location,                                 'ext'],
+            ['Admin state',    $adminSt,                                  'ext'],
+            ['Cloud state',    $connect,                                  'ext'],
+            ['XIQ Device ID',  $xiqDevice !== '' ? $xiqDevice : '—',      'ext'],
         ];
     }
 
@@ -362,15 +386,31 @@ class ActionDashboard extends ActionBase {
         $speed_raw = $live['net.if.speed[ifSpeed.10]'] ?? null;
         $speed     = $speed_raw !== null ? $this->formatBps((float) $speed_raw) : '—';
 
-        $fleet = $this->resolveXiqFleetFields($hostid, ['mac', 'ip', 'policy']);
+        $fleet     = $this->resolveXiqFleetFields($hostid, ['mac', 'ip', 'policy']);
+        $xiqMac    = (string) ($this->readHostMacro($hostid, '{$XIQ_MAC}') ?? '');
+        // {$XIQ_MAC} is the canonical AP MAC the XIQ template stamps on the
+        // host at prototype creation; prefer it over the fleet-derived
+        // lastvalue (which can lag through a master-item refresh).
+        $mac       = self::firstNonEmpty([$xiqMac, (string) ($fleet['mac'] ?? '')]);
+        $macSrc    = $xiqMac !== '' ? 'zbx' : 'ext';
 
         return [
-            ['Mgt0 IPv4',     $primary['ip']  ?? '—',     'zbx'],
-            ['DNS Name',      $primary['dns'] ?? '—',     'zbx'],
-            ['MAC Address',   $fleet['mac']   ?? '—',     'ext'],
-            ['Uplink eth0',   "$oper · $speed",           'zbx'],
-            ['Network Policy', $fleet['policy'] ?? '—',   'ext']
+            ['Mgt0 IPv4',      self::firstNonEmpty([(string) ($primary['ip']  ?? ''), (string) ($fleet['ip'] ?? '')]), 'zbx'],
+            ['DNS Name',       self::firstNonEmpty([(string) ($primary['dns'] ?? '')]),                                'zbx'],
+            ['MAC Address',    $mac,                                                                                    $macSrc],
+            ['{$XIQ_MAC}',     $xiqMac !== '' ? $xiqMac : '—',                                                          'zbx'],
+            ['Uplink eth0',    "$oper · $speed",                                                                        'zbx'],
+            ['Network Policy', self::firstNonEmpty([(string) ($fleet['policy'] ?? '')]),                                'ext'],
         ];
+    }
+
+    /** Return the first non-empty trimmed string in $candidates, else '—'. */
+    private static function firstNonEmpty(array $candidates): string {
+        foreach ($candidates as $c) {
+            $s = trim((string) $c);
+            if ($s !== '') return $s;
+        }
+        return '—';
     }
 
     /**
