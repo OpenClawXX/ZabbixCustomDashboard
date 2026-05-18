@@ -975,7 +975,7 @@ final class XIQClient
      *     raw:      array<string,mixed>
      * }>
      */
-    public function getDeviceAlarms(int $xiqDeviceId, int $limit = 100): array
+    public function getDeviceAlarms(int $xiqDeviceId, int $limit = 100, int $windowHours = 168): array
     {
         if ($xiqDeviceId <= 0) {
             throw new XIQException(
@@ -984,13 +984,21 @@ final class XIQClient
         }
         $limit = max(1, min(100, $limit));
 
+        // XIQ /alarms requires startTime + endTime as int64 milliseconds.
+        // Default window: last 7 days (168h) so the Events tab shows a
+        // useful tail without dragging back ancient history.
+        $endMs   = (int) (microtime(true) * 1000);
+        $startMs = $endMs - ($windowHours * 3600 * 1000);
+
         $data = $this->httpGet(
             path:   '/alarms',
             params: [
                 'deviceIds' => $xiqDeviceId,
                 'views'     => 'FULL',
                 'page'      => 1,
-                'limit'     => $limit
+                'limit'     => $limit,
+                'startTime' => $startMs,
+                'endTime'   => $endMs
             ]
         );
 
