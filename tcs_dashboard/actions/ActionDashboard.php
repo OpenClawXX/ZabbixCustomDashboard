@@ -6,6 +6,7 @@ use API;
 use CControllerResponseData;
 use CControllerResponseFatal;
 use Modules\TcsDashboard\Lib\PFClient;
+use Modules\TcsDashboard\Lib\XIQClient;
 
 /**
  * GET zabbix.php?action=tcs.dashboard.view[&hostid=NNN]
@@ -92,7 +93,11 @@ class ActionDashboard extends ActionBase {
             }
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
-            $boot['pfClients']   = $pfClients;
+            // Prefer XIQ /clients/active for the Clients tab — it's the
+            // canonical per-AP source and works without PacketFence being
+            // configured. Falls back to PF when XIQ isn't available.
+            $xiqClients          = $this->collectXiqClients($hostid);
+            $boot['pfClients']   = $xiqClients !== [] ? $xiqClients : $pfClients;
             $boot['pfAuthFails'] = $pfAuthFails;
 
             // Fold PF client counts into the alerts summary. activeClients is
@@ -639,6 +644,115 @@ class ActionDashboard extends ActionBase {
         }
         usort($out, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
         return $out;
+    }
+
+    /**
+     * Pull active wireless clients for this AP from the XIQ REST API
+     * (/clients/active?deviceIds=<XIQ device id>) and reshape them into
+     * the per-client rows the Clients tab expects.
+     *
+     * Requires:
+     *   - Per-AP host macro {$XIQ_DEVICE_ID} (set by the fleet template's
+     *     host prototype; numeric device id).
+     *   - Global macro {$XIQ_API_TOKEN} (non-secret read-side token) or
+     *     {$XIQ_TOKEN} if it was set as plain text. SECRET_TEXT macros
+     *     can't be read back through the Zabbix API so the host-scoped
+     *     {$XIQ_TOKEN} from the fleet template isn't usable here.
+     *
+     * Returns [] when either piece is missing or the API call fails — the
+     * UI then falls back to PacketFence (or renders the empty state).
+     */
+    private function collectXiqClients(string $hostid): array {
+        $deviceId = $this->readHostMacro($hostid, '{$XIQ_DEVICE_ID}');
+        if ($deviceId === null || !is_numeric($deviceId) || (int) $deviceId <= 0) {
+            return [];
+        }
+        $token = self::xiqGlobalToken();
+        if ($token === null) {
+            return [];
+        }
+
+        try {
+            $client = XIQClient::fromToken($token);
+            $rows   = $client->getClients((int) $deviceId);
+        }
+        catch (\Throwable $e) {
+            error_log('[tcs_dashboard] XIQClient::getClients failed: '.$e->getMessage());
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $r) {
+            $health  = (int) ($r['client_health'] ?? 0);
+            $posture = $health >= 80 ? 'compliant'
+                     : ($health >= 50 ? 'non-compliant' : 'n/a');
+
+            $secs  = (int) ($r['connected_seconds'] ?? 0);
+            $since = $this->formatDuration($secs);
+
+            // Best-effort role-tag class — the Clients tab styles known
+            // PacketFence role names; XIQ user_profile_name is free-form so
+            // we just pass it through and the UI lands on the "unknown"
+            // role tag, which is fine.
+            $role = (string) ($r['user_profile'] ?? '');
+            if ($role === '') $role = 'XIQ Client';
+
+            $out[] = [
+                'host'    => (string) ($r['hostname'] !== '' ? $r['hostname'] : ($r['ip'] ?? $r['mac'])),
+                'mac'     => (string) ($r['mac'] ?? ''),
+                'user'    => (string) ($r['username'] !== '' ? $r['username'] : '—'),
+                'role'    => $role,
+                'vlan'    => (int)    ($r['vlan'] ?? 0) ?: '—',
+                'ssid'    => (string) ($r['ssid'] !== '' ? $r['ssid'] : '—'),
+                'auth'    => (string) ($r['protocol'] !== '' ? $r['protocol'] : '—'),
+                'rssi'    => (int)    ($r['rssi'] ?? 0),
+                'rate'    => '',
+                'band'    => (string) ($r['band'] !== '' ? $r['band'] : '—'),
+                'os'      => (string) ($r['os_type'] !== '' ? $r['os_type'] : '—'),
+                'since'   => $since,
+                'posture' => $posture,
+                'source'  => 'xiq'
+            ];
+        }
+        return $out;
+    }
+
+    /** Read a single host-scoped user macro by name; null when unset. */
+    private function readHostMacro(string $hostid, string $macro): ?string {
+        $rows = API::UserMacro()->get([
+            'output'  => ['macro', 'value'],
+            'hostids' => [$hostid],
+            'filter'  => ['macro' => [$macro]]
+        ]) ?: [];
+        foreach ($rows as $r) {
+            if ($r['macro'] === $macro) return (string) $r['value'];
+        }
+        return null;
+    }
+
+    /** Read the global XIQ API token (non-secret), or null. */
+    private static function xiqGlobalToken(): ?string {
+        foreach (['{$XIQ_API_TOKEN}', '{$XIQ_TOKEN}'] as $name) {
+            $rows = API::UserMacro()->get([
+                'output'      => ['macro', 'value'],
+                'globalmacro' => true,
+                'filter'      => ['macro' => $name]
+            ]) ?: [];
+            $v = trim((string) ($rows[0]['value'] ?? ''));
+            if ($v !== '') return $v;
+        }
+        return null;
+    }
+
+    /** Format a duration in seconds as "Nd Nh", "Nh Nm", or "Nm". */
+    private function formatDuration(int $s): string {
+        if ($s <= 0) return '—';
+        $d = intdiv($s, 86400); $s %= 86400;
+        $h = intdiv($s, 3600);  $s %= 3600;
+        $m = intdiv($s, 60);
+        if ($d > 0) return "{$d}d {$h}h";
+        if ($h > 0) return "{$h}h {$m}m";
+        return "{$m}m";
     }
 
     /**

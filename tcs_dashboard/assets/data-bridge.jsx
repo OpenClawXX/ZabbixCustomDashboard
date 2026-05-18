@@ -188,7 +188,8 @@
                 events:     fresh.events     ?? window.ZBX_EVENTS,
                 alerts:     fresh.alerts     ?? window.ALERTS_SUMMARY,
                 wiredPorts: fresh.wiredPorts ?? window.WIRED_PORTS,
-                ssids:      fresh.ssids      ?? window.SSIDS
+                ssids:      fresh.ssids      ?? window.SSIDS,
+                pfClients:  fresh.pfClients  ?? window.PF_CLIENTS
             });
             recordFetch(true, null, fresh);
             window.dispatchEvent(new CustomEvent("tcs:data", { detail: fresh }));

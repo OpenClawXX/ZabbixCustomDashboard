@@ -384,15 +384,23 @@ const WiredTab = () => {
   );
 };
 
-// ───────── Clients tab (PacketFence-driven) ─────────
+// ───────── Clients tab ─────────
+// Source-agnostic: ActionDashboard prefers XIQ /clients/active (deviceIds
+// = host macro {$XIQ_DEVICE_ID}) and falls back to PacketFence per-node.
+// Each row carries .source so the badge reflects what actually populated it.
 const ClientsTab = ({ filter, setFilter }) => {
-  const all = window.PF_CLIENTS;
+  const all = Array.isArray(window.PF_CLIENTS) ? window.PF_CLIENTS : [];
+  const authFails = Array.isArray(window.PF_AUTH_FAILS) ? window.PF_AUTH_FAILS : [];
+  const source = (all[0] && all[0].source === "xiq") ? "xiq"
+               : (all[0] && all[0].source === "pf")  ? "pf"
+               : "none";
   const filtered = all.filter(c => {
+    const role = String(c.role ?? "");
     if (filter === "all") return true;
     if (filter === "issues") return c.posture !== "compliant" && c.posture !== "n/a";
-    if (filter === "students") return c.role.includes("Student");
-    if (filter === "faculty") return c.role === "Faculty";
-    if (filter === "guests") return c.role.includes("Guest");
+    if (filter === "students") return role.includes("Student");
+    if (filter === "faculty") return role === "Faculty";
+    if (filter === "guests") return role.includes("Guest");
     return true;
   });
   return (
@@ -400,34 +408,46 @@ const ClientsTab = ({ filter, setFilter }) => {
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="card-h">
           <h3>Connected Clients</h3>
-          <SourceBadge src="pf" />
+          {source === "xiq" ? <SourceBadge src="ext" /> : <SourceBadge src="pf" />}
           <div className="h-spacer" />
+          <span className="h-meta" style={{ marginRight: 8 }}>
+            {all.length} associated{source === "xiq" ? " · XIQ /clients/active" : source === "pf" ? " · PacketFence" : ""}
+          </span>
           <div style={{ display: "flex", gap: 4 }}>
             {[["all","All"],["issues","Issues"],["students","Students"],["faculty","Faculty"],["guests","Guests"]].map(([k,l]) =>
               <button key={k} className={`btn sm ${filter===k?"primary":"ghost"}`} onClick={()=>setFilter(k)}>{l}</button>
             )}
           </div>
         </div>
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>MAC / Hostname</th>
-              <th>User</th>
-              <th>NAC Role</th>
-              <th>VLAN</th>
-              <th>SSID / Auth</th>
-              <th>RSSI</th>
-              <th>Rate</th>
-              <th>OS</th>
-              <th>Connected</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(c => <ClientRow key={c.mac} c={c} />)}
-          </tbody>
-        </table>
+        {all.length === 0 ? (
+          <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+            No active clients reported for this AP.<br />
+            <span style={{ fontSize: 11 }}>
+              Set global macro <code>{"{$XIQ_API_TOKEN}"}</code> and host macro <code>{"{$XIQ_DEVICE_ID}"}</code> to enable the XIQ-side feed, or configure the PacketFence macros on this host.
+            </span>
+          </div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>MAC / Hostname</th>
+                <th>User</th>
+                <th>Role</th>
+                <th>VLAN</th>
+                <th>SSID / Auth</th>
+                <th>RSSI</th>
+                <th>Band</th>
+                <th>OS</th>
+                <th>Connected</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(c => <ClientRow key={c.mac || c.host} c={c} />)}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="card">
@@ -435,57 +455,65 @@ const ClientsTab = ({ filter, setFilter }) => {
           <h3>Recent Authentication Failures</h3>
           <SourceBadge src="pf" />
           <div className="h-spacer" />
-          <span className="h-meta">RADIUS audit · last 24h</span>
+          <span className="h-meta">{authFails.length === 0 ? "no failures or PacketFence not configured" : "RADIUS audit · last 24h"}</span>
         </div>
-        <table className="tbl">
-          <thead><tr><th>Time</th><th>Client MAC</th><th>SSID</th><th>Reason</th><th>Attempts</th></tr></thead>
-          <tbody>
-            {window.PF_AUTH_FAILS.map((f, i) => (
-              <tr key={i}>
-                <td>{f.ts}</td>
-                <td className="fg">{f.mac}</td>
-                <td>{f.ssid}</td>
-                <td style={{ color: "var(--warn)" }}>{f.reason}</td>
-                <td>{f.attempts}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {authFails.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+            No authentication failures recorded.
+          </div>
+        ) : (
+          <table className="tbl">
+            <thead><tr><th>Time</th><th>Client MAC</th><th>SSID</th><th>Reason</th><th>Attempts</th></tr></thead>
+            <tbody>
+              {authFails.map((f, i) => (
+                <tr key={i}>
+                  <td>{f.ts}</td>
+                  <td className="fg">{f.mac}</td>
+                  <td>{f.ssid}</td>
+                  <td style={{ color: "var(--warn)" }}>{f.reason}</td>
+                  <td>{f.attempts}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
 };
 
 const ClientRow = ({ c }) => {
+  const role = String(c.role ?? "");
   const roleClass = (() => {
-    if (c.role === "Faculty") return "faculty";
-    if (c.role.startsWith("Student-9-12")) return "student";
-    if (c.role === "Student-BYOD") return "byod";
-    if (c.role.includes("Guest")) return "guest";
-    if (c.role === "AV-Equipment") return "av";
-    if (c.role === "Quarantine") return "quarantine";
+    if (role === "Faculty") return "faculty";
+    if (role.startsWith("Student-9-12")) return "student";
+    if (role === "Student-BYOD") return "byod";
+    if (role.includes("Guest")) return "guest";
+    if (role === "AV-Equipment") return "av";
+    if (role === "Quarantine") return "quarantine";
     return "unknown";
   })();
-  const bars = c.rssi >= -55 ? 4 : c.rssi >= -65 ? 3 : c.rssi >= -75 ? 2 : 1;
+  const rssi = typeof c.rssi === "number" && c.rssi !== 0 ? c.rssi : null;
+  const bars = rssi == null ? 0 : rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
   return (
     <tr>
-      <td><StatusDot state={c.posture} /></td>
-      <td><div className="fg">{c.host}</div><div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.mac}</div></td>
-      <td>{c.user}</td>
-      <td><span className={`role-tag ${roleClass}`}>{c.role}</span></td>
-      <td>{c.vlan}</td>
-      <td>{c.ssid}<div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.auth}</div></td>
+      <td><StatusDot state={c.posture || "n/a"} /></td>
+      <td><div className="fg">{c.host || c.mac}</div><div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.mac}</div></td>
+      <td>{c.user || "—"}</td>
+      <td><span className={`role-tag ${roleClass}`}>{role || "—"}</span></td>
+      <td>{c.vlan || "—"}</td>
+      <td>{c.ssid || "—"}<div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.auth || ""}</div></td>
       <td>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="rssi-bar">
             {[1,2,3,4].map(n => <i key={n} className={n <= bars ? "on" : ""} />)}
           </span>
-          {c.rssi} dBm
+          {rssi == null ? "—" : `${rssi} dBm`}
         </div>
       </td>
-      <td>{c.rate}<div style={{ color: "var(--muted)", fontSize: 10.5 }}>{c.band}</div></td>
-      <td>{c.os}</td>
-      <td>{c.since}</td>
+      <td>{c.band || "—"}</td>
+      <td>{c.os || "—"}</td>
+      <td>{c.since || "—"}</td>
       <td><Icon name="more" size={14}/></td>
     </tr>
   );
