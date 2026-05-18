@@ -35,11 +35,11 @@ const PageHeader = ({ timeRange, setTimeRange, host }) => (
       </div>
       <div className="host-meta">
         <span className="pill"><span className="dot" style={{ background: host.apStatus === "down" ? "var(--err)" : host.apStatus === "warn" ? "var(--warn)" : "var(--ok)" }} /> {host.apStatus === "down" ? "Unreachable" : host.apStatus === "warn" ? "Degraded" : "Connected"}</span>
-        <span className="pill"><span className="lbl">Active since</span> <span className="v">7d 23h 49m</span></span>
-        <span className="pill"><span className="lbl">Site</span> <span>{host.site || "Bryant High School"} · {host.floor || "1st Floor"}</span></span>
+        <span className="pill"><span className="lbl">Active since</span> <span className="v">{fmtUptime(host.uptime)}</span></span>
+        <span className="pill"><span className="lbl">Site</span> <span>{host.site || "—"}{host.floor ? ` · ${host.floor}` : ""}</span></span>
         <span className="pill"><span className="lbl">Clients</span> <span className="v">{(host.clients ?? 0).toLocaleString()}</span></span>
-        <span className="pill"><span className="lbl">Zabbix Host ID</span> <span className="v">10847</span></span>
-        <span className="pill"><span className="lbl">Polled via</span> <span>{host.proxy}</span></span>
+        <span className="pill"><span className="lbl">Zabbix Host ID</span> <span className="v">{host.hostid || "—"}</span></span>
+        {host.proxy && <span className="pill"><span className="lbl">Polled via</span> <span>{host.proxy}</span></span>}
       </div>
     </div>
     <div className="timerange">
@@ -74,92 +74,104 @@ const Tabs = ({ tab, setTab }) => {
   );
 };
 
-const DeviceSidecar = ({ host }) => (
-  <div className="card device-card">
-    <div className="device-hero">
-      <div className="status-line">
-        <StatusDot state="ok" /> <span style={{ color: "var(--ok)" }}>Connected</span>
-        <span className="muted" style={{ marginLeft: 6 }}>· active 7d 23h</span>
-      </div>
-      <div className="device-img">
-        {/* Stylized AP illustration */}
-        <svg width="60" height="60" viewBox="0 0 60 60">
+// Format an uptime in seconds (from Zabbix system.uptime) as "Nd HHh MMm".
+const fmtUptime = (s) => {
+  s = Number(s) || 0;
+  if (s <= 0) return "—";
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${String(h).padStart(2,"0")}h ${String(m).padStart(2,"0")}m`;
+  if (h > 0) return `${h}h ${String(m).padStart(2,"0")}m`;
+  return `${m}m`;
+};
+
+const DeviceSidecar = ({ host }) => {
+  // host.available: 1 = up, 2 = down, anything else (0/null) = unknown.
+  // Prefer the explicit apStatus the parent threads in from AP_SITES (which
+  // already folds in trigger severity); fall back to availability.
+  const state = host.apStatus === "down" ? "down"
+              : host.apStatus === "warn" ? "warn"
+              : host.available === 1 ? "ok"
+              : host.available === 2 ? "down"
+              : "idle";
+  const stateLabel = state === "ok"   ? "Connected"
+                   : state === "warn" ? "Degraded"
+                   : state === "down" ? "Unreachable"
+                   : "Unknown";
+  const stateColor = state === "ok"   ? "var(--ok)"
+                   : state === "warn" ? "var(--warn)"
+                   : state === "down" ? "var(--err)"
+                   : "var(--muted)";
+
+  const templates = Array.isArray(host.templates) ? host.templates : [];
+  const groups    = Array.isArray(host.groups)    ? host.groups    : [];
+  const siteLine  = [host.site, host.floor].filter(Boolean).join(" · ");
+
+  return (
+    <div className="card device-card-h">
+      <div className="dev-h-img">
+        <svg width="56" height="56" viewBox="0 0 60 60">
           <ellipse cx="30" cy="46" rx="22" ry="4" fill="rgba(0,0,0,0.3)" />
           <rect x="6" y="22" width="48" height="20" rx="10" fill="#e8ecf4" />
           <rect x="6" y="22" width="48" height="6" rx="10" fill="#f4f7fc" />
           <circle cx="30" cy="32" r="3" fill="#181f2c" />
-          <circle cx="30" cy="32" r="1" fill="var(--ok)" />
+          <circle cx="30" cy="32" r="1" fill={stateColor} />
         </svg>
       </div>
-      <div className="device-name">{host.host}</div>
-      <div className="uptime">uptime · 8d 03h 12m</div>
-    </div>
 
-    <div className="floorplan">
-      <div className="floorplan-tag">Bryant HS · 1st Floor</div>
-      {/* Synthetic floor plan */}
-      <svg width="100%" height="100%" viewBox="0 0 280 160" style={{ position: "absolute", inset: 0 }}>
-        <g stroke="#2c3650" strokeWidth="1" fill="none">
-          {/* outer wall */}
-          <path d="M20 30 L260 30 L260 130 L180 130 L180 140 L60 140 L60 130 L20 130 Z" />
-          {/* corridor */}
-          <path d="M20 80 L260 80" />
-          {/* room dividers */}
-          <path d="M60 30 L60 80 M100 30 L100 80 M140 30 L140 80 M180 30 L180 80 M220 30 L220 80" />
-          <path d="M80 80 L80 130 M120 80 L120 130 M160 80 L160 130 M200 80 L200 130 M240 80 L240 130" />
-        </g>
-        <g fontFamily="var(--mono)" fontSize="6" fill="#4a5572">
-          <text x="32" y="55">A101</text>
-          <text x="72" y="55">A102</text>
-          <text x="112" y="55">A103</text>
-          <text x="152" y="55">A104</text>
-          <text x="192" y="55">A105</text>
-          <text x="232" y="55">A106</text>
-          <text x="32" y="105">B101</text>
-          <text x="92" y="105">B102</text>
-          <text x="132" y="105">B103</text>
-          <text x="172" y="105">B104</text>
-          <text x="212" y="105">B105</text>
-          <text x="252" y="105">B106</text>
-        </g>
-        {/* other APs */}
-        <circle cx="55" cy="80" r="3" fill="#4a5572" />
-        <circle cx="145" cy="80" r="3" fill="#4a5572" />
-        <circle cx="225" cy="80" r="3" fill="#4a5572" />
-        {/* this AP */}
-        <g>
-          <circle cx="105" cy="80" r="14" fill="rgba(217,41,41,0.12)" />
-          <circle cx="105" cy="80" r="8"  fill="rgba(217,41,41,0.22)" />
-          <circle cx="105" cy="80" r="4"  fill="var(--zbx)" />
-          <text x="115" y="74" fontSize="6" fontFamily="var(--mono)" fill="var(--fg-2)">BHS-56</text>
-        </g>
-      </svg>
-    </div>
+      <div className="dev-h-id">
+        <div className="device-name">{host.host || "—"}</div>
+        <div className="status-line">
+          <StatusDot state={state} />
+          <span style={{ color: stateColor }}>{stateLabel}</span>
+          <span className="muted" style={{ marginLeft: 6 }}>· uptime {fmtUptime(host.uptime)}</span>
+        </div>
+        <div className="dev-h-sub mono">
+          {host.ip || "—"}{host.model ? ` · ${host.model}` : ""}
+        </div>
+      </div>
 
-    <div className="device-actions">
-      <button className="btn primary"><Icon name="refresh" size={12} /> Reboot</button>
-      <button className="btn"><Icon name="external" size={12} /> SSH</button>
-      <button className="btn ghost"><Icon name="more" size={12} /></button>
-    </div>
+      <div className="dev-h-block">
+        <div className="label">Location</div>
+        <div className="v">
+          {siteLine || "—"}
+          {groups.length > 0 && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+              {groups.slice(0, 2).join(" · ")}
+            </div>
+          )}
+        </div>
+      </div>
 
-    <div className="location-block">
-      <div className="label">Location</div>
-      <div className="v">Tuscaloosa City Schools / Tuscaloosa<br/>Bryant High School · 1st Floor<br/>Hallway 100s wing · ceiling mount</div>
-    </div>
-    <div className="location-block">
-      <div className="label">Installation</div>
-      <div className="v">Installed 2023-10-19 10:26<br/><a style={{ color: "var(--accent)" }}>Open install report ↗</a> · <a style={{ color: "var(--accent)" }}>Media gallery ↗</a></div>
-    </div>
-    <div className="location-block">
-      <div className="label">Zabbix Templates</div>
-      <div className="v" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 11 }}>• Extreme AP via SNMPv3</span>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 11 }}>• ICMP Ping</span>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 11 }}>• PacketFence NAC Integration</span>
+      <div className="dev-h-block">
+        <div className="label">Clients</div>
+        <div className="v" style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 600 }}>
+          {(host.clients ?? 0).toLocaleString()}
+        </div>
+      </div>
+
+      <div className="dev-h-block dev-h-templates">
+        <div className="label">Zabbix Templates</div>
+        <div className="v">
+          {templates.length === 0 ? (
+            <span className="muted">none</span>
+          ) : (
+            templates.slice(0, 4).map((t, i) => (
+              <span key={i} className="tpl-chip">{t}</span>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="dev-h-actions">
+        <button className="btn primary"><Icon name="refresh" size={12} /> Reboot</button>
+        <button className="btn"><Icon name="external" size={12} /> SSH</button>
+        <button className="btn ghost"><Icon name="more" size={12} /></button>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ───────── AP Host Navigator (left rail) ─────────
 const APNavigator = ({ activeId, onSelect, query, setQuery }) => {

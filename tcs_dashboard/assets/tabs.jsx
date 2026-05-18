@@ -161,58 +161,87 @@ const SparkCell = ({ label, value, unit, data, color }) => (
 
 // ───────── Wireless tab ─────────
 const WirelessTab = () => {
-  const I = window.ZBX_ITEMS;
+  const I = window.ZBX_ITEMS || {};
+  const host = window.ZBX_HOST || {};
   return (
     <div className="row" style={{ gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-      <RadioCard band="2.4 GHz" channel="6 / HT20" txPower="14 dBm" util={I.channelUtil24} noise={I.noise24} clients={42} />
-      <RadioCard band="5 GHz"   channel="44 / VHT80" txPower="20 dBm" util={I.channelUtil5} noise={I.noise5} clients={229} />
+      <RadioCard band="2.4 GHz" util={I.channelUtil24} noise={I.noise24} clients={host.clients24} />
+      <RadioCard band="5 GHz"   util={I.channelUtil5}  noise={I.noise5}  clients={host.clients5} />
       <div className="card" style={{ gridColumn: "1 / -1" }}>
-        <div className="card-h"><h3>SSIDs Broadcast</h3><SourceBadge src="ext" /><div className="h-spacer"/><span className="h-meta">applied via TCS-Production policy</span></div>
-        <table className="tbl">
-          <thead><tr><th>SSID</th><th>VLAN</th><th>Auth</th><th>Encryption</th><th>Band</th><th>Clients</th><th>NAC Role</th></tr></thead>
-          <tbody>
-            <tr><td className="fg">TCS-Wireless</td><td>100/110/130/150</td><td>WPA2-Enterprise · EAP-TLS</td><td>AES</td><td>2.4 + 5</td><td>248</td><td><span className="role-tag faculty">role-based</span></td></tr>
-            <tr><td className="fg">TCS-Guest-Registration</td><td>200</td><td>Captive Portal</td><td>Open + HTTPS</td><td>5</td><td>22</td><td><span className="role-tag guest">Guest-Registered</span></td></tr>
-            <tr><td className="fg">TCS-VIPGuest</td><td>201</td><td>WPA2-PSK (rotated weekly)</td><td>AES</td><td>5</td><td>1</td><td><span className="role-tag guest">VIPGuest</span></td></tr>
-          </tbody>
-        </table>
+        <div className="card-h">
+          <h3>SSIDs Broadcast</h3>
+          <SourceBadge src="ext" />
+          <div className="h-spacer"/>
+          <span className="h-meta">
+            {Array.isArray(window.SSIDS) && window.SSIDS.length > 0
+              ? `${window.SSIDS.length} SSIDs · via XIQ policy`
+              : "SSID inventory not yet wired — see ActionDashboard::collectSsids()"}
+          </span>
+        </div>
+        {Array.isArray(window.SSIDS) && window.SSIDS.length > 0 ? (
+          <table className="tbl">
+            <thead><tr><th>SSID</th><th>VLAN</th><th>Auth</th><th>Encryption</th><th>Band</th><th>Clients</th><th>NAC Role</th></tr></thead>
+            <tbody>
+              {window.SSIDS.map(s => (
+                <tr key={s.id || s.name}>
+                  <td className="fg">{s.name}</td>
+                  <td>{s.vlan ?? "—"}</td>
+                  <td>{s.auth ?? "—"}</td>
+                  <td>{s.encryption ?? "—"}</td>
+                  <td>{s.band ?? "—"}</td>
+                  <td>{s.clients ?? 0}</td>
+                  <td>{s.role && <span className={`role-tag ${s.role.cls || "faculty"}`}>{s.role.label || s.role}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+            No SSID inventory available for this AP.
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
-const RadioCard = ({ band, channel, txPower, util, noise, clients }) => (
-  <div className="card">
-    <div className="card-h">
-      <h3>Radio · {band}</h3>
-      <SourceBadge src="zbx" />
-      <div className="h-spacer" />
-      <span className="h-meta">{channel} · {txPower}</span>
+const RadioCard = ({ band, util, noise, clients }) => {
+  const u = util || {};
+  const n = noise || {};
+  const channel = u.key && /,(\d+G)\]/.test(u.key) ? RegExp.$1 : null;
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h3>Radio · {band}</h3>
+        <SourceBadge src="zbx" />
+        <div className="h-spacer" />
+        <span className="h-meta">{channel ? `band ${channel}` : "live · 30s poll"}</span>
+      </div>
+      <div className="card-b" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <MiniMetric label="Channel Utilization" v={u.value} unit="%" data={u.history} threshold={70} color="var(--pf)" />
+        <MiniMetric label="Noise Floor" v={n.value} unit="dBm" data={n.history} color="var(--info)" />
+        <MiniMetric label="Associated Clients" v={clients} unit="" color="var(--ok)" />
+        <MiniMetric label="Retry Rate" v={null} unit="%" color="var(--warn)" />
+      </div>
     </div>
-    <div className="card-b" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <MiniMetric label="Channel Utilization" v={util.value} unit="%" data={util.history} threshold={70} color="var(--pf)" />
-      <MiniMetric label="Noise Floor" v={noise.value} unit="dBm" data={noise.history} color="var(--info)" />
-      <MiniMetric label="Associated Clients" v={clients} unit="" color="var(--ok)" />
-      <MiniMetric label="Retry Rate" v={2.4} unit="%" data={I_gen()} color="var(--warn)" />
-    </div>
-  </div>
-);
+  );
+};
 
-function I_gen() {
-  const arr = []; let v = 2.5;
-  for (let i = 0; i < 48; i++) { v += (Math.random() - 0.5) * 0.6; v = Math.max(0.5, Math.min(6, v)); arr.push(Number(v.toFixed(2))); }
-  return arr;
-}
-
-const MiniMetric = ({ label, v, unit, data, color, threshold }) => (
-  <div style={{ background: "var(--bg-2)", borderRadius: 8, padding: 12, border: "1px solid var(--line)" }}>
-    <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>{label}</div>
-    <div style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600 }}>
-      {v}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 3 }}>{unit}</span>
+const MiniMetric = ({ label, v, unit, data, color, threshold }) => {
+  const missing = v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v));
+  const display = missing
+    ? "—"
+    : (typeof v === "number" ? (Number.isInteger(v) ? v.toString() : v.toFixed(1)) : String(v));
+  return (
+    <div style={{ background: "var(--bg-2)", borderRadius: 8, padding: 12, border: "1px solid var(--line)" }}>
+      <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600, color: missing ? "var(--muted)" : "var(--fg)" }}>
+        {display}{!missing && <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 3 }}>{unit}</span>}
+      </div>
+      {data && data.length > 0 && <Sparkline data={data} color={color} width={240} height={28} threshold={threshold} />}
     </div>
-    {data && <Sparkline data={data} color={color} width={240} height={28} threshold={threshold} />}
-  </div>
-);
+  );
+};
 
 // ───────── Wired tab ─────────
 const WiredTab = () => (

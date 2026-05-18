@@ -64,9 +64,9 @@ const App = () => {
 
   const TabContent = (
     showSide ? (
-      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 14 }}>
+      <div>
         <DeviceSidecar host={host} />
-        <div>{TabView}</div>
+        <div style={{ marginTop: 14 }}>{TabView}</div>
       </div>
     ) : TabView
   );
