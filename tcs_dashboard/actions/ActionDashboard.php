@@ -54,6 +54,10 @@ class ActionDashboard extends ActionBase {
             'pfClients'   => [],
             'pfAuthFails' => [],
             'wiredPorts'  => [],
+            // AP Navigator: every wireless host grouped by school. Always
+            // collected (independent of $hostid) so the left rail is
+            // populated even when the page is opened without a hostid.
+            'apSites'     => $this->collectApSites()
         ];
 
         if ($hostid !== '') {
@@ -394,21 +398,8 @@ class ActionDashboard extends ActionBase {
         }
         if ($serial === '') return $out;
 
-        // 2. Find the fleet host (one with the XIQ-by-API template linked).
-        $fleet_hosts = API::Host()->get([
-            'output'                => ['hostid'],
-            'selectParentTemplates' => ['name'],
-            'filter'                => []
-        ]) ?: [];
-        $fleet_hostid = null;
-        foreach ($fleet_hosts as $fh) {
-            foreach ($fh['parentTemplates'] ?? [] as $t) {
-                if (($t['name'] ?? '') === 'Extreme XIQ APs by API') {
-                    $fleet_hostid = $fh['hostid'];
-                    break 2;
-                }
-            }
-        }
+        // 2. Find the fleet host (cached for the duration of the request).
+        $fleet_hostid = $this->resolveXiqFleetHostId();
         if ($fleet_hostid === null) return $out;
 
         // 3. Pull the specific xiq.ap.<field>[<serial>] items on the fleet host.
@@ -527,6 +518,219 @@ class ActionDashboard extends ActionBase {
     private function collectWiredPorts(string $hostid): array {
         // Stub. Populate from net.if.* items if/when you discover them.
         return [];
+    }
+
+    /**
+     * Enumerate every wireless AP under host groups named
+     *   Site/Wireless/<school>/<floor>
+     * and return them bucketed by school, ready for window.AP_SITES.
+     *
+     * Each AP record carries hostid, id (visible name), ip, model, floor,
+     * status (ok/warn/down), problems count, and clients (from XIQ fleet
+     * if available).
+     */
+    private function collectApSites(): array {
+        $groups = API::HostGroup()->get([
+            'output'      => ['groupid', 'name'],
+            'search'      => ['name' => 'Site/Wireless/'],
+            'startSearch' => true
+        ]) ?: [];
+
+        // Keep only "Site/Wireless/<school>/..." groups — startSearch is a
+        // prefix match so this is mostly belt-and-braces.
+        $valid_groupids = [];
+        foreach ($groups as $g) {
+            if (str_starts_with($g['name'], 'Site/Wireless/')) {
+                $valid_groupids[] = $g['groupid'];
+            }
+        }
+        if (!$valid_groupids) return [];
+
+        // Hosts in any matching group. Pull the groups back per-host so we
+        // can read the school/floor segments from the host's actual group
+        // membership rather than guessing from the group list.
+        $hosts = API::Host()->get([
+            'output'           => ['hostid', 'host', 'name'],
+            'selectInterfaces' => ['ip', 'main'],
+            'selectHostGroups' => ['groupid', 'name'],
+            'groupids'         => $valid_groupids
+        ]) ?: [];
+        if (!$hosts) return [];
+
+        $hostids = array_column($hosts, 'hostid');
+
+        // Open-problem count per host (one Problem.get for all of them).
+        $prob_count = [];
+        if ($hostids) {
+            $problems = API::Problem()->get([
+                'output'      => ['eventid', 'r_eventid'],
+                'hostids'     => $hostids,
+                'selectHosts' => ['hostid'],
+                'recent'      => false
+            ]) ?: [];
+            foreach ($problems as $p) {
+                if (!empty($p['r_eventid']) && (int) $p['r_eventid'] !== 0) continue;
+                foreach ($p['hosts'] ?? [] as $ph) {
+                    $hid = $ph['hostid'];
+                    $prob_count[$hid] = ($prob_count[$hid] ?? 0) + 1;
+                }
+            }
+        }
+
+        // Main-interface availability per host (Zabbix 6+: per-interface).
+        $avail_map = [];
+        if ($hostids) {
+            $ifaces = API::HostInterface()->get([
+                'output'  => ['hostid', 'available'],
+                'hostids' => $hostids,
+                'filter'  => ['main' => 1]
+            ]) ?: [];
+            foreach ($ifaces as $i) {
+                $hid = $i['hostid'];
+                $av  = (int) $i['available'];
+                // If any main iface is up, treat host as up.
+                if (!isset($avail_map[$hid]) || $av === 1) {
+                    $avail_map[$hid] = $av;
+                }
+            }
+        }
+
+        // Bulk XIQ fleet lookup: gather every host's {$XIQ_SERIAL} macro in
+        // one call, then one Item.get on the fleet host for all the
+        // xiq.ap.clients[<serial>] + xiq.ap.model[<serial>] keys we need.
+        $serial_by_host = [];
+        if ($hostids) {
+            $macros = API::UserMacro()->get([
+                'output'  => ['hostid', 'macro', 'value'],
+                'hostids' => $hostids,
+                'filter'  => ['macro' => ['{$XIQ_SERIAL}']]
+            ]) ?: [];
+            foreach ($macros as $m) {
+                if ($m['macro'] === '{$XIQ_SERIAL}' && !empty($m['value'])) {
+                    $serial_by_host[$m['hostid']] = (string) $m['value'];
+                }
+            }
+        }
+        $fleet_by_serial = [];
+        $fleet_hostid = $this->resolveXiqFleetHostId();
+        if ($fleet_hostid !== null && $serial_by_host) {
+            $wanted_keys = [];
+            foreach ($serial_by_host as $serial) {
+                $wanted_keys[] = 'xiq.ap.clients['.$serial.']';
+                $wanted_keys[] = 'xiq.ap.model['.$serial.']';
+            }
+            $items = API::Item()->get([
+                'output'  => ['key_', 'lastvalue'],
+                'hostids' => [$fleet_hostid],
+                'filter'  => ['key_' => $wanted_keys]
+            ]) ?: [];
+            foreach ($items as $it) {
+                if (preg_match('/^xiq\.ap\.([^[]+)\[(.+)\]$/', $it['key_'], $m)) {
+                    $fleet_by_serial[$m[2]][$m[1]] = (string) $it['lastvalue'];
+                }
+            }
+        }
+
+        // Build per-school buckets.
+        $by_school = [];
+        foreach ($hosts as $h) {
+            // Pick this host's "Site/Wireless/<school>/<floor>" group(s).
+            $school = '';
+            $floor  = '';
+            foreach ($h['hostgroups'] ?? [] as $hg) {
+                $name = $hg['name'] ?? '';
+                if (!str_starts_with($name, 'Site/Wireless/')) continue;
+                $rest  = substr($name, strlen('Site/Wireless/'));
+                $parts = explode('/', $rest);
+                // Prefer the most-specific match (one that has both segments).
+                if (count($parts) >= 1 && $parts[0] !== '' && $school === '') {
+                    $school = $parts[0];
+                }
+                if (count($parts) >= 2 && $parts[1] !== '') {
+                    $floor = $parts[1];
+                }
+            }
+            if ($school === '') continue;
+
+            $primary_ip = '';
+            foreach ($h['interfaces'] ?? [] as $iface) {
+                if ((int) ($iface['main'] ?? 0) === 1) {
+                    $primary_ip = (string) ($iface['ip'] ?? '');
+                    break;
+                }
+            }
+
+            $avail = $avail_map[$h['hostid']] ?? 0;
+            $prob  = $prob_count[$h['hostid']] ?? 0;
+            $status = match (true) {
+                $avail === 2          => 'down',
+                $prob > 0             => 'warn',
+                $avail === 1          => 'ok',
+                default               => 'warn'
+            };
+
+            $serial  = $serial_by_host[$h['hostid']] ?? '';
+            $fleet   = $serial !== '' ? ($fleet_by_serial[$serial] ?? []) : [];
+            $clients = isset($fleet['clients']) ? (int) $fleet['clients'] : 0;
+            $model   = $fleet['model'] ?? '';
+
+            if (!isset($by_school[$school])) {
+                $by_school[$school] = [
+                    'id'       => $school,
+                    'name'     => $school,
+                    'expanded' => true,
+                    'problems' => 0,
+                    'aps'      => []
+                ];
+            }
+            $by_school[$school]['aps'][] = [
+                'hostid'   => $h['hostid'],
+                'id'       => $h['name'] ?: $h['host'],
+                'ip'       => $primary_ip,
+                'model'    => $model,
+                'floor'    => $floor !== '' ? $floor : '—',
+                'status'   => $status,
+                'clients'  => $clients,
+                'problems' => $prob,
+                'serial'   => $serial
+            ];
+            $by_school[$school]['problems'] += $prob;
+        }
+
+        // Sort schools alphabetically; sort APs within each school by id.
+        ksort($by_school);
+        foreach ($by_school as &$s) {
+            usort($s['aps'], fn($a, $b) => strnatcasecmp($a['id'], $b['id']));
+        }
+        unset($s);
+
+        return array_values($by_school);
+    }
+
+    /**
+     * Find the XIQ fleet host (the one with the 'Extreme XIQ APs by API'
+     * template linked). Cached in a static so multiple calls within the
+     * same request only hit the API once. Returns hostid or null.
+     */
+    private function resolveXiqFleetHostId(): ?string {
+        static $cached = false;
+        static $value  = null;
+        if ($cached) return $value;
+        $cached = true;
+
+        $hosts = API::Host()->get([
+            'output'                => ['hostid'],
+            'selectParentTemplates' => ['name']
+        ]) ?: [];
+        foreach ($hosts as $h) {
+            foreach ($h['parentTemplates'] ?? [] as $t) {
+                if (($t['name'] ?? '') === 'Extreme XIQ APs by API') {
+                    $value = (string) $h['hostid'];
+                    return $value;
+                }
+            }
+        }
+        return null;
     }
 
     /**
