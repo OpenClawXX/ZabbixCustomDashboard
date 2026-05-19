@@ -108,7 +108,7 @@
 }
 .matrix-grid .mg-col-head:hover { color: var(--fg); }
 .matrix-grid .mg-row-head {
-  display: flex; align-items: center; justify-content: flex-end;
+  display: flex; align-items: center;
   font-family: var(--mono); font-size: 10px;
   color: var(--muted);
   padding-right: 8px;
