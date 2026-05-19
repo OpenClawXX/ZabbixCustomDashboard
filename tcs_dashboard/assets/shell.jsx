@@ -174,6 +174,14 @@ const DeviceSidecar = ({ host }) => {
           <StatusDot state={state} />
           <span style={{ color: stateColor }}>{stateLabel}</span>
           <span className="muted" style={{ marginLeft: 6 }}>· uptime {fmtUptime(host.uptime)}</span>
+          {host.configMismatch === 1 && (
+            <span
+              className="ap-config-chip"
+              title="xiq.ap.configmismatch reports the running config does not match the assigned XIQ network policy"
+            >
+              <Icon name="alert" size={10} /> CONFIG DRIFT
+            </span>
+          )}
         </div>
         <ApStatusPills
           xiqConnected={host.xiqConnected}
@@ -429,6 +437,15 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                     </span>
                   );
                 })()}
+                {(() => {
+                  const driftCount = site.aps.filter(a => a.configMismatch === 1).length;
+                  if (driftCount === 0) return null;
+                  return (
+                    <span className="site-drift" title={`${driftCount} AP${driftCount === 1 ? "" : "s"} with XIQ config drift`}>
+                      {driftCount}≠
+                    </span>
+                  );
+                })()}
               </div>
               <div className={"ap-nav-children" + (expanded ? "" : " hidden")}>
                 {matchedAps.map(ap => {
@@ -457,6 +474,9 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                         <div className="n" style={{ color: loadColor, fontWeight: ap.loadLevel === "ok" ? 500 : 700 }}>{ap.clients}</div>
                         <div className="u">cli</div>
                       </div>
+                      {ap.configMismatch === 1 && (
+                        <span className="ap-drift" title="XIQ reports running config does not match assigned policy">≠</span>
+                      )}
                       {ap.problems > 0 && <span className="ap-prob">{ap.problems}</span>}
                     </div>
                   );

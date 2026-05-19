@@ -865,6 +865,11 @@ body {
   background: rgba(242,95,92,0.18); color: var(--err);
   padding: 1px 6px; border-radius: 8px; font-weight: 700;
 }
+.ap-nav-site .site-drift {
+  font-family: var(--mono); font-size: 10px;
+  background: rgba(124,92,255,0.14); color: var(--ext);
+  padding: 1px 6px; border-radius: 8px; font-weight: 600;
+}
 
 .ap-nav-children { display: flex; flex-direction: column; }
 .ap-nav-children.hidden { display: none; }
@@ -891,5 +896,17 @@ body {
 .ap-nav-host .ap-cli .n { font-size: 11px; color: var(--fg); font-weight: 500; line-height: 1.1; }
 .ap-nav-host .ap-cli .u { font-size: 9px; color: var(--muted); letter-spacing: 0.4px; text-transform: uppercase; }
 .ap-nav-host .ap-prob { font-family: var(--mono); font-size: 9.5px; color: var(--err); font-weight: 700; margin-left: 2px; }
+.ap-nav-host .ap-drift { font-family: var(--mono); font-size: 11px; color: var(--ext); font-weight: 700; margin-left: 2px; }
+.ap-config-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--ext);
+  background: rgba(124,92,255,0.14);
+  border: 1px solid rgba(124,92,255,0.35);
+  border-radius: 8px;
+}
 
 @media (max-width: 1180px) { .ap-nav-card { position: relative; max-height: 360px; } }

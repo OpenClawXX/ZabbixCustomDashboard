@@ -1330,6 +1330,7 @@ class ActionDashboard extends ActionBase {
                 $wanted_keys[] = 'xiq.ap.clients['.$serial.']';
                 $wanted_keys[] = 'xiq.ap.model['.$serial.']';
                 $wanted_keys[] = 'xiq.ap.connected['.$serial.']';
+                $wanted_keys[] = 'xiq.ap.configmismatch['.$serial.']';
             }
             $items = API::Item()->get([
                 'output'  => ['key_', 'lastvalue'],
@@ -1383,6 +1384,9 @@ class ActionDashboard extends ActionBase {
             $xiqConn = isset($fleet['connected']) && $fleet['connected'] !== ''
                 ? (((int) $fleet['connected']) === 1 ? 1 : 0)
                 : null;
+            $cfgMismatch = isset($fleet['configmismatch']) && $fleet['configmismatch'] !== ''
+                ? (((int) $fleet['configmismatch']) === 1 ? 1 : 0)
+                : null;
 
             // Compose XIQ + SNMP + ping into a single nav-rail status. The
             // problem count still bumps a healthy AP to "warn" so other
@@ -1417,6 +1421,7 @@ class ActionDashboard extends ActionBase {
                 'xiqConnected'   => $xiqConn,
                 'snmpAvailable'  => $avail,
                 'pingUp'         => $pingUp,
+                'configMismatch' => $cfgMismatch,
                 'clients'        => $clients,
                 'loadLevel'      => $loadLevel,
                 'problems'       => $prob,
