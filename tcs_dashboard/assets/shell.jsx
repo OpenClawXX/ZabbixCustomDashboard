@@ -621,7 +621,7 @@ const Tweaks = ({ t, setTweak }) => (
 // ───────── Debug panel — surface bridge state when no data is loading ─────────
 const DebugPanel = () => {
   const [, force] = React.useState(0);
-  const [open, setOpen] = React.useState(true);
+  const [open, setOpen] = React.useState(false);
   React.useEffect(() => {
     const bump = () => force(n => n + 1);
     window.addEventListener("tcs:debug", bump);
