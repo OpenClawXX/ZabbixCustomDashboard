@@ -329,42 +329,48 @@ const ApPfActionRow = ({ mac, uplink }) => {
   }, [busy, canCycle, switchHostid, member, portNum]);
 
   return (
-    <>
-      {viewHref ? (
-        <a className="pf-btn" href={viewHref} target="_blank" rel="noopener noreferrer">
-          <Icon name="external" size={11}/> View in PacketFence
-        </a>
-      ) : (
-        <span className="pf-btn" style={{ opacity: 0.4, cursor: "not-allowed" }} title="PF admin URL not configured">
-          View in PacketFence
-        </span>
+    <div className="ap-pf-actions">
+      <div className="ap-pf-btns">
+        {viewHref ? (
+          <a className="pf-btn" href={viewHref} target="_blank" rel="noopener noreferrer">
+            <Icon name="external" size={11}/> View in PacketFence
+          </a>
+        ) : (
+          <span className="pf-btn" style={{ opacity: 0.4, cursor: "not-allowed" }} title="PF admin URL not configured">
+            View in PacketFence
+          </span>
+        )}
+        <button
+          type="button"
+          className="pf-btn"
+          onClick={() => runPf("reevaluate_access", "reevaluating")}
+          disabled={!!busy || !hasPf}
+          title={hasPf
+            ? "Re-run PF role / access evaluation for this AP (issues a CoA)"
+            : "AP MAC not known — set the {$XIQ_MAC} macro"}
+        >
+          <Icon name="refresh" size={11}/> {busy === "reevaluate_access" ? "REEVALUATING…" : "Reevaluate access"}
+        </button>
+        <button
+          type="button"
+          className="pf-btn warn"
+          onClick={runCycle}
+          disabled={!!busy || !canCycle}
+          title={canCycle
+            ? `Cycle PoE on ${uplink.switch || uplink.switchIp || "switch"} port ${member}:${portNum} via rConfig`
+            : "Upstream switch/port not known — needs a PF locationlog entry on a Zabbix-monitored switch"}
+        >
+          <Icon name="refresh" size={11}/> {busy === "cycle_poe"
+            ? "CYCLING…"
+            : `Cycle PoE${canCycle ? ` ${member}:${portNum}` : ""}`}
+        </button>
+      </div>
+      {msg.text && (
+        <div className={"ap-pf-status" + (msg.kind === "err" ? " err" : "")}>
+          {msg.text}
+        </div>
       )}
-      <button
-        type="button"
-        className="pf-btn"
-        onClick={() => runPf("reevaluate_access", "reevaluating")}
-        disabled={!!busy || !hasPf}
-        title={hasPf
-          ? "Re-run PF role / access evaluation for this AP (issues a CoA)"
-          : "AP MAC not known — set the {$XIQ_MAC} macro"}
-      >
-        <Icon name="refresh" size={11}/> {busy === "reevaluate_access" ? "REEVALUATING…" : "Reevaluate access"}
-      </button>
-      <button
-        type="button"
-        className="pf-btn warn"
-        onClick={runCycle}
-        disabled={!!busy || !canCycle}
-        title={canCycle
-          ? `Cycle PoE on ${uplink.switch || uplink.switchIp || "switch"} port ${member}:${portNum} via rConfig`
-          : "Upstream switch/port not known — needs a PF locationlog entry on a Zabbix-monitored switch"}
-      >
-        <Icon name="refresh" size={11}/> {busy === "cycle_poe"
-          ? "CYCLING…"
-          : `Cycle PoE${canCycle ? ` ${member}:${portNum}` : ""}`}
-      </button>
-      {msg.text && <span className={"pf-msg" + (msg.kind === "err" ? " err" : "")}>{msg.text}</span>}
-    </>
+    </div>
   );
 };
 

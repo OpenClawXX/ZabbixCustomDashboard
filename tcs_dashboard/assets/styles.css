@@ -460,6 +460,37 @@ body {
   align-items: center;
   gap: 6px;
 }
+/* AP PF actions: buttons in a row, status message stacked underneath
+   so a long PF response message doesn't shove the buttons around. */
+.ap-pf-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+.ap-pf-btns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ap-pf-status {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.35;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.ap-pf-status.err {
+  color: var(--warn);
+  background: rgba(245,179,0,0.08);
+  border-color: rgba(245,179,0,0.30);
+}
 
 /* ───────── Legacy device summary card (still used elsewhere) ───────── */
 .device-card { padding: 0; }
