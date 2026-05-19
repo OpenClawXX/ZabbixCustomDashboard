@@ -517,7 +517,11 @@ class ActionDashboard extends ActionBase {
             'filter'  => ['key_' => $keys]
         ]) ?: [];
         foreach ($items as $it) {
-            if (preg_match('/^xiq\.ap\.([^[]+)\[/', $it['key_'], $m) && isset($out[$m[1]])) {
+            // array_key_exists, not isset — $out is pre-filled with nulls,
+            // and isset($out['x']) returns false when $out['x'] === null,
+            // which silently dropped every fleet field on the floor.
+            if (preg_match('/^xiq\.ap\.([^[]+)\[/', $it['key_'], $m)
+                && array_key_exists($m[1], $out)) {
                 $out[$m[1]] = (string) $it['lastvalue'];
             }
         }
