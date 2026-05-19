@@ -314,13 +314,23 @@ class PFClient {
      * @return array<int, array<string, mixed>>
      */
     public function authFailuresForNode(string $deviceId, int $limit = 50): array {
-        $rows = $this->get('/api/v1/radius_audit_logs', [
-            'fields'      => 'mac,user_name,switch,port,auth_status,reason,created_at',
-            'limit'       => $limit,
-            'sort'        => 'created_at DESC',
-            'switch'      => $deviceId,
-            'auth_status' => 'reject'
-        ]);
+        $body = [
+            'cursor' => 0,
+            'limit'  => max(1, $limit),
+            'sort'   => ['created_at DESC'],
+            'fields' => [
+                'mac', 'user_name', 'switch', 'port',
+                'auth_status', 'reason', 'created_at'
+            ],
+            'query'  => [
+                'op' => 'and',
+                'values' => [
+                    ['op' => 'equals', 'field' => 'switch',      'value' => $deviceId],
+                    ['op' => 'equals', 'field' => 'auth_status', 'value' => 'reject']
+                ]
+            ]
+        ];
+        $rows = $this->call('POST', '/api/v1/radius_audit_logs/search', [], $body);
 
         $out = [];
         foreach (($rows['items'] ?? []) as $r) {
