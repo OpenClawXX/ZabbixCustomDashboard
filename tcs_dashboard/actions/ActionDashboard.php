@@ -117,6 +117,25 @@ class ActionDashboard extends ActionBase {
                 $pfMac = $boot['host']['pfUplink']['mac'] ?? '';
                 if ($pfMac === '') $pfMac = self::normalizeMacForPf($apMacForPf);
                 if ($pfMac !== '') $boot['host']['mac'] = $pfMac;
+
+                // Three-source AP availability — XIQ connected, SNMP
+                // interface reachability, ICMP ping. Surface each one
+                // separately so the device card can show the operator
+                // which signal is failing, and roll them up into a single
+                // apStatus for the page header / nav rail.
+                $pingItem  = is_array($boot['items']) ? ($boot['items']['pingUp'] ?? null) : null;
+                $pingUp    = null;
+                if (is_array($pingItem) && empty($pingItem['missing'])
+                    && $pingItem['value'] !== null && $pingItem['value'] !== '') {
+                    $pingUp = ((int) $pingItem['value']) === 1 ? 1 : 0;
+                }
+                $boot['host']['pingUp']        = $pingUp;
+                $boot['host']['snmpAvailable'] = (int) ($boot['host']['available'] ?? 0);
+                $boot['host']['apStatus']      = self::composeApStatus(
+                    $boot['host']['xiqConnected'] ?? null,
+                    $boot['host']['snmpAvailable'],
+                    $pingUp
+                );
             }
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
@@ -1253,6 +1272,26 @@ class ActionDashboard extends ActionBase {
             }
         }
 
+        // Per-host ICMP ping status from the standard "ICMP Ping" template's
+        // icmpping item (1 = up, 0 = down). Read in one Item.get for the
+        // whole fleet so the nav rail rolls availability up consistently
+        // with the device card.
+        $ping_map = [];
+        if ($hostids) {
+            $pingItems = API::Item()->get([
+                'output'  => ['hostid', 'lastvalue', 'state'],
+                'hostids' => $hostids,
+                'filter'  => ['key_' => 'icmpping']
+            ]) ?: [];
+            foreach ($pingItems as $it) {
+                $hid = $it['hostid'];
+                if ((int) ($it['state'] ?? 0) !== 0) continue; // item not supported
+                $v = $it['lastvalue'];
+                if ($v === null || $v === '') continue;
+                $ping_map[$hid] = ((int) $v) === 1 ? 1 : 0;
+            }
+        }
+
         // Bulk XIQ fleet lookup: gather every host's {$XIQ_SERIAL} macro in
         // one call, then one Item.get on the fleet host for all the
         // xiq.ap.clients[<serial>] + xiq.ap.model[<serial>] keys we need.
@@ -1276,6 +1315,7 @@ class ActionDashboard extends ActionBase {
             foreach ($serial_by_host as $serial) {
                 $wanted_keys[] = 'xiq.ap.clients['.$serial.']';
                 $wanted_keys[] = 'xiq.ap.model['.$serial.']';
+                $wanted_keys[] = 'xiq.ap.connected['.$serial.']';
             }
             $items = API::Item()->get([
                 'output'  => ['key_', 'lastvalue'],
@@ -1318,19 +1358,23 @@ class ActionDashboard extends ActionBase {
                 }
             }
 
-            $avail = $avail_map[$h['hostid']] ?? 0;
-            $prob  = $prob_count[$h['hostid']] ?? 0;
-            $status = match (true) {
-                $avail === 2          => 'down',
-                $prob > 0             => 'warn',
-                $avail === 1          => 'ok',
-                default               => 'warn'
-            };
+            $avail  = $avail_map[$h['hostid']] ?? 0;
+            $prob   = $prob_count[$h['hostid']] ?? 0;
+            $pingUp = $ping_map[$h['hostid']] ?? null;
 
             $serial  = $serial_by_host[$h['hostid']] ?? '';
             $fleet   = $serial !== '' ? ($fleet_by_serial[$serial] ?? []) : [];
             $clients = isset($fleet['clients']) ? (int) $fleet['clients'] : 0;
             $model   = $fleet['model'] ?? '';
+            $xiqConn = isset($fleet['connected']) && $fleet['connected'] !== ''
+                ? (((int) $fleet['connected']) === 1 ? 1 : 0)
+                : null;
+
+            // Compose XIQ + SNMP + ping into a single nav-rail status. The
+            // problem count still bumps a healthy AP to "warn" so other
+            // triggers stay surfaced in the rail.
+            $status = self::composeApStatus($xiqConn, $avail, $pingUp);
+            if ($status === 'ok' && $prob > 0) $status = 'warn';
 
             // Client-load thresholds: > 50 = high, > 35 = warn, else ok.
             // Kept here so the frontend doesn't have to know the numbers.
@@ -1350,16 +1394,19 @@ class ActionDashboard extends ActionBase {
                 ];
             }
             $by_school[$school]['aps'][] = [
-                'hostid'    => $h['hostid'],
-                'id'        => $h['name'] ?: $h['host'],
-                'ip'        => $primary_ip,
-                'model'     => $model,
-                'floor'     => $floor !== '' ? $floor : '—',
-                'status'    => $status,
-                'clients'   => $clients,
-                'loadLevel' => $loadLevel,
-                'problems'  => $prob,
-                'serial'    => $serial
+                'hostid'         => $h['hostid'],
+                'id'             => $h['name'] ?: $h['host'],
+                'ip'             => $primary_ip,
+                'model'          => $model,
+                'floor'          => $floor !== '' ? $floor : '—',
+                'status'         => $status,
+                'xiqConnected'   => $xiqConn,
+                'snmpAvailable'  => $avail,
+                'pingUp'         => $pingUp,
+                'clients'        => $clients,
+                'loadLevel'      => $loadLevel,
+                'problems'       => $prob,
+                'serial'         => $serial
             ];
             $by_school[$school]['problems'] += $prob;
             if ($loadLevel !== 'ok') {
@@ -1759,6 +1806,49 @@ class ActionDashboard extends ActionBase {
     /* --------------------------------------------------------------------- */
     /* Helpers                                                               */
     /* --------------------------------------------------------------------- */
+
+    /**
+     * Roll the three independent AP availability signals into a single
+     * status label the UI can colour-code.
+     *
+     *   $xiqConnected  — XIQ "connected" flag: 1 / 0 / null (unknown)
+     *   $snmpAvailable — Zabbix main-interface availability: 1 (up) / 2 (down) / 0 (unknown)
+     *   $pingUp        — ICMP Ping (icmpping item): 1 / 0 / null (unknown / missing)
+     *
+     * Returns one of: 'ok', 'warn', 'down', 'idle'.
+     *
+     *  - "down"  — at least one *known* signal says the AP is unreachable
+     *              (ping=0, snmp=2, or xiq=0). Unknown signals don't
+     *              count as "down" since the AP may simply not be
+     *              monitored from that source.
+     *  - "warn"  — a strict subset of signals is down (e.g. XIQ is
+     *              disconnected but the AP still pings — likely a cloud
+     *              comm problem, not a fully dead AP).
+     *  - "ok"    — every signal we *do* have says the AP is up.
+     *  - "idle"  — no signal known at all yet (newly added host).
+     */
+    private static function composeApStatus(?int $xiqConnected, int $snmpAvailable, ?int $pingUp): string {
+        $known  = [];
+        $up     = 0;
+        $down   = 0;
+
+        if ($pingUp !== null) {
+            $known[] = 'ping';
+            $pingUp === 1 ? $up++ : $down++;
+        }
+        if ($snmpAvailable === 1 || $snmpAvailable === 2) {
+            $known[] = 'snmp';
+            $snmpAvailable === 1 ? $up++ : $down++;
+        }
+        if ($xiqConnected !== null) {
+            $known[] = 'xiq';
+            $xiqConnected === 1 ? $up++ : $down++;
+        }
+        if (!$known) return 'idle';
+        if ($down === 0) return 'ok';
+        if ($up   === 0) return 'down';
+        return 'warn';
+    }
 
     private function resolveAvailability(string $hostid): int {
         // Zabbix 6.0+: availability is per-interface. Treat the host as

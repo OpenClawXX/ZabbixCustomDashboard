@@ -393,6 +393,34 @@ body {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px;
 }
+.ap-src-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 2px;
+}
+.ap-src-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  font-size: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.ap-src-lbl {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+}
+.ap-src-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.ap-src-v {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 9.5px;
+}
 .dev-h-sub {
   font-size: 11px;
   color: var(--muted);

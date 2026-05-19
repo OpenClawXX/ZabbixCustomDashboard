@@ -95,15 +95,54 @@ const fmtUptime = (s) => {
   return `${m}m`;
 };
 
+// Three-source AP availability: XIQ cloud connected, SNMP reachable,
+// ICMP ping responsive. The backend rolls these into host.apStatus, but
+// fall back to local composition so a stale boot payload still renders.
+const composeApState = (host) => {
+  const xiq  = host.xiqConnected;
+  const snmp = typeof host.snmpAvailable === "number" ? host.snmpAvailable : host.available;
+  const ping = host.pingUp;
+  let up = 0, down = 0, known = 0;
+  const tally = (isUp, isDown) => { known += isUp || isDown ? 1 : 0; up += isUp; down += isDown; };
+  tally(ping === 1, ping === 0);
+  tally(snmp === 1, snmp === 2);
+  tally(xiq  === 1, xiq  === 0);
+  if (!known)     return "idle";
+  if (down === 0) return "ok";
+  if (up   === 0) return "down";
+  return "warn";
+};
+
+const ApStatusPills = ({ xiqConnected, snmpAvailable, pingUp }) => {
+  const cell = (label, val, downVal, title) => {
+    const isUp   = val === 1;
+    const isDown = val === downVal;
+    const color  = isUp ? "var(--ok)" : isDown ? "var(--err)" : "var(--muted)";
+    const text   = isUp ? "UP" : isDown ? "DOWN" : "—";
+    return (
+      <span className="ap-src-pill" title={title}>
+        <span className="ap-src-lbl">{label}</span>
+        <span className="ap-src-dot" style={{ background: color }} />
+        <span className="ap-src-v" style={{ color }}>{text}</span>
+      </span>
+    );
+  };
+  return (
+    <div className="ap-src-row">
+      {cell("XIQ",  xiqConnected,  0, "XIQ cloud connectivity")}
+      {cell("SNMP", snmpAvailable, 2, "Zabbix main-interface SNMP availability")}
+      {cell("PING", pingUp,        0, "ICMP ping (Zabbix icmpping item)")}
+    </div>
+  );
+};
+
 const DeviceSidecar = ({ host }) => {
-  // host.available: 1 = up, 2 = down, anything else (0/null) = unknown.
-  // Prefer the explicit apStatus the parent threads in from AP_SITES (which
-  // already folds in trigger severity); fall back to availability.
-  const state = host.apStatus === "down" ? "down"
-              : host.apStatus === "warn" ? "warn"
-              : host.available === 1 ? "ok"
-              : host.available === 2 ? "down"
-              : "idle";
+  // Prefer the backend-composed apStatus; fall back to local composition
+  // so older boot payloads (without xiqConnected / pingUp) still render.
+  const state = host.apStatus === "down" || host.apStatus === "warn"
+              || host.apStatus === "ok"  || host.apStatus === "idle"
+                ? host.apStatus
+                : composeApState(host);
   const stateLabel = state === "ok"   ? "Connected"
                    : state === "warn" ? "Degraded"
                    : state === "down" ? "Unreachable"
@@ -136,6 +175,11 @@ const DeviceSidecar = ({ host }) => {
           <span style={{ color: stateColor }}>{stateLabel}</span>
           <span className="muted" style={{ marginLeft: 6 }}>· uptime {fmtUptime(host.uptime)}</span>
         </div>
+        <ApStatusPills
+          xiqConnected={host.xiqConnected}
+          snmpAvailable={typeof host.snmpAvailable === "number" ? host.snmpAvailable : host.available}
+          pingUp={host.pingUp}
+        />
         <div className="dev-h-sub mono">
           {host.ip || "—"}{host.model ? ` · ${host.model}` : ""}
         </div>
