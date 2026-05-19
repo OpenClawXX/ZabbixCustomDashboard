@@ -347,21 +347,6 @@ class PFClient {
     }
 
     /**
-     * Current location for a MAC (which switch + port it's seen on).
-     *
-     * @return array<string, mixed>|null
-     */
-    public function locationFor(string $mac): ?array {
-        $rows = $this->get('/api/v1/locationlogs', [
-            'mac'   => $mac,
-            'limit' => 1,
-            'sort'  => 'start_time DESC'
-        ]);
-        $items = $rows['items'] ?? [];
-        return $items ? $items[0] : null;
-    }
-
-    /**
      * Recent locationlog rows for a single MAC, newest first.
      *
      * Unlike {@see locationsByMac} this does NOT dedupe — callers need to

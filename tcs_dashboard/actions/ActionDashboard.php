@@ -1545,13 +1545,12 @@ class ActionDashboard extends ActionBase {
         try {
             $pf = PFClient::fromMacros($macros);
 
-            // Pull a window of recent locationlog rows, sorted DESC, instead
-            // of trusting locationFor()'s "newest row wins" — an AP MAC can
-            // get logged from a non-uplink source (transient learn on a
-            // trunk, neighbor switch reflecting LLDP, another stack member
-            // briefly seeing the MAC), which left the device card pointing
-            // at a random switch IP. Filter the window to find the actual
-            // uplink, then fall back to the newest if nothing qualifies.
+            // POST /api/v1/locationlogs/search filters by MAC properly;
+            // GET /api/v1/locationlogs?mac=… does NOT (it silently ignores
+            // the query param and returns the newest row fleet-wide, which
+            // is how the device card used to end up pointing at a random
+            // unrelated client). Pull a window of recent rows via search,
+            // score them, and bail if nothing comes back — no GET fallback.
             $rows = $pf->recentLocationsForMac($mac, 20);
             $this->pfApUplinkDebug['rowCount'] = count($rows);
             $this->pfApUplinkDebug['rows']     = self::summarisePfLocRows($rows);
@@ -1572,27 +1571,30 @@ class ActionDashboard extends ActionBase {
             }
 
             if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
-                // Final fallback so we don't regress operators who had a
-                // working card with the old code: ask the singleton endpoint.
-                $loc = $pf->locationFor($mac);
-                $this->pfApUplinkDebug['fallback'] = is_array($loc)
-                    ? 'locationFor() singleton (no qualifying recent row)'
-                    : 'locationFor() returned nothing';
-            }
-
-            if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
                 $this->pfApUplinkDebug['error'] = 'no usable locationlog for '.$mac;
                 error_log('[tcs_dashboard] PF AP uplink: no locationlog for '.$mac.' (host '.$hostid.')');
                 return null;
             }
 
+            // Defence in depth: PF v11's GET /locationlogs?mac=… ignores
+            // the mac query string (only POST /search filters), and a
+            // legacy fallback that hit that endpoint was returning the
+            // newest fleet-wide row — i.e. someone else's client on a
+            // random switch — and we'd happily promote that mac/switch
+            // onto the AP. /search shouldn't ever return rows for a
+            // different MAC, but verify before trusting the row.
+            $rowMac = self::normalizeMacForPf((string) ($loc['mac'] ?? ''));
+            if ($rowMac !== '' && $rowMac !== $mac) {
+                $this->pfApUplinkDebug['error'] = 'PF returned a row for '.$rowMac
+                    .' when we queried '.$mac.' — refusing to use it';
+                error_log('[tcs_dashboard] PF AP uplink: MAC mismatch on row (queried '
+                    .$mac.', got '.$rowMac.') for host '.$hostid);
+                return null;
+            }
+            if ($rowMac === '') $rowMac = $mac;
+
             $sw   = (string) ($loc['switch']    ?? '');
             $swIp = (string) ($loc['switch_ip'] ?? '');
-            // Prefer the MAC PF returned on the row (already canonical) so
-            // the frontend gets exactly what /api/v1/node/<mac>/* expects,
-            // even if the input MAC came in dashed / dotted / mixed-case.
-            $rowMac = self::normalizeMacForPf((string) ($loc['mac'] ?? ''));
-            if ($rowMac === '') $rowMac = $mac;
             $out = [
                 'mac'          => $rowMac,
                 'switch'       => $sw,
