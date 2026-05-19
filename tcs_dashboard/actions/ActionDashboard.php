@@ -61,6 +61,7 @@ class ActionDashboard extends ActionBase {
             'wiredPorts'  => [],
             'ssids'       => [],
             'clientsDebug'=> [],
+            'pfApUplinkDebug' => [],
             'pfAdminUrl'  => '',
             'alertsDetail'=> [
                 'activeTriggers' => [],
@@ -101,14 +102,51 @@ class ActionDashboard extends ActionBase {
                 $boot['host']['floor']          = $fleet['floor']    ?? ($boot['host']['floor'] ?? '');
                 $boot['host']['location']       = $fleet['location'] ?? '';
                 $boot['host']['model']          = $fleet['model']    ?? ($boot['host']['model'] ?? '');
-                $boot['host']['xiqConnected']   = $fleet['connected']      !== null ? (int) $fleet['connected']      : null;
-                $boot['host']['configMismatch'] = $fleet['configmismatch'] !== null ? (int) $fleet['configmismatch'] : null;
+                // xiq.ap.connected[<serial>] on the fleet host: "1"/"0",
+                // or "" when the dependent item hasn't reported yet — and
+                // (int)"" === 0, which would mis-render a healthy AP as
+                // XIQ=DOWN. Treat empty / missing as unknown (null).
+                $xiqRaw = $fleet['connected'] ?? null;
+                $boot['host']['xiqConnected'] = ($xiqRaw === null || $xiqRaw === '')
+                    ? null
+                    : (((int) $xiqRaw) === 1 ? 1 : 0);
+                $cmRaw = $fleet['configmismatch'] ?? null;
+                $boot['host']['configMismatch'] = ($cmRaw === null || $cmRaw === '')
+                    ? null
+                    : (int) $cmRaw;
                 $boot['host']['xiqId']          = $fleet['xiqid']    ?? '';
                 $boot['host']['mac']            = $fleet['mac']      ?? '';
                 $boot['host']['policy']         = $fleet['policy']   ?? '';
                 $apMacForPf = (string) ($this->readHostMacro($hostid, '{$XIQ_MAC}') ?? '');
                 if ($apMacForPf === '') $apMacForPf = (string) ($fleet['mac'] ?? '');
                 $boot['host']['pfUplink']       = $this->collectPfApUplink($hostid, $apMacForPf);
+                // The PF buttons on the device card (View in PF, Reevaluate
+                // access) gate on host.mac. fleet['mac'] is often empty even
+                // when {$XIQ_MAC} is set, and the locationlog row itself
+                // carries the canonical lowercase-colon MAC PF expects —
+                // prefer that, then fall back to whatever input we used.
+                $pfMac = $boot['host']['pfUplink']['mac'] ?? '';
+                if ($pfMac === '') $pfMac = self::normalizeMacForPf($apMacForPf);
+                if ($pfMac !== '') $boot['host']['mac'] = $pfMac;
+
+                // Three-source AP availability — XIQ connected, SNMP
+                // interface reachability, ICMP ping. Surface each one
+                // separately so the device card can show the operator
+                // which signal is failing, and roll them up into a single
+                // apStatus for the page header / nav rail.
+                $pingItem  = is_array($boot['items']) ? ($boot['items']['pingUp'] ?? null) : null;
+                $pingUp    = null;
+                if (is_array($pingItem) && empty($pingItem['missing'])
+                    && $pingItem['value'] !== null && $pingItem['value'] !== '') {
+                    $pingUp = ((int) $pingItem['value']) === 1 ? 1 : 0;
+                }
+                $boot['host']['pingUp']        = $pingUp;
+                $boot['host']['snmpAvailable'] = (int) ($boot['host']['available'] ?? 0);
+                $boot['host']['apStatus']      = self::composeApStatus(
+                    $boot['host']['xiqConnected'] ?? null,
+                    $boot['host']['snmpAvailable'],
+                    $pingUp
+                );
             }
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
@@ -118,7 +156,8 @@ class ActionDashboard extends ActionBase {
             $xiqClients          = $this->collectXiqClients($hostid);
             $boot['pfClients']   = $xiqClients !== [] ? $xiqClients : $pfClients;
             $boot['pfAuthFails'] = $pfAuthFails;
-            $boot['clientsDebug'] = $this->clientsDebug;
+            $boot['clientsDebug']    = $this->clientsDebug;
+            $boot['pfApUplinkDebug'] = $this->pfApUplinkDebug;
 
             // Fold PF client counts into the alerts summary. activeClients is
             // anything PF currently has in a non-rejected/non-quarantined
@@ -480,7 +519,11 @@ class ActionDashboard extends ActionBase {
             'filter'  => ['key_' => $keys]
         ]) ?: [];
         foreach ($items as $it) {
-            if (preg_match('/^xiq\.ap\.([^[]+)\[/', $it['key_'], $m) && isset($out[$m[1]])) {
+            // array_key_exists, not isset — $out is pre-filled with nulls,
+            // and isset($out['x']) returns false when $out['x'] === null,
+            // which silently dropped every fleet field on the floor.
+            if (preg_match('/^xiq\.ap\.([^[]+)\[/', $it['key_'], $m)
+                && array_key_exists($m[1], $out)) {
                 $out[$m[1]] = (string) $it['lastvalue'];
             }
         }
@@ -1127,6 +1170,16 @@ class ActionDashboard extends ActionBase {
      */
     private array $clientsDebug = [];
 
+    /**
+     * Diagnostic trace for the PF AP uplink lookup — recorded by
+     * collectPfApUplink() and surfaced in boot['pfApUplinkDebug'] so the
+     * debug panel can show exactly which MAC was queried, which
+     * locationlog rows PF returned, how each one scored, and which one
+     * the uplink picker chose. Used to triage the "device card shows a
+     * random incorrect switch and port" symptom.
+     */
+    private array $pfApUplinkDebug = [];
+
     /** Read a single host-scoped user macro by name; null when unset. */
     private function readHostMacro(string $hostid, string $macro): ?string {
         $rows = API::UserMacro()->get([
@@ -1245,6 +1298,26 @@ class ActionDashboard extends ActionBase {
             }
         }
 
+        // Per-host ICMP ping status from the standard "ICMP Ping" template's
+        // icmpping item (1 = up, 0 = down). Read in one Item.get for the
+        // whole fleet so the nav rail rolls availability up consistently
+        // with the device card.
+        $ping_map = [];
+        if ($hostids) {
+            $pingItems = API::Item()->get([
+                'output'  => ['hostid', 'lastvalue', 'state'],
+                'hostids' => $hostids,
+                'filter'  => ['key_' => 'icmpping']
+            ]) ?: [];
+            foreach ($pingItems as $it) {
+                $hid = $it['hostid'];
+                if ((int) ($it['state'] ?? 0) !== 0) continue; // item not supported
+                $v = $it['lastvalue'];
+                if ($v === null || $v === '') continue;
+                $ping_map[$hid] = ((int) $v) === 1 ? 1 : 0;
+            }
+        }
+
         // Bulk XIQ fleet lookup: gather every host's {$XIQ_SERIAL} macro in
         // one call, then one Item.get on the fleet host for all the
         // xiq.ap.clients[<serial>] + xiq.ap.model[<serial>] keys we need.
@@ -1268,6 +1341,8 @@ class ActionDashboard extends ActionBase {
             foreach ($serial_by_host as $serial) {
                 $wanted_keys[] = 'xiq.ap.clients['.$serial.']';
                 $wanted_keys[] = 'xiq.ap.model['.$serial.']';
+                $wanted_keys[] = 'xiq.ap.connected['.$serial.']';
+                $wanted_keys[] = 'xiq.ap.configmismatch['.$serial.']';
             }
             $items = API::Item()->get([
                 'output'  => ['key_', 'lastvalue'],
@@ -1310,19 +1385,26 @@ class ActionDashboard extends ActionBase {
                 }
             }
 
-            $avail = $avail_map[$h['hostid']] ?? 0;
-            $prob  = $prob_count[$h['hostid']] ?? 0;
-            $status = match (true) {
-                $avail === 2          => 'down',
-                $prob > 0             => 'warn',
-                $avail === 1          => 'ok',
-                default               => 'warn'
-            };
+            $avail  = $avail_map[$h['hostid']] ?? 0;
+            $prob   = $prob_count[$h['hostid']] ?? 0;
+            $pingUp = $ping_map[$h['hostid']] ?? null;
 
             $serial  = $serial_by_host[$h['hostid']] ?? '';
             $fleet   = $serial !== '' ? ($fleet_by_serial[$serial] ?? []) : [];
             $clients = isset($fleet['clients']) ? (int) $fleet['clients'] : 0;
             $model   = $fleet['model'] ?? '';
+            $xiqConn = isset($fleet['connected']) && $fleet['connected'] !== ''
+                ? (((int) $fleet['connected']) === 1 ? 1 : 0)
+                : null;
+            $cfgMismatch = isset($fleet['configmismatch']) && $fleet['configmismatch'] !== ''
+                ? (((int) $fleet['configmismatch']) === 1 ? 1 : 0)
+                : null;
+
+            // Compose XIQ + SNMP + ping into a single nav-rail status. The
+            // problem count still bumps a healthy AP to "warn" so other
+            // triggers stay surfaced in the rail.
+            $status = self::composeApStatus($xiqConn, $avail, $pingUp);
+            if ($status === 'ok' && $prob > 0) $status = 'warn';
 
             // Client-load thresholds: > 50 = high, > 35 = warn, else ok.
             // Kept here so the frontend doesn't have to know the numbers.
@@ -1342,16 +1424,20 @@ class ActionDashboard extends ActionBase {
                 ];
             }
             $by_school[$school]['aps'][] = [
-                'hostid'    => $h['hostid'],
-                'id'        => $h['name'] ?: $h['host'],
-                'ip'        => $primary_ip,
-                'model'     => $model,
-                'floor'     => $floor !== '' ? $floor : '—',
-                'status'    => $status,
-                'clients'   => $clients,
-                'loadLevel' => $loadLevel,
-                'problems'  => $prob,
-                'serial'    => $serial
+                'hostid'         => $h['hostid'],
+                'id'             => $h['name'] ?: $h['host'],
+                'ip'             => $primary_ip,
+                'model'          => $model,
+                'floor'          => $floor !== '' ? $floor : '—',
+                'status'         => $status,
+                'xiqConnected'   => $xiqConn,
+                'snmpAvailable'  => $avail,
+                'pingUp'         => $pingUp,
+                'configMismatch' => $cfgMismatch,
+                'clients'        => $clients,
+                'loadLevel'      => $loadLevel,
+                'problems'       => $prob,
+                'serial'         => $serial
             ];
             $by_school[$school]['problems'] += $prob;
             if ($loadLevel !== 'ok') {
@@ -1421,53 +1507,137 @@ class ActionDashboard extends ActionBase {
      * @return array{switch:string,switchIp:string,port:string,ifDesc:string}|null
      */
     private function collectPfApUplink(string $hostid, string $apMac): ?array {
+        $this->pfApUplinkDebug = [
+            'inputMac'     => $apMac,
+            'normalizedMac'=> '',
+            'pfUrl'        => '',
+            'apiCall'      => '',
+            'macrosOk'     => null,
+            'rowCount'     => 0,
+            'rows'         => [],
+            'pickedIndex'  => null,
+            'fallback'     => null,
+            'result'       => null,
+            'error'        => null,
+        ];
+
         // Normalize whatever the XIQ macro / fleet item gave us
         // (AA-BB-CC..., aabbccddeeff, AABB.CCDD.EEFF, mixed case) into the
         // canonical PF format: lowercase colon-separated hex.
         $mac = self::normalizeMacForPf($apMac);
-        if ($mac === '') return null;
+        $this->pfApUplinkDebug['normalizedMac'] = $mac;
+        if ($mac === '') {
+            $this->pfApUplinkDebug['error'] = 'empty / unparseable input MAC';
+            return null;
+        }
 
         $macros = $this->resolvePfMacros($hostid);
+        $this->pfApUplinkDebug['macrosOk'] = ($macros !== null);
         if ($macros === null) {
+            $this->pfApUplinkDebug['error'] = 'PF macros not configured for this host';
             error_log('[tcs_dashboard] PF AP uplink: PF macros not configured for host '.$hostid);
             return null;
         }
+        $this->pfApUplinkDebug['pfUrl']   = (string) ($macros['url'] ?? '');
+        $this->pfApUplinkDebug['apiCall'] = 'POST '.rtrim((string) ($macros['url'] ?? ''), '/')
+                                          .'/api/v1/locationlogs/search  mac equals '.$mac.', limit 20, sort start_time DESC';
 
         try {
             $pf = PFClient::fromMacros($macros);
 
-            // Pull a window of recent locationlog rows, sorted DESC, instead
-            // of trusting locationFor()'s "newest row wins" — an AP MAC can
-            // get logged from a non-uplink source (transient learn on a
-            // trunk, neighbor switch reflecting LLDP, another stack member
-            // briefly seeing the MAC), which left the device card pointing
-            // at a random switch IP. Filter the window to find the actual
-            // uplink, then fall back to the newest if nothing qualifies.
+            // POST /api/v1/locationlogs/search filters by MAC properly;
+            // GET /api/v1/locationlogs?mac=… does NOT (it silently ignores
+            // the query param and returns the newest row fleet-wide, which
+            // is how the device card used to end up pointing at a random
+            // unrelated client). Pull a window of recent rows via search,
+            // score them, and bail if nothing comes back — no GET fallback.
             $rows = $pf->recentLocationsForMac($mac, 20);
-            $loc  = self::pickApUplinkRow($rows);
+            $this->pfApUplinkDebug['rowCount'] = count($rows);
+            $this->pfApUplinkDebug['rows']     = self::summarisePfLocRows($rows);
 
-            if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
-                // Final fallback so we don't regress operators who had a
-                // working card with the old code: ask the singleton endpoint.
-                $loc = $pf->locationFor($mac);
+            $picked      = null;
+            $pickedIndex = null;
+            $loc         = self::pickApUplinkRowWithIndex($rows, $picked, $pickedIndex);
+            $this->pfApUplinkDebug['pickedIndex'] = $pickedIndex;
+            // Annotate scores onto the debug row summaries so it's obvious
+            // why a particular entry won.
+            if (is_array($this->pfApUplinkDebug['rows']) && $picked !== null) {
+                foreach ($picked as $i => $score) {
+                    if (isset($this->pfApUplinkDebug['rows'][$i])) {
+                        $this->pfApUplinkDebug['rows'][$i]['_score']  = $score;
+                        $this->pfApUplinkDebug['rows'][$i]['_picked'] = ($i === $pickedIndex);
+                    }
+                }
             }
 
             if (!is_array($loc) || self::pfLocRowEmpty($loc)) {
+                $this->pfApUplinkDebug['error'] = 'no usable locationlog for '.$mac;
                 error_log('[tcs_dashboard] PF AP uplink: no locationlog for '.$mac.' (host '.$hostid.')');
                 return null;
             }
 
-            return [
-                'switch'   => (string) ($loc['switch']    ?? ''),
-                'switchIp' => (string) ($loc['switch_ip'] ?? ''),
-                'port'     => (string) ($loc['port']      ?? ''),
-                'ifDesc'   => (string) ($loc['ifDesc']    ?? ''),
+            // Defence in depth: PF v11's GET /locationlogs?mac=… ignores
+            // the mac query string (only POST /search filters), and a
+            // legacy fallback that hit that endpoint was returning the
+            // newest fleet-wide row — i.e. someone else's client on a
+            // random switch — and we'd happily promote that mac/switch
+            // onto the AP. /search shouldn't ever return rows for a
+            // different MAC, but verify before trusting the row.
+            $rowMac = self::normalizeMacForPf((string) ($loc['mac'] ?? ''));
+            if ($rowMac !== '' && $rowMac !== $mac) {
+                $this->pfApUplinkDebug['error'] = 'PF returned a row for '.$rowMac
+                    .' when we queried '.$mac.' — refusing to use it';
+                error_log('[tcs_dashboard] PF AP uplink: MAC mismatch on row (queried '
+                    .$mac.', got '.$rowMac.') for host '.$hostid);
+                return null;
+            }
+            if ($rowMac === '') $rowMac = $mac;
+
+            $sw   = (string) ($loc['switch']    ?? '');
+            $swIp = (string) ($loc['switch_ip'] ?? '');
+            $out = [
+                'mac'          => $rowMac,
+                'switch'       => $sw,
+                'switchIp'     => $swIp,
+                'switchHostid' => self::resolveSwitchHostid($sw, $swIp),
+                'port'         => (string) ($loc['port']      ?? ''),
+                'ifDesc'       => (string) ($loc['ifDesc']    ?? ''),
             ];
+            $this->pfApUplinkDebug['result'] = $out;
+            return $out;
         }
         catch (\Throwable $e) {
+            $this->pfApUplinkDebug['error'] = $e->getMessage();
             error_log('[tcs_dashboard] PF AP uplink lookup ('.$mac.'): '.$e->getMessage());
             return null;
         }
+    }
+
+    /**
+     * Compact representation of a PF locationlog row for the debug panel —
+     * keeps the fields that drive uplink scoring and drops the rest.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private static function summarisePfLocRows(array $rows): array {
+        $out = [];
+        foreach ($rows as $r) {
+            if (!is_array($r)) continue;
+            $out[] = [
+                'mac'             => (string) ($r['mac']             ?? ''),
+                'switch'          => (string) ($r['switch']          ?? ''),
+                'switch_ip'       => (string) ($r['switch_ip']       ?? ''),
+                'port'            => (string) ($r['port']            ?? ''),
+                'ifDesc'          => (string) ($r['ifDesc']          ?? ''),
+                'connection_type' => (string) ($r['connection_type'] ?? ''),
+                'role'            => (string) ($r['role']            ?? ''),
+                'ssid'            => (string) ($r['ssid']            ?? ''),
+                'start_time'      => (string) ($r['start_time']      ?? ''),
+                'end_time'        => (string) ($r['end_time']        ?? ''),
+            ];
+        }
+        return $out;
     }
 
     /**
@@ -1482,36 +1652,88 @@ class ActionDashboard extends ActionBase {
      *   -3  connection_type is Wireless (this is the AP serving clients,
      *       not the AP plugging in — exclude unless nothing else exists)
      *
-     * On ties the input order (DESC by start_time) wins, so newer rows
-     * trump older equivalents.
+     * On ties the input order (DESC by start_time) wins. Fills $scores
+     * with the per-row score map and $pickedIndex with the winning
+     * index so the debug panel can show the scoring decision.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @param array<int, int>|null             $scores      filled by reference
+     * @param int|null                         $pickedIndex filled by reference
      */
-    private static function pickApUplinkRow(array $rows): ?array {
+    private static function pickApUplinkRowWithIndex(array $rows, ?array &$scores, ?int &$pickedIndex): ?array {
+        $scores      = [];
+        $pickedIndex = null;
         if (!$rows) return null;
-        $best = null;
+        $best      = null;
         $bestScore = PHP_INT_MIN;
-        foreach ($rows as $r) {
-            if (!is_array($r)) continue;
+        foreach ($rows as $i => $r) {
+            if (!is_array($r)) {
+                $scores[$i] = PHP_INT_MIN;
+                continue;
+            }
             $score = 0;
-            $end = trim((string) ($r['end_time'] ?? ''));
+            $end   = trim((string) ($r['end_time'] ?? ''));
             if ($end === '' || $end === '0000-00-00 00:00:00') $score += 4;
 
             $type = strtolower((string) ($r['connection_type'] ?? ''));
             if ($type !== '' && str_contains($type, 'wireless')) {
                 $score -= 3;
             } elseif ($type !== '') {
-                // Ethernet, Ethernet-NoEAP, Ethernet-EAP, etc.
                 $score += 3;
             }
-
             if (trim((string) ($r['switch'] ?? '')) !== '')    $score += 2;
             if (trim((string) ($r['port']   ?? '')) !== '')    $score += 1;
 
+            $scores[$i] = $score;
             if ($score > $bestScore) {
-                $bestScore = $score;
-                $best = $r;
+                $bestScore   = $score;
+                $best        = $r;
+                $pickedIndex = $i;
             }
         }
         return $best;
+    }
+
+    /**
+     * Resolve a Zabbix hostid for the upstream switch — matched first by
+     * exact host name (PF's locationlog.switch typically holds the Zabbix
+     * host name) and then by SNMP/agent interface IP. Returns '' when
+     * nothing matches, in which case the Cycle PoE button stays disabled.
+     */
+    private static function resolveSwitchHostid(string $switchName, string $switchIp): string {
+        $name = trim($switchName);
+        if ($name !== '') {
+            $rows = API::Host()->get([
+                'output' => ['hostid'],
+                'filter' => ['host' => $name]
+            ]) ?: [];
+            if (!$rows) {
+                $rows = API::Host()->get([
+                    'output' => ['hostid'],
+                    'filter' => ['name' => $name]
+                ]) ?: [];
+            }
+            if ($rows) return (string) $rows[0]['hostid'];
+        }
+        $ip = trim($switchIp);
+        if ($ip !== '' && $ip !== '0.0.0.0') {
+            $ifaces = API::HostInterface()->get([
+                'output' => ['hostid', 'type'],
+                'filter' => ['ip' => $ip]
+            ]) ?: [];
+            $snmpHit = '';
+            $anyHit  = '';
+            foreach ($ifaces as $iface) {
+                if ((int) ($iface['type'] ?? 0) === 2 && $snmpHit === '') {
+                    $snmpHit = (string) $iface['hostid'];
+                } elseif ($anyHit === '') {
+                    $anyHit = (string) $iface['hostid'];
+                }
+            }
+            if ($snmpHit !== '') return $snmpHit;
+            if ($anyHit  !== '') return $anyHit;
+        }
+        return '';
     }
 
     /** PF v11+ canonical MAC format: 12 lowercase hex digits in colon pairs. */
@@ -1700,6 +1922,49 @@ class ActionDashboard extends ActionBase {
     /* --------------------------------------------------------------------- */
     /* Helpers                                                               */
     /* --------------------------------------------------------------------- */
+
+    /**
+     * Roll the three independent AP availability signals into a single
+     * status label the UI can colour-code.
+     *
+     *   $xiqConnected  — XIQ "connected" flag: 1 / 0 / null (unknown)
+     *   $snmpAvailable — Zabbix main-interface availability: 1 (up) / 2 (down) / 0 (unknown)
+     *   $pingUp        — ICMP Ping (icmpping item): 1 / 0 / null (unknown / missing)
+     *
+     * Returns one of: 'ok', 'warn', 'down', 'idle'.
+     *
+     *  - "down"  — at least one *known* signal says the AP is unreachable
+     *              (ping=0, snmp=2, or xiq=0). Unknown signals don't
+     *              count as "down" since the AP may simply not be
+     *              monitored from that source.
+     *  - "warn"  — a strict subset of signals is down (e.g. XIQ is
+     *              disconnected but the AP still pings — likely a cloud
+     *              comm problem, not a fully dead AP).
+     *  - "ok"    — every signal we *do* have says the AP is up.
+     *  - "idle"  — no signal known at all yet (newly added host).
+     */
+    private static function composeApStatus(?int $xiqConnected, int $snmpAvailable, ?int $pingUp): string {
+        $known  = [];
+        $up     = 0;
+        $down   = 0;
+
+        if ($pingUp !== null) {
+            $known[] = 'ping';
+            $pingUp === 1 ? $up++ : $down++;
+        }
+        if ($snmpAvailable === 1 || $snmpAvailable === 2) {
+            $known[] = 'snmp';
+            $snmpAvailable === 1 ? $up++ : $down++;
+        }
+        if ($xiqConnected !== null) {
+            $known[] = 'xiq';
+            $xiqConnected === 1 ? $up++ : $down++;
+        }
+        if (!$known) return 'idle';
+        if ($down === 0) return 'ok';
+        if ($up   === 0) return 'down';
+        return 'warn';
+    }
 
     private function resolveAvailability(string $hostid): int {
         // Zabbix 6.0+: availability is per-interface. Treat the host as

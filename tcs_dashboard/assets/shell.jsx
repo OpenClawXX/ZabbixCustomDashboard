@@ -1,17 +1,22 @@
 // Main app shell — sidebar now lives in global-nav.jsx (unified across all pages)
 const Sidebar = ({ tab, setTab }) => <GlobalSidebar active="wireless" />;
 
-const Topbar = ({ onCmdK, activeAp }) => (
+const Topbar = ({ onCmdK, activeAp }) => {
+  const h = window.ZBX_HOST || {};
+  const site  = (activeAp && activeAp.site)  || h.site  || "—";
+  const floor = (activeAp && activeAp.floor) || h.floor || "—";
+  const id    = (activeAp && activeAp.id)    || h.visible_name || h.host || "—";
+  return (
   <div className="topbar">
     <div className="icon-btn" title="Back"><Icon name="back" /></div>
     <div className="crumb">
       <span>Wireless APs</span>
       <span className="sep">/</span>
-      <span>{activeAp ? activeAp.site : "Bryant High School"}</span>
+      <span>{site}</span>
       <span className="sep">/</span>
-      <span>{activeAp ? activeAp.floor : "1st Floor"}</span>
+      <span>{floor}</span>
       <span className="sep">/</span>
-      <span className="seg">{activeAp ? activeAp.id : "BHS-56-Hallway"}</span>
+      <span className="seg">{id}</span>
     </div>
     <div className="spacer" />
     <div className="search" onClick={onCmdK}>
@@ -22,7 +27,8 @@ const Topbar = ({ onCmdK, activeAp }) => (
     <div className="icon-btn" title="Refresh"><Icon name="refresh" /></div>
     <div className="icon-btn" title="More"><Icon name="more" /></div>
   </div>
-);
+  );
+};
 
 const PageHeader = ({ timeRange, setTimeRange, host }) => (
   <div className="page-header">
@@ -95,15 +101,54 @@ const fmtUptime = (s) => {
   return `${m}m`;
 };
 
+// Three-source AP availability: XIQ cloud connected, SNMP reachable,
+// ICMP ping responsive. The backend rolls these into host.apStatus, but
+// fall back to local composition so a stale boot payload still renders.
+const composeApState = (host) => {
+  const xiq  = host.xiqConnected;
+  const snmp = typeof host.snmpAvailable === "number" ? host.snmpAvailable : host.available;
+  const ping = host.pingUp;
+  let up = 0, down = 0, known = 0;
+  const tally = (isUp, isDown) => { known += isUp || isDown ? 1 : 0; up += isUp; down += isDown; };
+  tally(ping === 1, ping === 0);
+  tally(snmp === 1, snmp === 2);
+  tally(xiq  === 1, xiq  === 0);
+  if (!known)     return "idle";
+  if (down === 0) return "ok";
+  if (up   === 0) return "down";
+  return "warn";
+};
+
+const ApStatusPills = ({ xiqConnected, snmpAvailable, pingUp }) => {
+  const cell = (label, val, downVal, title) => {
+    const isUp   = val === 1;
+    const isDown = val === downVal;
+    const color  = isUp ? "var(--ok)" : isDown ? "var(--err)" : "var(--muted)";
+    const text   = isUp ? "UP" : isDown ? "DOWN" : "—";
+    return (
+      <span className="ap-src-pill" title={title}>
+        <span className="ap-src-lbl">{label}</span>
+        <span className="ap-src-dot" style={{ background: color }} />
+        <span className="ap-src-v" style={{ color }}>{text}</span>
+      </span>
+    );
+  };
+  return (
+    <div className="ap-src-row">
+      {cell("XIQ",  xiqConnected,  0, "XIQ cloud connectivity")}
+      {cell("SNMP", snmpAvailable, 2, "Zabbix main-interface SNMP availability")}
+      {cell("PING", pingUp,        0, "ICMP ping (Zabbix icmpping item)")}
+    </div>
+  );
+};
+
 const DeviceSidecar = ({ host }) => {
-  // host.available: 1 = up, 2 = down, anything else (0/null) = unknown.
-  // Prefer the explicit apStatus the parent threads in from AP_SITES (which
-  // already folds in trigger severity); fall back to availability.
-  const state = host.apStatus === "down" ? "down"
-              : host.apStatus === "warn" ? "warn"
-              : host.available === 1 ? "ok"
-              : host.available === 2 ? "down"
-              : "idle";
+  // Prefer the backend-composed apStatus; fall back to local composition
+  // so older boot payloads (without xiqConnected / pingUp) still render.
+  const state = host.apStatus === "down" || host.apStatus === "warn"
+              || host.apStatus === "ok"  || host.apStatus === "idle"
+                ? host.apStatus
+                : composeApState(host);
   const stateLabel = state === "ok"   ? "Connected"
                    : state === "warn" ? "Degraded"
                    : state === "down" ? "Unreachable"
@@ -135,7 +180,20 @@ const DeviceSidecar = ({ host }) => {
           <StatusDot state={state} />
           <span style={{ color: stateColor }}>{stateLabel}</span>
           <span className="muted" style={{ marginLeft: 6 }}>· uptime {fmtUptime(host.uptime)}</span>
+          {host.configMismatch === 1 && (
+            <span
+              className="ap-config-chip"
+              title="xiq.ap.configmismatch reports the running config does not match the assigned XIQ network policy"
+            >
+              <Icon name="alert" size={10} /> CONFIG DRIFT
+            </span>
+          )}
         </div>
+        <ApStatusPills
+          xiqConnected={host.xiqConnected}
+          snmpAvailable={typeof host.snmpAvailable === "number" ? host.snmpAvailable : host.available}
+          pingUp={host.pingUp}
+        />
         <div className="dev-h-sub mono">
           {host.ip || "—"}{host.model ? ` · ${host.model}` : ""}
         </div>
@@ -199,22 +257,140 @@ const DeviceSidecar = ({ host }) => {
       </div>
 
       <div className="dev-h-actions">
-        <button className="btn primary"><Icon name="refresh" size={12} /> Reboot</button>
-        <button className="btn"><Icon name="external" size={12} /> SSH</button>
-        <button className="btn ghost"><Icon name="more" size={12} /></button>
+        <ApPfActionRow mac={host.mac || (uplink && uplink.mac) || ""} uplink={uplink} />
       </div>
+    </div>
+  );
+};
+
+// Per-AP PF write-actions + a "Cycle PoE" button that bounces the AP's
+// upstream switch port. Mirrors ClientPfActionRow in tabs.jsx (View in
+// PacketFence + Reevaluate access) with one extra action specific to
+// wired APs. The upstream switch is the host PF's locationlog points
+// at — its hostid is resolved server-side in collectPfApUplink.
+const ApPfActionRow = ({ mac, uplink }) => {
+  const [busy, setBusy] = React.useState(null);
+  const [msg,  setMsg]  = React.useState({ kind: "", text: "" });
+
+  // PF stores MACs lowercase colon-separated; force it here so callers
+  // don't have to remember.
+  const pfMac = String(mac || "").toLowerCase();
+  const hasPf = !!pfMac;
+  const adminBase = (window.PF_ADMIN_BASE || "").replace(/\/+$/, "");
+  const viewHref = adminBase && pfMac
+    ? `${adminBase}/admin/#/node/${encodeURIComponent(pfMac)}`
+    : null;
+
+  // ifIndex → "<member>:<port>". PF locationlog.port holds the SNMP
+  // ifIndex (e.g. 5036 → member 5, port 36) — same encoding the
+  // switches page's rConfig snippet expects.
+  const portIdx = uplink && /^\d+$/.test(String(uplink.port || "").trim())
+    ? parseInt(uplink.port, 10) : 0;
+  const member  = portIdx > 0 ? Math.floor(portIdx / 1000) : 0;
+  const portNum = portIdx > 0 ? portIdx % 1000 : 0;
+  const switchHostid = (uplink && uplink.switchHostid) || "";
+  const canCycle = !!(switchHostid && member && portNum);
+
+  const runPf = React.useCallback(async (op, label) => {
+    if (!pfMac || busy) return;
+    if (typeof window.tcsPfDeviceAction !== "function") {
+      setMsg({ kind: "err", text: "endpoint missing" });
+      return;
+    }
+    setBusy(op);
+    setMsg({ kind: "", text: `${label}…` });
+    const r = await window.tcsPfDeviceAction(pfMac, op);
+    setBusy(null);
+    setMsg(r && r.ok
+      ? { kind: "", text: r.message || "ok" }
+      : { kind: "err", text: (r && (r.error || r.message)) || "failed" });
+    setTimeout(() => setMsg({ kind: "", text: "" }), 6000);
+  }, [pfMac, busy]);
+
+  const runCycle = React.useCallback(async () => {
+    if (busy) return;
+    if (typeof window.tcsCyclePoeOnSwitch !== "function") {
+      setMsg({ kind: "err", text: "endpoint missing" });
+      return;
+    }
+    if (!canCycle) {
+      setMsg({ kind: "err", text: "no upstream port" });
+      setTimeout(() => setMsg({ kind: "", text: "" }), 4000);
+      return;
+    }
+    setBusy("cycle_poe");
+    setMsg({ kind: "", text: "cycling…" });
+    const r = await window.tcsCyclePoeOnSwitch(switchHostid, member, portNum);
+    setBusy(null);
+    setMsg(r && r.ok
+      ? { kind: "", text: r.message || "queued" }
+      : { kind: "err", text: (r && (r.error || r.message)) || "failed" });
+    setTimeout(() => setMsg({ kind: "", text: "" }), 6000);
+  }, [busy, canCycle, switchHostid, member, portNum]);
+
+  return (
+    <div className="ap-pf-actions">
+      <div className="ap-pf-btns">
+        {viewHref ? (
+          <a className="pf-btn" href={viewHref} target="_blank" rel="noopener noreferrer">
+            <Icon name="external" size={11}/> View in PacketFence
+          </a>
+        ) : (
+          <span className="pf-btn" style={{ opacity: 0.4, cursor: "not-allowed" }} title="PF admin URL not configured">
+            View in PacketFence
+          </span>
+        )}
+        <button
+          type="button"
+          className="pf-btn"
+          onClick={() => runPf("reevaluate_access", "reevaluating")}
+          disabled={!!busy || !hasPf}
+          title={hasPf
+            ? "Re-run PF role / access evaluation for this AP (issues a CoA)"
+            : "AP MAC not known — set the {$XIQ_MAC} macro"}
+        >
+          <Icon name="refresh" size={11}/> {busy === "reevaluate_access" ? "REEVALUATING…" : "Reevaluate access"}
+        </button>
+        <button
+          type="button"
+          className="pf-btn warn"
+          onClick={runCycle}
+          disabled={!!busy || !canCycle}
+          title={canCycle
+            ? `Cycle PoE on ${uplink.switch || uplink.switchIp || "switch"} port ${member}:${portNum} via rConfig`
+            : "Upstream switch/port not known — needs a PF locationlog entry on a Zabbix-monitored switch"}
+        >
+          <Icon name="refresh" size={11}/> {busy === "cycle_poe"
+            ? "CYCLING…"
+            : `Cycle PoE${canCycle ? ` ${member}:${portNum}` : ""}`}
+        </button>
+      </div>
+      {msg.text && (
+        <div className={"ap-pf-status" + (msg.kind === "err" ? " err" : "")}>
+          {msg.text}
+        </div>
+      )}
     </div>
   );
 };
 
 // ───────── AP Host Navigator (left rail) ─────────
 const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
+  // activeId may be a Zabbix hostid (preferred, set by the parent from
+  // ZBX_HOST.hostid) or, for synthetic rows, an AP id string. Match
+  // both so legacy callers keep working.
+  const isActive = (ap) => {
+    if (!activeId) return false;
+    const s = String(activeId);
+    if (ap.hostid && String(ap.hostid) === s) return true;
+    return ap.id === activeId;
+  };
   // Start with every site collapsed except the one containing the active
   // AP. Search expands all matched sections regardless (handled below).
   const [sites, setSites] = React.useState(() =>
     (window.AP_SITES || []).map(s => ({
       ...s,
-      expanded: Array.isArray(s.aps) && s.aps.some(a => a.id === activeId)
+      expanded: Array.isArray(s.aps) && s.aps.some(isActive)
     }))
   );
   const toggle = (idx) => {
@@ -273,11 +449,24 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                 <span className="site-name">{site.name}</span>
                 <span className="site-count">{matchedAps.length}</span>
                 {site.problems > 0 && <span className="site-prob">{site.problems}</span>}
-                {site.overloaded > 0 && (
-                  <span className="site-load" title={`${site.overloaded} AP${site.overloaded === 1 ? "" : "s"} with high client load`}>
-                    {site.overloaded}↑
-                  </span>
-                )}
+                {(() => {
+                  const downCount = site.aps.filter(a => a.status === "down").length;
+                  if (downCount === 0) return null;
+                  return (
+                    <span className="site-down" title={`${downCount} AP${downCount === 1 ? "" : "s"} down (XIQ / SNMP / ping)`}>
+                      {downCount}↓
+                    </span>
+                  );
+                })()}
+                {(() => {
+                  const driftCount = site.aps.filter(a => a.configMismatch === 1).length;
+                  if (driftCount === 0) return null;
+                  return (
+                    <span className="site-drift" title={`${driftCount} AP${driftCount === 1 ? "" : "s"} with XIQ config drift`}>
+                      {driftCount}≠
+                    </span>
+                  );
+                })()}
               </div>
               <div className={"ap-nav-children" + (expanded ? "" : " hidden")}>
                 {matchedAps.map(ap => {
@@ -293,7 +482,7 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                   return (
                     <div
                       key={ap.id}
-                      className={"ap-nav-host" + (ap.id === activeId ? " active" : "")}
+                      className={"ap-nav-host" + (isActive(ap) ? " active" : "")}
                       onClick={() => onSelect(ap)}
                       title={`${ap.id} · ${ap.ip} · ${ap.model} · ${loadTitle}`}
                     >
@@ -306,6 +495,9 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                         <div className="n" style={{ color: loadColor, fontWeight: ap.loadLevel === "ok" ? 500 : 700 }}>{ap.clients}</div>
                         <div className="u">cli</div>
                       </div>
+                      {ap.configMismatch === 1 && (
+                        <span className="ap-drift" title="XIQ reports running config does not match assigned policy">≠</span>
+                      )}
                       {ap.problems > 0 && <span className="ap-prob">{ap.problems}</span>}
                     </div>
                   );
@@ -527,6 +719,10 @@ const DebugPanel = () => {
             })()}
           </DebugSection>
 
+          <DebugSection title="PF AP uplink lookup">
+            <PfApUplinkDebug />
+          </DebugSection>
+
           <DebugSection title="Collection sizes">
             {Object.entries(collections).map(([k, v]) => (
               <DebugKV key={k} k={k} v={String(v)} tone={v === 0 ? "warn" : null} />
@@ -548,6 +744,88 @@ const DebugPanel = () => {
               </pre>
             </details>
           </DebugSection>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// PF AP uplink lookup diagnostic — surfaces the exact MAC queried, the
+// PF API call, every locationlog row returned, the per-row score, and
+// the row the uplink picker chose. Used to triage cases where the
+// device card's Uplink tile points at a clearly wrong switch/port.
+const PfApUplinkDebug = () => {
+  const d = window.TCS_PF_AP_UPLINK_DEBUG || {};
+  if (!d || Object.keys(d).length === 0) {
+    return <div style={{ color: "var(--muted)" }}>(no diagnostic — collector didn't run; load with ?hostid=N)</div>;
+  }
+  const rows = Array.isArray(d.rows) ? d.rows : [];
+  const result = d.result || null;
+  return (
+    <div>
+      <DebugKV k="input MAC"        v={d.inputMac      || "—"} />
+      <DebugKV k="normalized MAC"   v={d.normalizedMac || "—"} tone={!d.normalizedMac ? "err" : null} />
+      <DebugKV k="PF base URL"      v={d.pfUrl         || "—"} />
+      <DebugKV k="macros configured" v={d.macrosOk === null ? "—" : String(d.macrosOk)} tone={d.macrosOk === false ? "err" : null} />
+      <DebugKV k="API call"         v={d.apiCall       || "—"} />
+      <DebugKV k="rows returned"    v={String(d.rowCount ?? 0)} tone={(d.rowCount ?? 0) === 0 ? "warn" : null} />
+      <DebugKV k="picked index"     v={d.pickedIndex === null || d.pickedIndex === undefined ? "—" : String(d.pickedIndex)} />
+      <DebugKV k="fallback path"    v={d.fallback || "—"} tone={d.fallback ? "warn" : null} />
+      <DebugKV k="error"            v={d.error    || "—"} tone={d.error ? "err" : null} />
+
+      {result && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontFamily: "var(--sans)", fontSize: 10, textTransform: "uppercase",
+                        letterSpacing: 0.6, color: "var(--muted)", marginBottom: 4 }}>
+            Picked uplink (shown on card)
+          </div>
+          <DebugKV k="mac"            v={result.mac          || "—"} />
+          <DebugKV k="switch"         v={result.switch       || "—"} />
+          <DebugKV k="switch IP"      v={result.switchIp     || "—"} />
+          <DebugKV k="switch hostid"  v={result.switchHostid || "—"} tone={!result.switchHostid ? "warn" : null} />
+          <DebugKV k="port (ifIndex)" v={result.port         || "—"} />
+          <DebugKV k="ifDesc"         v={result.ifDesc       || "—"} />
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontFamily: "var(--sans)", fontSize: 10, textTransform: "uppercase",
+                        letterSpacing: 0.6, color: "var(--muted)", marginBottom: 4 }}>
+            Raw locationlog rows ({rows.length}, newest first)
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl" style={{ width: "100%", fontSize: 10.5 }}>
+              <thead>
+                <tr>
+                  <th>#</th><th>score</th><th>type</th><th>switch</th><th>switch_ip</th>
+                  <th>port</th><th>ifDesc</th><th>start</th><th>end</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const picked = !!r._picked;
+                  const cellStyle = picked ? { background: "rgba(91,140,255,0.10)", fontWeight: 600 } : null;
+                  return (
+                    <tr key={i} style={cellStyle}>
+                      <td>{picked ? `★ ${i}` : i}</td>
+                      <td>{r._score === undefined ? "—" : r._score}</td>
+                      <td>{r.connection_type || "—"}</td>
+                      <td>{r.switch    || "—"}</td>
+                      <td>{r.switch_ip || "—"}</td>
+                      <td>{r.port      || "—"}</td>
+                      <td style={{ color: "var(--muted)" }}>{r.ifDesc || "—"}</td>
+                      <td style={{ color: "var(--muted)" }}>{r.start_time || "—"}</td>
+                      <td style={{ color: "var(--muted)" }}>{r.end_time || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 6 }}>
+            Scoring: +4 still-open session · +3 wired connection_type · +2 row has switch hostname · +1 row has port · −3 Wireless connection_type
+          </div>
         </div>
       )}
     </div>

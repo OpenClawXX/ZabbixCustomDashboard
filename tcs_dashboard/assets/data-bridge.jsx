@@ -110,7 +110,8 @@
         window.ZBX_EVENTS    = Array.isArray(b.events)      ? b.events      : [];
         window.WIRED_PORTS   = Array.isArray(b.wiredPorts)  ? b.wiredPorts  : [];
         window.SSIDS         = Array.isArray(b.ssids)       ? b.ssids       : [];
-        window.TCS_CLIENTS_DEBUG = (b.clientsDebug && typeof b.clientsDebug === 'object') ? b.clientsDebug : {};
+        window.TCS_CLIENTS_DEBUG     = (b.clientsDebug    && typeof b.clientsDebug    === 'object') ? b.clientsDebug    : {};
+        window.TCS_PF_AP_UPLINK_DEBUG = (b.pfApUplinkDebug && typeof b.pfApUplinkDebug === 'object') ? b.pfApUplinkDebug : {};
         window.PF_ADMIN_BASE = typeof b.pfAdminUrl === 'string' ? b.pfAdminUrl : '';
         window.ALERTS_DETAIL = (b.alertsDetail && typeof b.alertsDetail === 'object') ? b.alertsDetail : {
             activeTriggers: [], triggerCount: 0, last24h: { count: 0, bySeverity: {} }, lastFiredAgo: null
@@ -222,6 +223,39 @@
         const pfMac = String(mac).toLowerCase();
         try {
             const form = new URLSearchParams({ hostid: String(hostid), mac: pfMac, op: String(op) });
+            const resp = await fetch(actionUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+                },
+                body: form.toString()
+            });
+            const body = await resp.json().catch(() => ({}));
+            if (!resp.ok) return { ok: false, error: body.error || `HTTP ${resp.status}` };
+            return body;
+        } catch (e) {
+            return { ok: false, error: String(e && e.message ? e.message : e) };
+        }
+    };
+
+    // Cycle PoE on the AP's upstream switch port. Same backend as the
+    // switches page (tcs.switch.cyclepoe) — but on the AP page we don't
+    // know about TCS_SWITCH_HOSTID, so the caller passes the resolved
+    // switch hostid in directly. The action uses that host's
+    // {$RCONFIG.*} macros to look up the rConfig device + snippet.
+    window.tcsCyclePoeOnSwitch = async function (switchHostid, member, port) {
+        const actionUrl = window.TCS_SWITCH_CYCLEPOE_URL;
+        if (!actionUrl)    return { ok: false, error: "endpoint not configured" };
+        if (!switchHostid) return { ok: false, error: "upstream switch unknown" };
+        if (!member || !port) return { ok: false, error: "bad port" };
+        try {
+            const form = new URLSearchParams({
+                hostid: String(switchHostid),
+                member: String(Number(member) || 1),
+                port:   String(Number(port)   || 0)
+            });
             const resp = await fetch(actionUrl, {
                 method: "POST",
                 credentials: "same-origin",

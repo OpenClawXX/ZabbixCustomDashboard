@@ -293,6 +293,11 @@ body {
 }
 .pf-btn:hover { background: rgba(255,255,255,0.04); }
 .pf-btn[disabled] { opacity: 0.5; cursor: wait; }
+.pf-btn.warn {
+  color: var(--warn);
+  border-color: rgba(245,179,0,0.4);
+}
+.pf-btn.warn:hover { background: rgba(245,179,0,0.08); }
 .pf-msg { font-size: 10.5px; color: var(--muted); margin-left: 6px; align-self: center; }
 .pf-msg.err { color: var(--warn); }
 
@@ -388,6 +393,34 @@ body {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px;
 }
+.ap-src-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 2px;
+}
+.ap-src-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  font-size: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.ap-src-lbl {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+}
+.ap-src-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.ap-src-v {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 9.5px;
+}
 .dev-h-sub {
   font-size: 11px;
   color: var(--muted);
@@ -426,6 +459,37 @@ body {
   flex-direction: row !important;
   align-items: center;
   gap: 6px;
+}
+/* AP PF actions: buttons in a row, status message stacked underneath
+   so a long PF response message doesn't shove the buttons around. */
+.ap-pf-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+.ap-pf-btns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ap-pf-status {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.35;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.ap-pf-status.err {
+  color: var(--warn);
+  background: rgba(245,179,0,0.08);
+  border-color: rgba(245,179,0,0.30);
 }
 
 /* ───────── Legacy device summary card (still used elsewhere) ───────── */
@@ -827,6 +891,16 @@ body {
   background: rgba(242,95,92,0.14); color: var(--err);
   padding: 1px 6px; border-radius: 8px; font-weight: 600;
 }
+.ap-nav-site .site-down {
+  font-family: var(--mono); font-size: 10px;
+  background: rgba(242,95,92,0.18); color: var(--err);
+  padding: 1px 6px; border-radius: 8px; font-weight: 700;
+}
+.ap-nav-site .site-drift {
+  font-family: var(--mono); font-size: 10px;
+  background: rgba(124,92,255,0.14); color: var(--ext);
+  padding: 1px 6px; border-radius: 8px; font-weight: 600;
+}
 
 .ap-nav-children { display: flex; flex-direction: column; }
 .ap-nav-children.hidden { display: none; }
@@ -853,5 +927,17 @@ body {
 .ap-nav-host .ap-cli .n { font-size: 11px; color: var(--fg); font-weight: 500; line-height: 1.1; }
 .ap-nav-host .ap-cli .u { font-size: 9px; color: var(--muted); letter-spacing: 0.4px; text-transform: uppercase; }
 .ap-nav-host .ap-prob { font-family: var(--mono); font-size: 9.5px; color: var(--err); font-weight: 700; margin-left: 2px; }
+.ap-nav-host .ap-drift { font-family: var(--mono); font-size: 11px; color: var(--ext); font-weight: 700; margin-left: 2px; }
+.ap-config-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--ext);
+  background: rgba(124,92,255,0.14);
+  border: 1px solid rgba(124,92,255,0.35);
+  border-radius: 8px;
+}
 
 @media (max-width: 1180px) { .ap-nav-card { position: relative; max-height: 360px; } }
