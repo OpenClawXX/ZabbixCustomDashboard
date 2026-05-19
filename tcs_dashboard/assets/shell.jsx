@@ -420,11 +420,15 @@ const APNavigator = ({ activeId, onSelect, query, setQuery }) => {
                 <span className="site-name">{site.name}</span>
                 <span className="site-count">{matchedAps.length}</span>
                 {site.problems > 0 && <span className="site-prob">{site.problems}</span>}
-                {site.overloaded > 0 && (
-                  <span className="site-load" title={`${site.overloaded} AP${site.overloaded === 1 ? "" : "s"} with high client load`}>
-                    {site.overloaded}↑
-                  </span>
-                )}
+                {(() => {
+                  const downCount = site.aps.filter(a => a.status === "down").length;
+                  if (downCount === 0) return null;
+                  return (
+                    <span className="site-down" title={`${downCount} AP${downCount === 1 ? "" : "s"} down (XIQ / SNMP / ping)`}>
+                      {downCount}↓
+                    </span>
+                  );
+                })()}
               </div>
               <div className={"ap-nav-children" + (expanded ? "" : " hidden")}>
                 {matchedAps.map(ap => {
