@@ -57,11 +57,29 @@
         return merged;
     };
 
+    const normaliseDomain = (d) => ({
+        id:         d.id        ?? "—",
+        label:      d.label     ?? "—",
+        icon:       d.icon      ?? "ap",
+        href:       d.href      ?? "#",
+        total:      d.total     ?? 0,
+        ok:         d.ok        ?? 0,
+        warn:       d.warn      ?? 0,
+        err:        d.err       ?? 0,
+        problems:   d.problems  ?? 0,
+        top:        d.top       ?? "",
+        kpis:       Array.isArray(d.kpis) ? d.kpis : [],
+        spark:      Array.isArray(d.spark) && d.spark.length === 24
+                        ? d.spark
+                        : new Array(24).fill(0),
+        sparkLabel: d.sparkLabel ?? ""
+    });
+
     const applyBoot = (boot) => {
         const b = boot || {};
         window.GLOBAL_TOTALS    = normaliseTotals(b.totals);
-        window.GLOBAL_SITES     = Array.isArray(b.sites)    ? b.sites.map(normaliseSite) : [];
-        window.GLOBAL_DOMAINS   = Array.isArray(b.domains)  ? b.domains  : [];
+        window.GLOBAL_SITES     = Array.isArray(b.sites)    ? b.sites.map(normaliseSite)   : [];
+        window.GLOBAL_DOMAINS   = Array.isArray(b.domains)  ? b.domains.map(normaliseDomain) : [];
         window.GLOBAL_TRIGGERS  = Array.isArray(b.triggers) ? b.triggers : [];
         window.GLOBAL_EVENTS    = Array.isArray(b.events)   ? b.events   : [];
         window.PROBLEM_TIMELINE = Array.isArray(b.timeline) && b.timeline.length === 24

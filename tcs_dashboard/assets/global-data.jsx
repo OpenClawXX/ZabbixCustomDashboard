@@ -40,31 +40,57 @@ const GLOBAL_SITES = [
   { id: "TBS", name: "Bus Operations",            type: "admin",  hosts: 21,  problems: 0,  sev: "ok",       sla: 99.94 },
 ];
 
-// 4 infrastructure domains — used for the "Problems by domain" card and quick-jump tiles
+// 4 infrastructure domains — drive the System Snapshot tiles.
+// Each row exposes 3 KPIs an operator wants at a glance, plus a domain-
+// specific sparkline (connected clients for wireless, etc).
 const GLOBAL_DOMAINS = [
   {
     id: "wireless", label: "Wireless APs",  href: "Zabbix Dashboard.html", icon: "wifi",
     total: 1184, ok: 1162, warn: 18, err: 4,
     problems: 22, top: "BHS-23-Cafe lost LAN uplink (5m)",
-    spark: [22,18,15,17,21,18,16,14,12,11,13,15,18,21,22,24,21,18,16,15,14,16,18,22],
+    kpis: [
+      { label: "APs online",        value: "1,162 / 1,184", note: "22 APs with problems" },
+      { label: "Connected clients", value: "4,328",         note: "ax 3,981 · ac 295" },
+      { label: "RF health",         value: "94", unit: "/100", note: "target ≥ 90 · 2.4 GHz dragging" },
+    ],
+    spark: [4101,4218,4256,4302,4288,4275,4310,4350,4391,4406,4380,4350,4318,4292,4280,4262,4255,4271,4290,4308,4327,4322,4329,4328],
+    sparkLabel: "Clients 24h",
   },
   {
     id: "switches", label: "Switches",      href: "Switches Dashboard.html", icon: "ethernet",
     total: 312, ok: 304, warn: 6, err: 2,
     problems: 11, top: "TCS-CO-CORE-01 PSU2 failed",
-    spark: [9,8,9,7,6,8,10,11,12,11,10,9,11,13,12,11,10,9,8,9,10,11,12,11],
+    kpis: [
+      { label: "Switches up", value: "310 / 312",    note: "2 unreachable" },
+      { label: "Ports up",    value: "6,184 / 7,008", note: "88% utilised" },
+      { label: "PoE budget",  value: "73", unit: "%", note: "12 ports throttled" },
+    ],
+    spark: [6122,6140,6155,6170,6188,6201,6214,6220,6212,6201,6188,6175,6160,6152,6149,6151,6160,6172,6181,6186,6190,6187,6184,6184],
+    sparkLabel: "Ports up 24h",
   },
   {
     id: "servers", label: "Servers",        href: "Servers Dashboard.html", icon: "ap",
     total: 17, ok: 14, warn: 2, err: 1,
     problems: 6, top: "infra-zbx-db-01 disk /var/lib > 88%",
-    spark: [3,3,4,4,5,5,6,6,5,5,6,7,7,6,5,5,5,5,6,6,7,7,6,6],
+    kpis: [
+      { label: "Servers up",     value: "16 / 17",       note: "1 down (db replica)" },
+      { label: "CPU avg",        value: "42", unit: "%", note: "peak 71% (zbx-db-01)" },
+      { label: "Disk pressure",  value: "3",             note: "vols >80% used" },
+    ],
+    spark: [28,30,32,35,38,40,42,45,48,52,55,58,60,58,55,52,48,45,43,42,42,42,42,42],
+    sparkLabel: "CPU avg 24h",
   },
   {
     id: "nvr", label: "Surveillance",       href: "Surveillance Dashboard.html", icon: "shield",
     total: 1147, ok: 1098, warn: 38, err: 11,
     problems: 18, top: "11 cameras unreachable (Central Elem)",
-    spark: [12,13,14,15,17,18,16,15,14,13,15,17,19,21,18,17,16,15,14,16,17,18,18,18],
+    kpis: [
+      { label: "Cameras online",   value: "1,098 / 1,147", note: "49 unreachable" },
+      { label: "Recording health", value: "94", unit: "%", note: "11 cams lagging" },
+      { label: "Storage used",     value: "78", unit: "%", note: "rec-04 at 92%" },
+    ],
+    spark: [1110,1112,1115,1108,1100,1095,1098,1102,1104,1100,1098,1096,1094,1092,1090,1095,1098,1100,1098,1097,1098,1098,1098,1098],
+    sparkLabel: "Cams online 24h",
   },
 ];
 

@@ -238,33 +238,51 @@ const SitesHeatmap = ({ filter, setFilter }) => {
   );
 };
 
-// ───────── Domain breakdown card ─────────
+// ───────── System Snapshot — per-domain KPI tiles ─────────
+// Each row shows the 3 numbers an operator most wants from that system,
+// plus a domain-specific sparkline (e.g. connected clients for wireless).
 const DomainBreakdown = () => (
   <div className="card">
     <div className="card-h">
-      <h3>Problems by Domain</h3>
+      <h3>System Snapshot</h3>
       <SourceBadge src="zbx" />
+      <SourceBadge src="ext" />
       <div className="h-spacer" />
       <a className="h-link">All hosts <Icon name="external" size={11} /></a>
     </div>
     <div className="card-b tight">
       {GLOBAL_DOMAINS.map(d => {
-        const total = d.ok + d.warn + d.err;
-        const okPct   = (d.ok / total) * 100;
-        const warnPct = (d.warn / total) * 100;
-        const errPct  = (d.err / total) * 100;
+        const total = (d.ok || 0) + (d.warn || 0) + (d.err || 0);
+        const okPct   = total ? (d.ok   / total) * 100 : 0;
+        const warnPct = total ? (d.warn / total) * 100 : 0;
+        const errPct  = total ? (d.err  / total) * 100 : 0;
+        const spark = Array.isArray(d.spark) && d.spark.some(v => v > 0) ? d.spark : null;
         return (
           <a key={d.id} className="domain-row" href={d.href}>
             <div className="domain-icon"><Icon name={d.icon} size={16} /></div>
             <div className="domain-meta">
               <div className="domain-h">
                 <span className="domain-label">{d.label}</span>
-                <span className="domain-count">{d.total.toLocaleString()}</span>
+                <span className="domain-count">{(d.total || 0).toLocaleString()} hosts</span>
                 <span className="h-spacer" />
                 <span className="domain-prob">
                   {d.problems} <span className="muted" style={{ fontSize: 10 }}>open</span>
                 </span>
               </div>
+              {Array.isArray(d.kpis) && d.kpis.length > 0 && (
+                <div className="domain-kpis">
+                  {d.kpis.map((k, i) => (
+                    <div className="domain-kpi" key={i}>
+                      <div className="domain-kpi-lbl">{k.label}</div>
+                      <div className="domain-kpi-v">
+                        {k.value}
+                        {k.unit && <span className="domain-kpi-u">{k.unit}</span>}
+                      </div>
+                      {k.note && <div className="domain-kpi-n" title={k.note}>{k.note}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="domain-bar">
                 <div style={{ width: `${okPct}%`,   background: "var(--ok)"   }} />
                 <div style={{ width: `${warnPct}%`, background: "var(--warn)" }} />
@@ -272,7 +290,12 @@ const DomainBreakdown = () => (
               </div>
               <div className="domain-foot">
                 <span className="domain-top" title={d.top}>↳ {d.top}</span>
-                <Sparkline data={d.spark} color="var(--zbx)" width={84} height={20} fill={true} />
+                <div className="domain-spark">
+                  {d.sparkLabel && <span className="domain-spark-lbl">{d.sparkLabel}</span>}
+                  {spark
+                    ? <Sparkline data={spark} color="var(--zbx)" width={84} height={20} fill={true} />
+                    : <span className="domain-spark-empty">—</span>}
+                </div>
               </div>
             </div>
             <Icon name="chevron" size={14} />
