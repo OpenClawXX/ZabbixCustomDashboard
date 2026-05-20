@@ -1794,15 +1794,16 @@ class ActionDashboard extends ActionBase {
         }
 
         try {
-            $pf       = PFClient::fromMacros($macros);
-            $hostName = (string) ($host['host'] ?? '');
-            $hostIp   = (string) ($host['ip']   ?? '');
+            $pf     = PFClient::fromMacros($macros);
+            $hostIp = (string) ($host['ip'] ?? '');
+            if ($hostIp === '') return [[], []];
 
             return [
-                $hostName !== '' ? $pf->clientsForNode($hostName)    : [],
-                // PF's radius_audit_logs only populates nas_ip_address
-                // on failed auths — feed the AP/switch Mgt0 IPv4.
-                $hostIp   !== '' ? $pf->authFailuresForNode($hostIp) : []
+                // clientsForNode → locationlogs/search filtered by switch_ip.
+                // authFailuresForNode → radius_audit_logs/search filtered
+                // by nas_ip_address. Both want the host's Mgt0 IPv4.
+                $pf->clientsForNode($hostIp),
+                $pf->authFailuresForNode($hostIp)
             ];
         }
         catch (\Throwable $e) {
