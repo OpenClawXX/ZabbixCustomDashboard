@@ -109,6 +109,20 @@
             }));
         }
 
+        // ── FLEET_HISTORY (24h sparklines) ────────────────────────────
+        // Per-key overlay: any non-null array from the backend replaces
+        // the mock series; null keys keep the mock so charts that the
+        // backend can't drive yet (ingress Gbps, storage write, RS CPU,
+        // archive lag) still render.
+        if (boot.fleetHistory && typeof boot.fleetHistory === "object") {
+            const base = Object.assign({}, window.FLEET_HISTORY || {});
+            for (const k of Object.keys(boot.fleetHistory)) {
+                const v = boot.fleetHistory[k];
+                if (Array.isArray(v) && v.length) base[k] = v;
+            }
+            window.FLEET_HISTORY = base;
+        }
+
         // ── VMS_ALARMS ────────────────────────────────────────────────
         if (Array.isArray(boot.alarms)) {
             // Replace — boot.alarms is the authoritative open-problem

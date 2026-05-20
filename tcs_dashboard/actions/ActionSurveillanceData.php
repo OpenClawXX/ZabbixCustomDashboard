@@ -83,6 +83,7 @@ class ActionSurveillanceData extends ActionDataBase {
         $servers   = $this->buildServers($site_hosts, $site_items);
         $cameras   = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
         $alarms    = $this->buildAlarms($problems);
+        $history   = $this->buildFleetHistory($all_host_ids, $cameras);
 
         return [
             'milestone'    => $milestone,
@@ -90,7 +91,7 @@ class ActionSurveillanceData extends ActionDataBase {
             'servers'      => $servers,
             'cameras'      => $cameras,
             'alarms'       => $alarms,
-            'fleetHistory' => null,   // TODO: time-series — needs history.get over the RS items
+            'fleetHistory' => $history,
             'ts'           => time()
         ];
     }
@@ -451,6 +452,76 @@ class ActionSurveillanceData extends ActionDataBase {
             }
         }
         return $out;
+    }
+
+    /* --------------------------------------------------------------------- */
+
+    /* --------------------------------------------------------------------- */
+
+    /**
+     * 24h sparkline arrays for the Overview "Live Ingress" tile. Returns
+     * keys the bridge will overlay onto window.FLEET_HISTORY — any key
+     * left null keeps the mock series so the chart still renders.
+     *
+     * Backed by what the templates actually expose today:
+     *   - alarmsPerHour: real 30-min bucket counts from event.get on the
+     *     Milestone fleet hosts (TRIGGER_VALUE_TRUE events / bucket).
+     *   - camerasOnline: flat baseline at the current online count so
+     *     the line isn't dead at zero. Real per-camera trend would cost
+     *     2500 history.get calls; defer until we have a templated
+     *     aggregate item.
+     *   - Everything else (ingress Gbps, storage write MB/s, RS CPU,
+     *     archive lag): null — needs OS-level items on the recording-
+     *     server Windows hosts that aren't part of the Milestone HTTP
+     *     template.
+     *
+     * @param array $host_ids   site + per-camera Zabbix hostids
+     * @param array $cameras    rows from buildCameras() — used to count
+     *                          current online for the camerasOnline line
+     */
+    private function buildFleetHistory(array $host_ids, array $cameras): array {
+        $bucket_count = 48;            // 30-min buckets across 24h
+        $window_secs  = 24 * 3600;
+        $bucket_secs  = (int) ($window_secs / $bucket_count);
+
+        $alarms_per_hour = array_fill(0, $bucket_count, 0);
+        if ($host_ids) {
+            $events = $this->safeGet(fn() => API::Event()->get([
+                'output'    => ['eventid', 'clock', 'value'],
+                'source'    => EVENT_SOURCE_TRIGGERS,
+                'object'    => EVENT_OBJECT_TRIGGER,
+                'hostids'   => $host_ids,
+                'time_from' => time() - $window_secs,
+                'sortfield' => ['eventid'],
+                'sortorder' => 'ASC',
+                'limit'     => 10000
+            ]));
+            $start = time() - $window_secs;
+            foreach ($events as $e) {
+                if ((int) $e['value'] !== TRIGGER_VALUE_TRUE) continue;
+                $b = (int) (((int) $e['clock'] - $start) / $bucket_secs);
+                if ($b >= 0 && $b < $bucket_count) $alarms_per_hour[$b]++;
+            }
+        }
+
+        // Current online count — anything not in err state.
+        $online_now = 0;
+        foreach ($cameras as $c) {
+            $s = $c['state'] ?? '';
+            if ($s === 'ok' || $s === 'warn') $online_now++;
+        }
+        $cameras_online = $online_now > 0
+            ? array_fill(0, $bucket_count, $online_now)
+            : null;  // empty fleet → keep mock so the chart isn't a flat zero
+
+        return [
+            'totalIngressGbps'    => null,
+            'storageWriteMBps'    => null,
+            'recordingServersCpu' => null,
+            'camerasOnline'       => $cameras_online,
+            'alarmsPerHour'       => $alarms_per_hour,
+            'archiveLagMin'       => null
+        ];
     }
 
     /* --------------------------------------------------------------------- */
