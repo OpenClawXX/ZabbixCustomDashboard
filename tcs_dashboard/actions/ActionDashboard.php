@@ -78,18 +78,14 @@ class ActionDashboard extends ActionBase {
         if ($hostid !== '') {
             $boot['host']        = $this->collectHost($hostid);
             $boot['items']       = $this->collectItems($hostid);
-            $boot['systemInfo']  = $this->collectSystemInfo($hostid);
-            $boot['networkInfo'] = $this->collectNetworkInfo($hostid);
-            $boot['events']      = $this->collectEvents($hostid, $boot['host']);
-            $boot['alerts']      = $this->collectAlertsSummary($hostid);
-            $boot['wiredPorts']  = $this->collectWiredPorts($hostid);
-            $boot['ssids']       = $this->collectSsidList($hostid);
-            $boot['alertsDetail']= $this->collectAlertsDetail($hostid);
-            $boot['pfAdminUrl']  = $this->resolvePfAdminUrl($hostid);
 
             // Fold per-AP fields from the XIQ fleet host into the host
             // record so device card / page header have clients/location/
             // model/connected without a second backend round trip.
+            //
+            // Order matters: apStatus is composed here so the downstream
+            // PF collectors (collectEvents auth merge, collectPacketFence)
+            // can skip their round-trips when the AP is fully down.
             if ($boot['host']) {
                 $fleet = $this->resolveXiqFleetFields($hostid, [
                     'clients', 'building', 'floor', 'location', 'model',
@@ -148,6 +144,15 @@ class ActionDashboard extends ActionBase {
                     $pingUp
                 );
             }
+
+            $boot['systemInfo']  = $this->collectSystemInfo($hostid);
+            $boot['networkInfo'] = $this->collectNetworkInfo($hostid);
+            $boot['events']      = $this->collectEvents($hostid, $boot['host']);
+            $boot['alerts']      = $this->collectAlertsSummary($hostid);
+            $boot['wiredPorts']  = $this->collectWiredPorts($hostid);
+            $boot['ssids']       = $this->collectSsidList($hostid);
+            $boot['alertsDetail']= $this->collectAlertsDetail($hostid);
+            $boot['pfAdminUrl']  = $this->resolvePfAdminUrl($hostid);
 
             [$pfClients, $pfAuthFails] = $this->collectPacketFence($hostid, $boot['host']);
             // Prefer XIQ /clients/active enriched with PacketFence for the
@@ -595,11 +600,12 @@ class ActionDashboard extends ActionBase {
         // switch_mac stay empty), so look up failures by the AP's Mgt0
         // IPv4 from its primary Zabbix interface.
         //
-        // Skip the PF round-trip when the AP is unreachable — Zabbix has
-        // already marked the host down, so there's no live auth traffic
-        // for PF to report and the call would just waste a token slot.
-        $apAvailable = (int) ($host['available'] ?? 1);
-        $pfMacros = $apAvailable === 1 ? $this->resolvePfMacros($hostid) : null;
+        // Skip the PF round-trip when the AP is fully unreachable
+        // (apStatus === 'down' means XIQ, SNMP, and ping all report
+        // down) — there's no live auth traffic for PF to report and the
+        // call would just waste a token slot.
+        $apDown   = (string) ($host['apStatus'] ?? '') === 'down';
+        $pfMacros = $apDown ? null : $this->resolvePfMacros($hostid);
         if ($pfMacros !== null) {
             $apIp = $this->primaryInterfaceIp($hostid);
             if ($apIp !== '') {
@@ -1774,11 +1780,12 @@ class ActionDashboard extends ActionBase {
     }
 
     private function collectPacketFence(string $hostid, ?array $host): array {
-        // Don't ask PF about an AP Zabbix has already marked unreachable.
-        // No live clients can be on it and no auth traffic is flowing —
-        // the PF call would just be a wasted round-trip (and would still
-        // count against the PF token's request budget).
-        if ((int) ($host['available'] ?? 1) !== 1) {
+        // Don't ask PF about an AP that's fully unreachable (apStatus
+        // === 'down' means XIQ + SNMP + ping all report down). No live
+        // clients can be on it and no auth traffic is flowing — the PF
+        // call would just be a wasted round-trip (and would still count
+        // against the PF token's request budget).
+        if ((string) ($host['apStatus'] ?? '') === 'down') {
             return [[], []];
         }
         $macros = $this->resolvePfMacros($hostid);
