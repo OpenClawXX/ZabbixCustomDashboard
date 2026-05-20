@@ -80,7 +80,7 @@ class ActionDashboard extends ActionBase {
             $boot['items']       = $this->collectItems($hostid);
             $boot['systemInfo']  = $this->collectSystemInfo($hostid);
             $boot['networkInfo'] = $this->collectNetworkInfo($hostid);
-            $boot['events']      = $this->collectEvents($hostid);
+            $boot['events']      = $this->collectEvents($hostid, $boot['host']);
             $boot['alerts']      = $this->collectAlertsSummary($hostid);
             $boot['wiredPorts']  = $this->collectWiredPorts($hostid);
             $boot['ssids']       = $this->collectSsidList($hostid);
@@ -530,7 +530,7 @@ class ActionDashboard extends ActionBase {
         return $out;
     }
 
-    private function collectEvents(string $hostid): array {
+    private function collectEvents(string $hostid, ?array $host = null): array {
         // Pull both trigger PROBLEM (value=1) and RECOVERY (value=0) events
         // so the tab can show the full state timeline, not just opens.
         // Zabbix 7.2: sortfield must be 'eventid'; selectAcknowledges
@@ -594,7 +594,12 @@ class ActionDashboard extends ActionBase {
         // populates nas_ip_address on failed auths (switch / switch_ip /
         // switch_mac stay empty), so look up failures by the AP's Mgt0
         // IPv4 from its primary Zabbix interface.
-        $pfMacros = $this->resolvePfMacros($hostid);
+        //
+        // Skip the PF round-trip when the AP is unreachable — Zabbix has
+        // already marked the host down, so there's no live auth traffic
+        // for PF to report and the call would just waste a token slot.
+        $apAvailable = (int) ($host['available'] ?? 1);
+        $pfMacros = $apAvailable === 1 ? $this->resolvePfMacros($hostid) : null;
         if ($pfMacros !== null) {
             $apIp = $this->primaryInterfaceIp($hostid);
             if ($apIp !== '') {
@@ -1769,6 +1774,13 @@ class ActionDashboard extends ActionBase {
     }
 
     private function collectPacketFence(string $hostid, ?array $host): array {
+        // Don't ask PF about an AP Zabbix has already marked unreachable.
+        // No live clients can be on it and no auth traffic is flowing —
+        // the PF call would just be a wasted round-trip (and would still
+        // count against the PF token's request budget).
+        if ((int) ($host['available'] ?? 1) !== 1) {
+            return [[], []];
+        }
         $macros = $this->resolvePfMacros($hostid);
         if ($macros === null) {
             return [[], []];
