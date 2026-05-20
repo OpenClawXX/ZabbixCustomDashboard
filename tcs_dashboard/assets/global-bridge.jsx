@@ -60,7 +60,10 @@
     const normaliseDomain = (d) => ({
         id:         d.id        ?? "—",
         label:      d.label     ?? "—",
+        sub:        d.sub       ?? "",
         icon:       d.icon      ?? "ap",
+        src:        d.src       ?? "zbx",
+        status:     d.status    ?? "ok",
         href:       d.href      ?? "#",
         total:      d.total     ?? 0,
         ok:         d.ok        ?? 0,
@@ -72,6 +75,7 @@
         spark:      Array.isArray(d.spark) && d.spark.length === 24
                         ? d.spark
                         : new Array(24).fill(0),
+        sparkColor: d.sparkColor ?? "var(--zbx)",
         sparkLabel: d.sparkLabel ?? ""
     });
 

@@ -434,39 +434,63 @@ class ActionGlobalData extends ActionDataBase {
         // the wireless dashboard's totals.
         $wireless = $this->collectWirelessFleetKpis();
 
-        // Domain labels + click-through targets — mirror the mock shape so
-        // the existing React tile renderer doesn't need changes.
+        // Domain labels + click-through targets — mirror the design's
+        // SystemSnapshot tiles so the React renderer doesn't need changes.
         static $meta = [
-            'wireless' => ['label' => 'Wireless APs',  'icon' => 'wifi',     'href' => 'zabbix.php?action=tcs.dashboard.view'],
-            'switches' => ['label' => 'Switches',      'icon' => 'ethernet', 'href' => 'zabbix.php?action=tcs.switches.view'],
-            'servers'  => ['label' => 'Servers',       'icon' => 'ap',       'href' => 'zabbix.php?action=tcs.servers.view'],
-            'nvr'      => ['label' => 'Surveillance',  'icon' => 'shield',   'href' => 'zabbix.php?action=tcs.surveillance.view']
+            'wireless' => [
+                'label' => 'Wireless · XIQ',         'sub'        => 'ExtremeCloud IQ',
+                'icon'  => 'wifi',                   'src'        => 'ext',
+                'href'  => 'zabbix.php?action=tcs.xiq.view',
+                'sparkColor' => 'var(--ext)',        'sparkLabel' => 'Connected clients · 24h'
+            ],
+            'switches' => [
+                'label' => 'Switches',                'sub'        => 'Extreme Universal',
+                'icon'  => 'ethernet',                'src'        => 'zbx',
+                'href'  => 'zabbix.php?action=tcs.switches.view',
+                'sparkColor' => 'var(--zbx)',         'sparkLabel' => 'Hosts up · 24h'
+            ],
+            'servers'  => [
+                'label' => 'Servers',                 'sub'        => 'Linux / Windows · VM + physical',
+                'icon'  => 'ap',                      'src'        => 'zbx',
+                'href'  => 'zabbix.php?action=tcs.servers.view',
+                'sparkColor' => 'var(--zbx)',         'sparkLabel' => 'Hosts up · 24h'
+            ],
+            'nvr'      => [
+                'label' => 'Surveillance · Milestone','sub'        => 'XProtect',
+                'icon'  => 'shield',                  'src'        => 'ext',
+                'href'  => 'zabbix.php?action=tcs.surveillance.view',
+                'sparkColor' => 'var(--ext)',         'sparkLabel' => 'Cameras online · 24h'
+            ]
         ];
 
         $out = [];
         foreach ($by_domain as $id => $d) {
             unset($d['_top_sev']);
-            $d['kpis'] = $this->buildDomainKpis($id, $d, $wireless);
-            $d['sparkLabel'] = self::DOMAIN_SPARK_LABELS[$id] ?? '';
-            // Wireless: prefer the live client total as the spark's last point
-            // so the labelled "Clients" sparkline shows _something_ live even
-            // before history is wired.
+            $d['status'] = $this->domainStatus($d);
+            $d['kpis']   = $this->buildDomainKpis($id, $d, $wireless);
+            // Live wireless: surface the current client total as a flat
+            // sparkline so the labelled "Connected clients" graph isn't a
+            // dead line of zeros until proper history wiring lands.
             if ($id === 'wireless' && $wireless['clients_total'] !== null) {
                 $d['spark'] = array_fill(0, 24, $wireless['clients_total']);
             }
-            $out[] = array_merge(['id' => $id], $meta[$id], $d);
+            $tileMeta = $meta[$id] ?? [];
+            // Refine the subtitle with a live host count if we have one.
+            if ($d['total'] > 0 && isset($tileMeta['sub'])) {
+                $tileMeta['sub'] = trim($tileMeta['sub'].' · '.number_format($d['total']).' hosts');
+            }
+            $out[] = array_merge(['id' => $id], $tileMeta, $d);
         }
         return $out;
     }
 
-    /** Per-tile sparkline subtitle. Tile renderer prints this above the
-     *  Sparkline so an operator knows what they're looking at. */
-    private const DOMAIN_SPARK_LABELS = [
-        'wireless' => 'Clients 24h',
-        'switches' => 'Hosts up 24h',
-        'servers'  => 'Hosts up 24h',
-        'nvr'      => 'Cams online 24h'
-    ];
+    /** Worst-severity-aware status label, used to colour the tile header. */
+    private function domainStatus(array $d): string {
+        if ($d['err']  > 0) return 'high';
+        if ($d['warn'] > 0) return 'warning';
+        if ($d['down'] > 0) return 'warning';
+        return 'ok';
+    }
 
     /**
      * Build the 3-KPI tile content shown in the System Snapshot.
