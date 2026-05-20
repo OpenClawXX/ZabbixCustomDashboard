@@ -74,13 +74,23 @@ class ActionSurveillanceData extends ActionDataBase {
         // ── Per-camera Zabbix hosts (ICMP, vendor SNMP) ──
         $cam_hosts = $this->findCameraHosts();
 
-        // ── Open problems on the whole fleet (site hosts + per-camera hosts) ──
-        $all_host_ids = array_merge($site_host_ids, array_keys($cam_hosts));
+        // ── DVR / recording-server Windows hosts running zabbix-agent2,
+        //    joined to the Milestone RS rows by hostname. Gives us live
+        //    CPU / mem / disk / uptime for the Recording Servers tiles. ──
+        $dvr_agents = $this->findDvrAgentHosts($site_items);
+
+        // ── Open problems on the whole fleet (site hosts + per-camera hosts
+        //    + the DVR agent hosts so RS-side alerts land in the alarm feed) ──
+        $all_host_ids = array_merge(
+            $site_host_ids,
+            array_keys($cam_hosts),
+            array_keys($dvr_agents['hosts'])
+        );
         $problems     = $this->collectProblems($all_host_ids);
 
         $milestone = $this->buildMilestoneSummary($site_hosts, $site_items, $cam_hosts, $problems);
         $sites     = $this->buildSites($site_hosts, $site_items, $cam_hosts, $problems);
-        $servers   = $this->buildServers($site_hosts, $site_items);
+        $servers   = $this->buildServers($site_hosts, $site_items, $dvr_agents);
         $cameras   = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
         $alarms    = $this->buildAlarms($problems);
         $history   = $this->buildFleetHistory($all_host_ids, $cameras);
@@ -355,8 +365,19 @@ class ActionSurveillanceData extends ActionDataBase {
 
     /* --------------------------------------------------------------------- */
 
-    /** Recording-server tiles — one row per discovered RS across all sites. */
-    private function buildServers(array $site_hosts, array $site_items): array {
+    /**
+     * Recording-server tiles — one row per discovered RS across all sites.
+     * Where the Milestone-reported RS hostname matches a Zabbix host
+     * running zabbix-agent2 (via findDvrAgentHosts), merge in live OS
+     * metrics so CPU / mem / disk / uptime / IP / agent version light up.
+     *
+     * @param array $dvr_agents { hosts: hostid=>host, by_name: lowerhost=>hostid, metrics: hostid=>[logical=>value] }
+     */
+    private function buildServers(array $site_hosts, array $site_items, array $dvr_agents): array {
+        $by_name  = $dvr_agents['by_name'] ?? [];
+        $hosts    = $dvr_agents['hosts']   ?? [];
+        $metrics  = $dvr_agents['metrics'] ?? [];
+
         $out = [];
         foreach ($site_hosts as $hid => $h) {
             $bundle = $site_items[$hid] ?? [];
@@ -365,29 +386,192 @@ class ActionSurveillanceData extends ActionDataBase {
                 $enabled = strtolower((string) ($rs['enabled'] ?? ''));
                 $age     = (int) ($rs['handshake.age'] ?? 0);
                 $stale   = $age > 300;
+
+                // Match Milestone RS hostname → Zabbix agent host. Try the
+                // full string first, then the leftmost label so an FQDN
+                // like "tcs-rec-bhs-01.tcs.local" still joins a Zabbix
+                // host named just "tcs-rec-bhs-01".
+                $rs_hostname = (string) ($rs['hostname'] ?? '');
+                $agent_hid   = $this->matchAgentHost($rs_hostname, $by_name);
+                $agent_host  = $agent_hid !== null ? ($hosts[$agent_hid] ?? null) : null;
+                $vals        = $agent_hid !== null ? ($metrics[$agent_hid] ?? []) : [];
+
+                // Status combines Milestone view + agent reachability.
+                $state = $enabled !== 'true' ? 'err' : ($stale ? 'warn' : 'ok');
+                if ($agent_host && (int) ($agent_host['_unreachable'] ?? 0) === 1 && $state === 'ok') {
+                    $state = 'warn';
+                }
+
                 $out[] = [
-                    'id'           => $rs['hostname'] ?? $rs_id,
+                    'id'           => $rs_hostname ?: $rs_id,
                     'rsid'         => $rs_id,
                     'site'         => $site_label,
                     'role'         => 'Recording Server',
-                    'os'           => null,
-                    'cpu'          => null,
-                    'mem'          => null,
-                    'disk'         => null,
+                    'os'           => $vals['os']      ?? null,
+                    'cpu'          => $vals['cpu']     ?? null,
+                    'mem'          => $vals['mem']     ?? null,
+                    'disk'         => $vals['disk']    ?? null,
                     'raid'         => null,
                     'chans'        => null,
                     'recording'    => null,
                     'archiveLagH'  => null,
-                    'agent'        => null,
-                    'ip'           => null,
-                    'uptimeD'      => null,
+                    'agent'        => $vals['agentVer'] ?? null,
+                    'ip'           => $vals['ip']      ?? null,
+                    'uptimeD'      => $vals['uptimeD'] ?? null,
                     'lastBackup'   => null,
-                    'state'        => $enabled !== 'true' ? 'err' : ($stale ? 'warn' : 'ok'),
-                    'handshakeAge' => $age
+                    'state'        => $state,
+                    'handshakeAge' => $age,
+                    'agentHostid'  => $agent_hid
                 ];
             }
         }
         return $out;
+    }
+
+    /**
+     * Try to find a Zabbix-agent host that matches a Milestone-reported
+     * RS hostname. Comparison is case-insensitive on both the technical
+     * host name and visible name; FQDNs and bare labels both work
+     * (tcs-rec-bhs-01 ≡ TCS-REC-BHS-01.tcs.local).
+     */
+    private function matchAgentHost(string $hostname, array $by_name): ?string {
+        if ($hostname === '') return null;
+        $candidates = [strtolower($hostname)];
+        if (strpos($hostname, '.') !== false) {
+            $candidates[] = strtolower(strstr($hostname, '.', true));
+        }
+        foreach ($candidates as $k) {
+            if (isset($by_name[$k])) return (string) $by_name[$k];
+        }
+        return null;
+    }
+
+    /**
+     * Find Zabbix hosts that look like Milestone DVR / recording-server
+     * boxes by matching the technical host (or visible name) against the
+     * Milestone-reported RS hostnames returned via the LLD. One host.get,
+     * one item.get — both keyed to the candidate hostids only so this
+     * stays cheap regardless of fleet size.
+     *
+     * @return array{ hosts: array<string, array>, by_name: array<string, string>, metrics: array<string, array<string, mixed>> }
+     */
+    private function findDvrAgentHosts(array $site_items): array {
+        $rs_hostnames = [];
+        foreach ($site_items as $bundle) {
+            foreach ($bundle['rs'] ?? [] as $rs) {
+                $h = (string) ($rs['hostname'] ?? '');
+                if ($h === '') continue;
+                $rs_hostnames[strtolower($h)] = true;
+                if (strpos($h, '.') !== false) {
+                    $rs_hostnames[strtolower(strstr($h, '.', true))] = true;
+                }
+            }
+        }
+        if (!$rs_hostnames) {
+            return ['hosts' => [], 'by_name' => [], 'metrics' => []];
+        }
+
+        // Pull a superset and filter in PHP — host.get's filter[host] is
+        // case-sensitive and exact, which won't catch FQDN mismatches.
+        $needles = array_keys($rs_hostnames);
+        $candidates = [];
+        foreach ($needles as $needle) {
+            $rows = $this->safeGet(fn() => API::Host()->get([
+                'output'           => ['hostid', 'host', 'name'],
+                'selectInterfaces' => ['ip', 'main', 'available'],
+                'search'           => ['host' => $needle, 'name' => $needle],
+                'searchByAny'      => true,
+                'monitored_hosts'  => true
+            ]));
+            foreach ($rows as $r) $candidates[$r['hostid']] = $r;
+        }
+        if (!$candidates) {
+            return ['hosts' => [], 'by_name' => [], 'metrics' => []];
+        }
+
+        // Build the by_name index — keyed by the same normalisation we'll
+        // do at match time (lowercased; FQDN's left-label also indexed so
+        // both forms find the host).
+        $by_name = [];
+        foreach ($candidates as $hid => $r) {
+            foreach ([$r['host'] ?? '', $r['name'] ?? ''] as $label) {
+                if ($label === '') continue;
+                $k = strtolower($label);
+                if (isset($rs_hostnames[$k])) $by_name[$k] = $hid;
+                if (strpos($label, '.') !== false) {
+                    $kb = strtolower(strstr($label, '.', true));
+                    if (isset($rs_hostnames[$kb])) $by_name[$kb] = $hid;
+                }
+            }
+        }
+        if (!$by_name) {
+            return ['hosts' => [], 'by_name' => [], 'metrics' => []];
+        }
+        $matched_hids = array_values(array_unique($by_name));
+
+        // One item.get over the matched hosts for the standard agent keys.
+        $key_map = [
+            'cpu'      => ['system.cpu.util', 'system.cpu.util[,,avg1]'],
+            'mem'      => ['vm.memory.utilization', 'vm.memory.size[pused]'],
+            'disk'     => ['vfs.fs.size[C:,pused]', 'vfs.fs.size[/,pused]', 'vfs.fs.pused[/]'],
+            'uptime'   => ['system.uptime'],
+            'os'       => ['system.sw.os', 'system.sw.os[full]'],
+            'agentVer' => ['agent.version']
+        ];
+        $all_keys = [];
+        foreach ($key_map as $keys) foreach ($keys as $k) $all_keys[] = $k;
+
+        $items = $this->safeGet(fn() => API::Item()->get([
+            'output'   => ['itemid', 'hostid', 'key_', 'lastvalue'],
+            'hostids'  => $matched_hids,
+            'filter'   => ['key_' => $all_keys],
+            'webitems' => false
+        ]));
+        $by_host_key = [];
+        foreach ($items as $it) {
+            $by_host_key[$it['hostid']][$it['key_']] = $it['lastvalue'];
+        }
+
+        // Reduce to per-host logical fields. First matching key wins.
+        $metrics = [];
+        foreach ($matched_hids as $hid) {
+            $row = $by_host_key[$hid] ?? [];
+            $logical = [];
+            foreach ($key_map as $logical_name => $keys) {
+                foreach ($keys as $k) {
+                    if (isset($row[$k]) && $row[$k] !== '') {
+                        $logical[$logical_name] = $row[$k];
+                        break;
+                    }
+                }
+            }
+            // Normalise.
+            if (isset($logical['cpu']))    $logical['cpu']    = round((float) $logical['cpu'], 1);
+            if (isset($logical['mem']))    $logical['mem']    = round((float) $logical['mem'], 1);
+            if (isset($logical['disk']))   $logical['disk']   = round((float) $logical['disk'], 1);
+            if (isset($logical['uptime'])) $logical['uptimeD'] = (int) floor((float) $logical['uptime'] / 86400);
+
+            // Primary interface IP.
+            $host = $candidates[$hid] ?? null;
+            if ($host) {
+                foreach ($host['interfaces'] ?? [] as $i) {
+                    if ((int) ($i['main'] ?? 0) === 1) { $logical['ip'] = $i['ip']; break; }
+                }
+                $candidates[$hid]['_unreachable'] = 0;
+                foreach ($host['interfaces'] ?? [] as $i) {
+                    if ((int) ($i['main'] ?? 0) === 1 && (int) ($i['available'] ?? 0) === 2) {
+                        $candidates[$hid]['_unreachable'] = 1;
+                    }
+                }
+            }
+            $metrics[$hid] = $logical;
+        }
+
+        return [
+            'hosts'   => $candidates,
+            'by_name' => $by_name,
+            'metrics' => $metrics
+        ];
     }
 
     /* --------------------------------------------------------------------- */
