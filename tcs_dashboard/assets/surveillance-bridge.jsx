@@ -67,12 +67,16 @@
     };
 
     // Initialise all globals up front so the JSX never sees undefined.
-    window.MILESTONE     = Object.assign({}, EMPTY_MILESTONE);
-    window.SITES         = [];
-    window.SERVERS       = [];
-    window.CAMERAS       = [];
-    window.VMS_ALARMS    = [];
-    window.FLEET_HISTORY = emptyHistory();
+    window.MILESTONE      = Object.assign({}, EMPTY_MILESTONE);
+    window.SITES          = [];
+    window.SERVERS        = [];
+    window.CAMERAS        = [];
+    window.VMS_ALARMS     = [];
+    window.FLEET_HISTORY  = emptyHistory();
+    // Not yet templated on the backend — kept empty so the
+    // Sites / Evidence Lock tabs render an honest empty state.
+    window.SITE_DETAILS   = {};
+    window.EVIDENCE_LOCKS = [];
 
     const applyBoot = (boot) => {
         if (!boot || typeof boot !== "object") return;
@@ -186,6 +190,14 @@
             site: str(a.site, ""),
             ack:  !!a.ack
         }));
+
+        // ── SITE_DETAILS / EVIDENCE_LOCKS (pass through if backend supplies) ──
+        if (boot.siteDetails && typeof boot.siteDetails === "object") {
+            window.SITE_DETAILS = boot.siteDetails;
+        }
+        if (Array.isArray(boot.evidenceLocks)) {
+            window.EVIDENCE_LOCKS = boot.evidenceLocks;
+        }
     };
 
     applyBoot(window.SURVEILLANCE_BOOT);

@@ -96,25 +96,36 @@ class ActionSurveillanceData extends ActionDataBase {
         $history   = $this->buildFleetHistory($all_host_ids, $cameras);
 
         return [
-            'milestone'    => $milestone,
-            'sites'        => $sites,
-            'servers'      => $servers,
-            'cameras'      => $cameras,
-            'alarms'       => $alarms,
-            'fleetHistory' => $history,
-            'ts'           => time()
+            'milestone'     => $milestone,
+            'sites'         => $sites,
+            'servers'       => $servers,
+            'cameras'       => $cameras,
+            'alarms'        => $alarms,
+            'fleetHistory'  => $history,
+            // Per-site address / VLAN / AP-count metadata for the Sites
+            // tab. Not yet templated — return an empty object so the
+            // bridge renders dashes. Future: pull from a host-inventory
+            // lookup or a separate /api/rest/v1/sites enrichment.
+            'siteDetails'   => (object) [],
+            // XProtect /api/rest/v1/evidence rows (case # / locked
+            // cameras / footage range). Not yet templated — empty list
+            // so the Evidence Lock tab shows a clean empty state.
+            'evidenceLocks' => [],
+            'ts'            => time()
         ];
     }
 
     private function emptyPayload(): array {
         return [
-            'milestone'    => null,
-            'sites'        => [],
-            'servers'      => [],
-            'cameras'      => [],
-            'alarms'       => [],
-            'fleetHistory' => null,
-            'ts'           => time()
+            'milestone'     => null,
+            'sites'         => [],
+            'servers'       => [],
+            'cameras'       => [],
+            'alarms'        => [],
+            'fleetHistory'  => null,
+            'siteDetails'   => (object) [],
+            'evidenceLocks' => [],
+            'ts'            => time()
         ];
     }
 

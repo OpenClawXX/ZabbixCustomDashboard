@@ -22,11 +22,13 @@ const TWEAK_DEFAULTS_OV = /*EDITMODE-BEGIN*/{
   "density": "balanced",
   "accent": "#d92929",
   "showSourceBadges": true,
-  "wallSite": ""
+  "wallSite": "",
+  "activeTab": "overview"
 }/*EDITMODE-END*/;
 
 const NVRApp = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS_OV);
+  const [activeTab, setActiveTab] = useStateOV(t.activeTab || "overview");
   useEffectOV(() => {
     document.documentElement.style.setProperty("--zbx", t.accent);
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
@@ -82,18 +84,26 @@ const NVRApp = () => {
         </div>
 
         <div className="tabs">
-          <div className="tab active">Overview</div>
-          <div className="tab">Sites</div>
-          <div className="tab">Cameras <span className="badge">{CAMS_RAW.length.toLocaleString()}</span></div>
-          <div className="tab">Recording Servers <span className="badge">{SRVS_RAW.length}</span></div>
-          <div className="tab">Alarms {_nz(M.activeAlarms) > 0 && <span className="badge warn">{_nz(M.activeAlarms)}</span>}</div>
-          <div className="tab">Storage</div>
-          <div className="tab">Evidence Lock</div>
-          <div className="tab">Reports</div>
+          {(window.NVR_TABS || []).map(tab => (
+            <div
+              key={tab.id}
+              className={"tab" + (activeTab === tab.id ? " active" : "")}
+              onClick={() => { setActiveTab(tab.id); setTweak("activeTab", tab.id); }}
+            >
+              {tab.label}
+              {tab.badge && <span className={"badge" + (tab.badge.kind ? " " + tab.badge.kind : "")}>{tab.badge.v}</span>}
+            </div>
+          ))}
         </div>
 
-        <div className="body" data-screen-label="Surveillance Overview">
-          <FleetWidgets />
+        <div className="body" data-screen-label={`Surveillance · ${activeTab}`}>
+          {activeTab === "overview" && <FleetWidgets />}
+          {activeTab === "sites"    && window.NvrTabSites    && <NvrTabSites />}
+          {activeTab === "cameras"  && window.NvrTabCameras  && <NvrTabCameras />}
+          {activeTab === "servers"  && window.NvrTabServers  && <NvrTabServers />}
+          {activeTab === "alarms"   && window.NvrTabAlarms   && <NvrTabAlarms />}
+          {activeTab === "storage"  && window.NvrTabStorage  && <NvrTabStorage />}
+          {activeTab === "evidence" && window.NvrTabEvidence && <NvrTabEvidence />}
         </div>
       </div>
 
