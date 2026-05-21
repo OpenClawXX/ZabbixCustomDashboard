@@ -1,12 +1,41 @@
 // Surveillance NOC Overview dashboard widgets
 
+// Defensive defaults — if surveillance-bridge.jsx hasn't published yet
+// (cache race, fetch error, …) every read here falls back to 0 / "" so
+// no .toFixed / .toLocaleString throws on undefined.
+const _OV_MS_DEFAULTS = {
+  product: "—", version: "—", managementServer: "—",
+  licenseDeviceTotal: 0, licenseDeviceUsed: 0, licenseHwTotal: 0,
+  recordingServers: 0, recordingServersOnline: 0,
+  failoverServers: 0, mobileServers: 0,
+  smartClientSessions: 0, webClientSessions: 0,
+  activeAlarms: 0, alarmsAck: 0,
+  retentionDays: 0, storageTotalTB: 0, storageUsedTB: 0,
+  evidenceLockSlots: 0, evidenceLockUsed: 0
+};
+const _OV_HISTORY_KEYS = [
+  "totalIngressGbps", "storageWriteMBps", "recordingServersCpu",
+  "camerasOnline", "alarmsPerHour", "archiveLagMin"
+];
+const _ovZ = (n) => { const a = new Array(n); for (let i = 0; i < n; i++) a[i] = 0; return a; };
+const _ovHist = () => {
+  const h = Object.assign({}, window.FLEET_HISTORY || {});
+  for (const k of _OV_HISTORY_KEYS) if (!Array.isArray(h[k]) || !h[k].length) h[k] = _ovZ(48);
+  return h;
+};
+const _ovNz = (v, d = 0) => (typeof v === "number" && !Number.isNaN(v) ? v : d);
+
 const FleetWidgets = () => {
-  const M = window.MILESTONE;
-  const H = window.FLEET_HISTORY;
-  const totalCams = window.SITES.reduce((s, x) => s + x.cams, 0);
-  const onlineCams = window.SITES.reduce((s, x) => s + x.online, 0);
-  const warnCams = window.SITES.reduce((s, x) => s + x.warn, 0);
-  const errCams = window.SITES.reduce((s, x) => s + x.err, 0);
+  const M = Object.assign({}, _OV_MS_DEFAULTS, window.MILESTONE || {});
+  const H = _ovHist();
+  const SITES   = Array.isArray(window.SITES)      ? window.SITES      : [];
+  const SERVERS = Array.isArray(window.SERVERS)    ? window.SERVERS    : [];
+  const CAMERAS = Array.isArray(window.CAMERAS)    ? window.CAMERAS    : [];
+  const ALARMS  = Array.isArray(window.VMS_ALARMS) ? window.VMS_ALARMS : [];
+  const totalCams = SITES.reduce((s, x) => s + _ovNz(x.cams), 0);
+  const onlineCams = SITES.reduce((s, x) => s + _ovNz(x.online), 0);
+  const warnCams = SITES.reduce((s, x) => s + _ovNz(x.warn), 0);
+  const errCams = SITES.reduce((s, x) => s + _ovNz(x.err), 0);
   const storagePct = M.storageTotalTB > 0 ? (M.storageUsedTB / M.storageTotalTB) * 100 : 0;
   const licensePct = M.licenseDeviceTotal > 0 ? (M.licenseDeviceUsed / M.licenseDeviceTotal) * 100 : 0;
 
@@ -14,8 +43,8 @@ const FleetWidgets = () => {
   const tail = (arr) => Array.isArray(arr) && arr.length ? arr[arr.length - 1] : 0;
   const sum  = (arr) => Array.isArray(arr) ? arr.reduce((a, b) => a + (Number(b) || 0), 0) : 0;
 
-  // Alarm-severity breakdown from window.VMS_ALARMS instead of hardcoded.
-  const alarmSev = (window.VMS_ALARMS || []).reduce((acc, a) => {
+  // Alarm-severity breakdown from local snapshot.
+  const alarmSev = ALARMS.reduce((acc, a) => {
     acc[a.sev] = (acc[a.sev] || 0) + 1; return acc;
   }, {});
   const alarmSubline = [
@@ -88,7 +117,7 @@ const FleetWidgets = () => {
               <span className="v">{storagePct.toFixed(0)}<span style={{ fontSize: 18 }}>%</span></span>
               <span className="u">used · {(M.storageTotalTB - M.storageUsedTB).toFixed(1)} TB free</span>
             </div>
-            {window.SITES.map(s => {
+            {SITES.map(s => {
               const pct = (s.storageGB / s.storageCapGB) * 100;
               return (
                 <div key={s.name} className="storage-bar compact">
@@ -119,7 +148,7 @@ const FleetWidgets = () => {
         <div className="card">
           <div className="card-h"><h3>Sites</h3><SourceBadge src="ext"/><div className="h-spacer"/><span className="h-meta">click to drill into a site</span></div>
           <div>
-            {window.SITES.map(s => {
+            {SITES.map(s => {
               const pct = (s.storageGB / s.storageCapGB) * 100;
               return (
                 <div className="site-row" key={s.name}>
@@ -144,7 +173,7 @@ const FleetWidgets = () => {
         <div className="card">
           <div className="card-h"><h3>Recording Servers</h3><SourceBadge src="zbx"/><div className="h-spacer"/><span className="h-meta">zabbix-agent2 + Milestone WMI plugin</span></div>
           <div className="stat-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)" }}>
-            {window.SERVERS.filter(s => s.role !== "Failover").slice(0, 6).map(s => (
+            {SERVERS.filter(s => s.role !== "Failover").slice(0, 6).map(s => (
               <ServerMini key={s.id} s={s} />
             ))}
           </div>
@@ -161,7 +190,7 @@ const FleetWidgets = () => {
           <span className="h-link">Open full alarm log <Icon name="external" size={11}/></span>
         </div>
         <div>
-          {window.VMS_ALARMS.map((a, i) => (
+          {ALARMS.map((a, i) => (
             <div key={i} className={"alarm-row " + (a.ack ? "ack" : "")}>
               <div className="ts">{a.ts}</div>
               <Sev level={a.sev}/>
@@ -179,10 +208,10 @@ const FleetWidgets = () => {
         // Read the tweak panel's selection from the parent (NVRApp publishes
         // it onto window so widget code doesn't need the prop chain).
         // Falls back to the first discovered site.
-        const wallSite = (window.TCS_WALL_SITE && window.SITES.some(s => s.name === window.TCS_WALL_SITE))
+        const wallSite = (window.TCS_WALL_SITE && SITES.some(s => s.name === window.TCS_WALL_SITE))
           ? window.TCS_WALL_SITE
-          : (window.SITES[0] && window.SITES[0].name) || "—";
-        const camsAtSite = window.CAMERAS.filter(c => c.site === wallSite);
+          : (SITES[0] && SITES[0].name) || "—";
+        const camsAtSite = CAMERAS.filter(c => c.site === wallSite);
         return (
           <div className="card">
             <div className="card-h">

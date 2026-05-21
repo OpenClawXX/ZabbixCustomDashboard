@@ -2,6 +2,22 @@
 
 const { useState: useStateOV, useEffect: useEffectOV } = React;
 
+// Safety defaults — if surveillance-bridge.jsx hasn't finished publishing
+// yet, or if a refresh swapped MILESTONE for a partial object, fall back
+// here rather than throwing on .toFixed / .toLocaleString.
+const MS_DEFAULTS = {
+  product: "—", version: "—", managementServer: "—",
+  licenseDeviceTotal: 0, licenseDeviceUsed: 0, licenseHwTotal: 0,
+  recordingServers: 0, recordingServersOnline: 0,
+  failoverServers: 0, mobileServers: 0,
+  smartClientSessions: 0, webClientSessions: 0,
+  activeAlarms: 0, alarmsAck: 0,
+  retentionDays: 0, storageTotalTB: 0, storageUsedTB: 0,
+  evidenceLockSlots: 0, evidenceLockUsed: 0
+};
+const _ms = () => Object.assign({}, MS_DEFAULTS, window.MILESTONE || {});
+const _nz = (v, d = 0) => (typeof v === "number" && !Number.isNaN(v) ? v : d);
+
 const TWEAK_DEFAULTS_OV = /*EDITMODE-BEGIN*/{
   "density": "balanced",
   "accent": "#d92929",
@@ -19,6 +35,13 @@ const NVRApp = () => {
   // without prop drilling) can read it.
   useEffectOV(() => { window.TCS_WALL_SITE = t.wallSite || ""; }, [t.wallSite]);
 
+  // Snapshot the live globals once per render so we never re-deref something
+  // mid-tree that the bridge swapped out underneath us.
+  const M = _ms();
+  const SITES_RAW = Array.isArray(window.SITES) ? window.SITES : [];
+  const CAMS_RAW  = Array.isArray(window.CAMERAS) ? window.CAMERAS : [];
+  const SRVS_RAW  = Array.isArray(window.SERVERS) ? window.SERVERS : [];
+
   const densityVar = t.density === "spacious" ? 1.15 : t.density === "dense" ? 0.85 : 1;
 
   return (
@@ -31,13 +54,13 @@ const NVRApp = () => {
           <div style={{ flex: 1 }}>
             <div className="host-title">
               <h1>Surveillance NOC</h1>
-              <span className="ip">{window.MILESTONE.managementServer}</span>
-              <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>{window.MILESTONE.product}</span>
+              <span className="ip">{M.managementServer}</span>
+              <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>{M.product}</span>
             </div>
             <div className="host-meta">
               {(() => {
-                const rsOnline = window.MILESTONE.recordingServersOnline;
-                const rsTotal  = window.MILESTONE.recordingServers;
+                const rsOnline = _nz(M.recordingServersOnline);
+                const rsTotal  = _nz(M.recordingServers);
                 const allUp    = rsTotal > 0 && rsOnline === rsTotal;
                 const color    = allUp ? "var(--ok)" : (rsOnline > 0 ? "var(--warn)" : "var(--err)");
                 const label    = rsTotal === 0
@@ -45,10 +68,10 @@ const NVRApp = () => {
                   : (allUp ? "All recording servers online" : `${rsOnline} / ${rsTotal} recording servers online`);
                 return <span className="pill"><span className="dot" style={{ background: color }} /> {label}</span>;
               })()}
-              <span className="pill"><span className="lbl">XProtect ver</span> <span className="v">{window.MILESTONE.version}</span></span>
-              <span className="pill"><span className="lbl">Cameras</span> <span className="v">{window.MILESTONE.licenseDeviceUsed.toLocaleString()} / {window.MILESTONE.licenseDeviceTotal.toLocaleString()} licensed</span></span>
-              <span className="pill"><span className="lbl">Storage</span> <span className="v">{window.MILESTONE.storageUsedTB.toFixed(1)} / {window.MILESTONE.storageTotalTB} TB</span></span>
-              <span className="pill"><span className="lbl">Sites</span> <span>{window.SITES.length}</span></span>
+              <span className="pill"><span className="lbl">XProtect ver</span> <span className="v">{M.version}</span></span>
+              <span className="pill"><span className="lbl">Cameras</span> <span className="v">{_nz(M.licenseDeviceUsed).toLocaleString()} / {_nz(M.licenseDeviceTotal).toLocaleString()} licensed</span></span>
+              <span className="pill"><span className="lbl">Storage</span> <span className="v">{_nz(M.storageUsedTB).toFixed(1)} / {_nz(M.storageTotalTB)} TB</span></span>
+              <span className="pill"><span className="lbl">Sites</span> <span>{SITES_RAW.length}</span></span>
             </div>
           </div>
           <div className="timerange">
@@ -61,9 +84,9 @@ const NVRApp = () => {
         <div className="tabs">
           <div className="tab active">Overview</div>
           <div className="tab">Sites</div>
-          <div className="tab">Cameras <span className="badge">{(window.CAMERAS || []).length.toLocaleString()}</span></div>
-          <div className="tab">Recording Servers <span className="badge">{(window.SERVERS || []).length}</span></div>
-          <div className="tab">Alarms {window.MILESTONE.activeAlarms > 0 && <span className="badge warn">{window.MILESTONE.activeAlarms}</span>}</div>
+          <div className="tab">Cameras <span className="badge">{CAMS_RAW.length.toLocaleString()}</span></div>
+          <div className="tab">Recording Servers <span className="badge">{SRVS_RAW.length}</span></div>
+          <div className="tab">Alarms {_nz(M.activeAlarms) > 0 && <span className="badge warn">{_nz(M.activeAlarms)}</span>}</div>
           <div className="tab">Storage</div>
           <div className="tab">Evidence Lock</div>
           <div className="tab">Reports</div>
@@ -83,7 +106,7 @@ const NVRApp = () => {
           <TweakToggle label="Show data-source badges" value={t.showSourceBadges} onChange={v => setTweak("showSourceBadges", v)} />
         </TweakSection>
         <TweakSection title="Camera wall">
-          <TweakSelect label="Site to show" value={t.wallSite} options={window.SITES.map(s => ({value: s.name, label: s.name}))} onChange={v => setTweak("wallSite", v)} />
+          <TweakSelect label="Site to show" value={t.wallSite} options={SITES_RAW.map(s => ({value: s.name, label: s.name}))} onChange={v => setTweak("wallSite", v)} />
         </TweakSection>
       </TweaksPanel>
     </div>
