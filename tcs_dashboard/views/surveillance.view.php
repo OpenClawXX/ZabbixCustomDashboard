@@ -51,10 +51,9 @@ $asset_base = 'modules/tcs_dashboard/assets';
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 
-<!-- Order matters: tweaks → primitives → mock baseline → live overlay → shell → page → app entry -->
+<!-- Order matters: tweaks → primitives → live data bridge (no mock baseline) → shell → page → app entry -->
 <script type="text/babel" src="<?= $asset_base ?>/tweaks-panel.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/primitives.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/nvr-data.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/surveillance-bridge.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/global-nav.jsx"></script>
 <script type="text/babel" src="<?= $asset_base ?>/nvr-shell.jsx"></script>

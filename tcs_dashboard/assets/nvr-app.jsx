@@ -6,7 +6,7 @@ const TWEAK_DEFAULTS_OV = /*EDITMODE-BEGIN*/{
   "density": "balanced",
   "accent": "#d92929",
   "showSourceBadges": true,
-  "wallSite": "Bryant HS"
+  "wallSite": ""
 }/*EDITMODE-END*/;
 
 const NVRApp = () => {
@@ -15,6 +15,9 @@ const NVRApp = () => {
     document.documentElement.style.setProperty("--zbx", t.accent);
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
   }, [t.accent, t.showSourceBadges]);
+  // Publish the wall-site tweak onto window so FleetWidgets (rendered
+  // without prop drilling) can read it.
+  useEffectOV(() => { window.TCS_WALL_SITE = t.wallSite || ""; }, [t.wallSite]);
 
   const densityVar = t.density === "spacious" ? 1.15 : t.density === "dense" ? 0.85 : 1;
 
@@ -32,7 +35,16 @@ const NVRApp = () => {
               <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>{window.MILESTONE.product}</span>
             </div>
             <div className="host-meta">
-              <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> All recording servers online</span>
+              {(() => {
+                const rsOnline = window.MILESTONE.recordingServersOnline;
+                const rsTotal  = window.MILESTONE.recordingServers;
+                const allUp    = rsTotal > 0 && rsOnline === rsTotal;
+                const color    = allUp ? "var(--ok)" : (rsOnline > 0 ? "var(--warn)" : "var(--err)");
+                const label    = rsTotal === 0
+                  ? "No recording servers discovered"
+                  : (allUp ? "All recording servers online" : `${rsOnline} / ${rsTotal} recording servers online`);
+                return <span className="pill"><span className="dot" style={{ background: color }} /> {label}</span>;
+              })()}
               <span className="pill"><span className="lbl">XProtect ver</span> <span className="v">{window.MILESTONE.version}</span></span>
               <span className="pill"><span className="lbl">Cameras</span> <span className="v">{window.MILESTONE.licenseDeviceUsed.toLocaleString()} / {window.MILESTONE.licenseDeviceTotal.toLocaleString()} licensed</span></span>
               <span className="pill"><span className="lbl">Storage</span> <span className="v">{window.MILESTONE.storageUsedTB.toFixed(1)} / {window.MILESTONE.storageTotalTB} TB</span></span>
@@ -41,7 +53,7 @@ const NVRApp = () => {
           </div>
           <div className="timerange">
             <Icon name="calendar" />
-            <span className="range-val">May 7 09:42 — May 8 09:42</span>
+            <span className="range-val">Last 24h · live</span>
             <Icon name="chevron" />
           </div>
         </div>
@@ -49,16 +61,15 @@ const NVRApp = () => {
         <div className="tabs">
           <div className="tab active">Overview</div>
           <div className="tab">Sites</div>
-          <div className="tab">Cameras <span className="badge">1,147</span></div>
-          <div className="tab">Recording Servers <span className="badge">8</span></div>
-          <div className="tab">Alarms <span className="badge warn">12</span></div>
+          <div className="tab">Cameras <span className="badge">{(window.CAMERAS || []).length.toLocaleString()}</span></div>
+          <div className="tab">Recording Servers <span className="badge">{(window.SERVERS || []).length}</span></div>
+          <div className="tab">Alarms {window.MILESTONE.activeAlarms > 0 && <span className="badge warn">{window.MILESTONE.activeAlarms}</span>}</div>
           <div className="tab">Storage</div>
           <div className="tab">Evidence Lock</div>
           <div className="tab">Reports</div>
         </div>
 
         <div className="body" data-screen-label="Surveillance Overview">
-          <DemoBanner name="Surveillance NOC Overview" />
           <FleetWidgets />
         </div>
       </div>

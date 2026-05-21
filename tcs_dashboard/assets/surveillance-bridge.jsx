@@ -2,140 +2,58 @@
 //
 // Live-data bridge for the Surveillance NOC view. Reads
 // window.SURVEILLANCE_BOOT (server-collected by ActionSurveillanceData)
-// and *overlays* the matching fields onto the window globals that
-// nvr-overview.jsx already consumes (MILESTONE, SITES, SERVERS, CAMERAS,
-// VMS_ALARMS). Anything the backend doesn't supply yet (storage TB,
-// Smart Client sessions, camera FPS / bitrate, …) is left alone so the
-// mock baseline from nvr-data.jsx keeps the UI rendering while the
-// templates grow.
+// and publishes the window globals that nvr-overview.jsx / nvr-app.jsx
+// consume: MILESTONE, SITES, SERVERS, CAMERAS, VMS_ALARMS, FLEET_HISTORY.
 //
-// IMPORTANT: this file must be loaded AFTER nvr-data.jsx so the mock
-// values are already on window.* and we can overlay onto them.
+// This file is now the SOLE source of those globals on the Overview
+// page — nvr-data.jsx (mock baseline) is no longer loaded by
+// surveillance.view.php. Every key gets a numeric / array / string
+// default so the JSX renders zero / "—" rather than crashing on
+// undefined when the backend has nothing yet for a field.
 
 (function () {
     const isNum = (v) => typeof v === "number" && !Number.isNaN(v);
-    const overlay = (base, fresh) => {
-        // Only copy non-null / non-undefined keys from fresh onto base.
-        // null in the boot payload means "backend doesn't know yet —
-        // keep the mock value" rather than "force the field to null".
-        if (!fresh || typeof fresh !== "object") return base;
-        const out = Object.assign({}, base || {});
-        for (const k of Object.keys(fresh)) {
-            const v = fresh[k];
-            if (v === null || v === undefined) continue;
-            out[k] = v;
-        }
-        return out;
+    const num   = (v, dflt = 0) => (isNum(v) ? v : (isNum(Number(v)) ? Number(v) : dflt));
+    const str   = (v, dflt = "—") => (v === null || v === undefined || v === "" ? dflt : String(v));
+
+    // ── Empty defaults — what every global looks like before boot/poll ──
+    const EMPTY_MILESTONE = {
+        product:                "—",
+        version:                "—",
+        managementServer:       "—",
+        smtpRouted:             false,
+        licenseDeviceTotal:     0,
+        licenseDeviceUsed:      0,
+        licenseHwTotal:         0,
+        recordingServers:       0,
+        recordingServersOnline: 0,
+        failoverServers:        0,
+        mobileServers:          0,
+        smartClientSessions:    0,
+        webClientSessions:      0,
+        activeAlarms:           0,
+        alarmsAck:              0,
+        retentionDays:          0,
+        storageTotalTB:         0,
+        storageUsedTB:          0,
+        evidenceLockSlots:      0,
+        evidenceLockUsed:       0
     };
 
-    const applyBoot = (boot) => {
-        if (!boot || typeof boot !== "object") return;
+    const EMPTY_HISTORY_KEYS = [
+        "totalIngressGbps", "storageWriteMBps", "recordingServersCpu",
+        "camerasOnline", "alarmsPerHour", "archiveLagMin"
+    ];
 
-        // ── MILESTONE summary ─────────────────────────────────────────
-        if (boot.milestone) {
-            window.MILESTONE = overlay(window.MILESTONE, boot.milestone);
-        }
-
-        // ── SITES ─────────────────────────────────────────────────────
-        if (Array.isArray(boot.sites) && boot.sites.length) {
-            // Replace wholesale — site identity comes from the backend now.
-            // Carry storageGB / storageCapGB defaults from mock so the
-            // Recording Storage tile still has bars to render.
-            const mock_by_name = {};
-            for (const s of (window.SITES || [])) mock_by_name[s.name] = s;
-            window.SITES = boot.sites.map(s => {
-                const fallback = mock_by_name[s.name] || {};
-                return {
-                    name:         s.name,
-                    cams:         isNum(s.cams)   ? s.cams   : (fallback.cams   || 0),
-                    online:       isNum(s.online) ? s.online : (fallback.online || 0),
-                    warn:         isNum(s.warn)   ? s.warn   : (fallback.warn   || 0),
-                    err:          isNum(s.err)    ? s.err    : (fallback.err    || 0),
-                    server:       s.server  || fallback.server  || "—",
-                    storageGB:    isNum(s.storageGB)    ? s.storageGB    : (fallback.storageGB    || 0),
-                    storageCapGB: isNum(s.storageCapGB) ? s.storageCapGB : (fallback.storageCapGB || 1)
-                };
-            });
-        }
-
-        // ── SERVERS (recording servers) ───────────────────────────────
-        if (Array.isArray(boot.servers) && boot.servers.length) {
-            // Same overlay approach — keep mock fields (cpu/mem/disk %)
-            // until the RS template grows host-level OS items.
-            const mock_by_id = {};
-            for (const s of (window.SERVERS || [])) mock_by_id[s.id] = s;
-            window.SERVERS = boot.servers.map(s => {
-                const fallback = mock_by_id[s.id] || {};
-                return Object.assign({}, fallback, {
-                    id:        s.id,
-                    site:      s.site || fallback.site,
-                    role:      s.role || fallback.role || "Recording Server",
-                    state:     s.state || (fallback.state || "ok"),
-                    handshakeAge: s.handshakeAge,
-                    // Numeric perf fields: keep mock until templated.
-                    cpu:       isNum(s.cpu)  ? s.cpu  : (fallback.cpu  || 0),
-                    mem:       isNum(s.mem)  ? s.mem  : (fallback.mem  || 0),
-                    disk:      isNum(s.disk) ? s.disk : (fallback.disk || 0),
-                    chans:     isNum(s.chans)     ? s.chans     : (fallback.chans     || 0),
-                    recording: isNum(s.recording) ? s.recording : (fallback.recording || 0)
-                });
-            });
-        }
-
-        // ── CAMERAS ───────────────────────────────────────────────────
-        if (Array.isArray(boot.cameras) && boot.cameras.length) {
-            // The mock list is small (~15 rows) but real installs have
-            // 2,500+. Replace wholesale, but limit the camera-wall
-            // render to the active site (the JSX already filters).
-            window.CAMERAS = boot.cameras.map(c => ({
-                id:        c.id,
-                site:      c.site,
-                loc:       c.loc || c.name || c.id,
-                model:     c.model || "—",
-                res:       c.res       || "—",
-                fps:       isNum(c.fps)     ? c.fps     : 0,
-                bitrate:   isNum(c.bitrate) ? c.bitrate : 0,
-                codec:     c.codec     || "—",
-                recording: c.recording || "—",
-                state:     mapCamState(c.state),
-                ip:        c.ip   || "",
-                mac:       c.mac  || "",
-                poe:       isNum(c.poe) ? c.poe : 0,
-                server:    c.server || "",
-                motion12h: isNum(c.motion12h) ? c.motion12h : 0,
-                hostid:    c.hostid || null,
-                warnMsg:   c.warnMsg || null,
-                errMsg:    c.errMsg  || null
-            }));
-        }
-
-        // ── FLEET_HISTORY (24h sparklines) ────────────────────────────
-        // Per-key overlay: any non-null array from the backend replaces
-        // the mock series; null keys keep the mock so charts that the
-        // backend can't drive yet (ingress Gbps, storage write, RS CPU,
-        // archive lag) still render.
-        if (boot.fleetHistory && typeof boot.fleetHistory === "object") {
-            const base = Object.assign({}, window.FLEET_HISTORY || {});
-            for (const k of Object.keys(boot.fleetHistory)) {
-                const v = boot.fleetHistory[k];
-                if (Array.isArray(v) && v.length) base[k] = v;
-            }
-            window.FLEET_HISTORY = base;
-        }
-
-        // ── VMS_ALARMS ────────────────────────────────────────────────
-        if (Array.isArray(boot.alarms)) {
-            // Replace — boot.alarms is the authoritative open-problem
-            // list from Zabbix. Empty array is a valid "all clear".
-            window.VMS_ALARMS = boot.alarms.map(a => ({
-                ts:   a.ts,
-                sev:  a.sev,
-                cam:  a.cam,
-                msg:  a.msg,
-                site: a.site || "",
-                ack:  !!a.ack
-            }));
-        }
+    const zerosArray = (n) => {
+        const a = new Array(n);
+        for (let i = 0; i < n; i++) a[i] = 0;
+        return a;
+    };
+    const emptyHistory = () => {
+        const out = {};
+        for (const k of EMPTY_HISTORY_KEYS) out[k] = zerosArray(48);
+        return out;
     };
 
     // Camera-state mapping: the JSX expects "ok" / "warn" / "err".
@@ -146,6 +64,123 @@
         if (s === "ok" || s === "warn" || s === "err") return s;
         if (s === "disabled" || s === "unknown") return "err";
         return "ok";
+    };
+
+    // Initialise all globals up front so the JSX never sees undefined.
+    window.MILESTONE     = Object.assign({}, EMPTY_MILESTONE);
+    window.SITES         = [];
+    window.SERVERS       = [];
+    window.CAMERAS       = [];
+    window.VMS_ALARMS    = [];
+    window.FLEET_HISTORY = emptyHistory();
+
+    const applyBoot = (boot) => {
+        if (!boot || typeof boot !== "object") return;
+
+        // ── MILESTONE summary ─────────────────────────────────────────
+        const m = boot.milestone || {};
+        window.MILESTONE = {
+            product:                str(m.product, EMPTY_MILESTONE.product),
+            version:                str(m.version, EMPTY_MILESTONE.version),
+            managementServer:       str(m.managementServer, EMPTY_MILESTONE.managementServer),
+            smtpRouted:             !!m.smtpRouted,
+            licenseDeviceTotal:     num(m.licenseDeviceTotal),
+            licenseDeviceUsed:      num(m.licenseDeviceUsed),
+            licenseHwTotal:         num(m.licenseHwTotal),
+            recordingServers:       num(m.recordingServers),
+            recordingServersOnline: num(m.recordingServersOnline),
+            failoverServers:        num(m.failoverServers),
+            mobileServers:          num(m.mobileServers),
+            smartClientSessions:    num(m.smartClientSessions),
+            webClientSessions:      num(m.webClientSessions),
+            activeAlarms:           num(m.activeAlarms),
+            alarmsAck:              num(m.alarmsAck),
+            retentionDays:          num(m.retentionDays),
+            storageTotalTB:         num(m.storageTotalTB),
+            storageUsedTB:          num(m.storageUsedTB),
+            evidenceLockSlots:      num(m.evidenceLockSlots),
+            evidenceLockUsed:       num(m.evidenceLockUsed)
+        };
+
+        // ── SITES ─────────────────────────────────────────────────────
+        window.SITES = (Array.isArray(boot.sites) ? boot.sites : []).map(s => ({
+            name:         str(s.name, "—"),
+            cams:         num(s.cams),
+            online:       num(s.online),
+            warn:         num(s.warn),
+            err:          num(s.err),
+            server:       str(s.server, "—"),
+            // Default capacity to 1 so percent-of math doesn't divide by zero.
+            storageGB:    num(s.storageGB),
+            storageCapGB: num(s.storageCapGB, 1) || 1
+        }));
+
+        // ── SERVERS (recording servers) ───────────────────────────────
+        window.SERVERS = (Array.isArray(boot.servers) ? boot.servers : []).map(s => ({
+            id:           str(s.id, "—"),
+            rsid:         s.rsid || null,
+            site:         str(s.site, "—"),
+            role:         str(s.role, "Recording Server"),
+            os:           str(s.os, "—"),
+            cpu:          num(s.cpu),
+            mem:          num(s.mem),
+            disk:         num(s.disk),
+            raid:         s.raid || "ok",
+            chans:        num(s.chans),
+            recording:    num(s.recording),
+            archiveLagH:  num(s.archiveLagH),
+            agent:        str(s.agent, "—"),
+            ip:           str(s.ip, "—"),
+            uptimeD:      num(s.uptimeD),
+            lastBackup:   str(s.lastBackup, "—"),
+            state:        s.state || "ok",
+            handshakeAge: num(s.handshakeAge),
+            agentHostid:  s.agentHostid || null
+        }));
+
+        // ── CAMERAS ───────────────────────────────────────────────────
+        window.CAMERAS = (Array.isArray(boot.cameras) ? boot.cameras : []).map(c => ({
+            id:        str(c.id, "—"),
+            site:      str(c.site, "—"),
+            loc:       str(c.loc || c.name, c.id || "—"),
+            model:     str(c.model, "—"),
+            res:       str(c.res, "—"),
+            fps:       num(c.fps),
+            bitrate:   num(c.bitrate),
+            codec:     str(c.codec, "—"),
+            recording: str(c.recording, "—"),
+            state:     mapCamState(c.state),
+            ip:        str(c.ip, ""),
+            mac:       str(c.mac, ""),
+            poe:       num(c.poe),
+            server:    str(c.server, ""),
+            motion12h: num(c.motion12h),
+            hostid:    c.hostid || null,
+            warnMsg:   c.warnMsg || null,
+            errMsg:    c.errMsg  || null
+        }));
+
+        // ── FLEET_HISTORY (24h sparklines) ────────────────────────────
+        // Per-key: any non-null/non-empty array from the backend lands
+        // directly; everything else keeps the zero baseline so the
+        // SVG charts still have something to draw.
+        const baseHistory = emptyHistory();
+        const bh = boot.fleetHistory && typeof boot.fleetHistory === "object" ? boot.fleetHistory : {};
+        for (const k of EMPTY_HISTORY_KEYS) {
+            const v = bh[k];
+            if (Array.isArray(v) && v.length) baseHistory[k] = v;
+        }
+        window.FLEET_HISTORY = baseHistory;
+
+        // ── VMS_ALARMS ────────────────────────────────────────────────
+        window.VMS_ALARMS = (Array.isArray(boot.alarms) ? boot.alarms : []).map(a => ({
+            ts:   str(a.ts, ""),
+            sev:  a.sev || "info",
+            cam:  str(a.cam, "—"),
+            msg:  str(a.msg, ""),
+            site: str(a.site, ""),
+            ack:  !!a.ack
+        }));
     };
 
     applyBoot(window.SURVEILLANCE_BOOT);
