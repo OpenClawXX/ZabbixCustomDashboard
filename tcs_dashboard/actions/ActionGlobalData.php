@@ -470,6 +470,13 @@ class ActionGlobalData extends ActionDataBase {
         // the wireless dashboard's totals.
         $wireless = $this->collectWirelessFleetKpis();
 
+        // Surveillance enrichment — pull milestone.cam.status[*] across all
+        // Milestone Site hosts. The per-camera Zabbix hosts are filtered out
+        // by EXCLUDE_HOST_GROUPS above (their SNMP-interface state would
+        // otherwise mark thousands as "down"); these status items live on
+        // the Site host and carry the combined-status calc per camera.
+        $surveillance = $this->collectSurveillanceFleetKpis();
+
         // Domain labels + click-through targets — mirror the design's
         // SystemSnapshot tiles so the React renderer doesn't need changes.
         static $meta = [
@@ -502,17 +509,34 @@ class ActionGlobalData extends ActionDataBase {
         $out = [];
         foreach ($by_domain as $id => $d) {
             unset($d['_top_sev']);
+            // For the NVR domain, swap the host-based totals (which are 0
+            // by design since per-camera hosts are excluded) for the
+            // Milestone-side camera fleet counts before status / kpis
+            // are computed. Keeps status-colour logic honest.
+            if ($id === 'nvr' && $surveillance['total'] !== null) {
+                $d['total'] = $surveillance['total'];
+                $d['up']    = $surveillance['online'];
+                $d['down']  = max(0, $surveillance['total'] - $surveillance['online']);
+            }
             $d['status'] = $this->domainStatus($d);
-            $d['kpis']   = $this->buildDomainKpis($id, $d, $wireless);
+            $d['kpis']   = $this->buildDomainKpis($id, $d, $wireless, $surveillance);
             // Live wireless: surface the current client total as a flat
             // sparkline so the labelled "Connected clients" graph isn't a
             // dead line of zeros until proper history wiring lands.
             if ($id === 'wireless' && $wireless['clients_total'] !== null) {
                 $d['spark'] = array_fill(0, 24, $wireless['clients_total']);
             }
+            // NVR sparkline: flat at current online count, same treatment.
+            if ($id === 'nvr' && $surveillance['online'] !== null) {
+                $d['spark'] = array_fill(0, 24, $surveillance['online']);
+            }
             $tileMeta = $meta[$id] ?? [];
             // Refine the subtitle with a live host count if we have one.
-            if ($d['total'] > 0 && isset($tileMeta['sub'])) {
+            // NVR uses camera count instead of host count since per-camera
+            // hosts don't appear in $d['total'] anymore.
+            if ($id === 'nvr' && $surveillance['total']) {
+                $tileMeta['sub'] = trim(($tileMeta['sub'] ?? '').' · '.number_format($surveillance['total']).' cameras');
+            } elseif ($d['total'] > 0 && isset($tileMeta['sub'])) {
                 $tileMeta['sub'] = trim($tileMeta['sub'].' · '.number_format($d['total']).' hosts');
             }
             $out[] = array_merge(['id' => $id], $tileMeta, $d);
@@ -537,8 +561,11 @@ class ActionGlobalData extends ActionDataBase {
      *     critical: ?int, offline: ?int,
      *     clients_total: ?int, rf_health: ?int
      * } $wireless
+     * @param array{
+     *     online: ?int, total: ?int, faulted: ?int, disabled: ?int
+     * } $surveillance
      */
-    private function buildDomainKpis(string $domain, array $d, array $wireless): array {
+    private function buildDomainKpis(string $domain, array $d, array $wireless, array $surveillance = []): array {
         $fmt = fn(?int $n) => $n === null ? '—' : number_format($n);
         $up = $d['up']; $total = $d['total']; $down = $d['down'];
         $withProblems = $d['hosts_with_problems'];
@@ -579,10 +606,24 @@ class ActionGlobalData extends ActionDataBase {
             ];
         }
 
-        // nvr / surveillance
+        // nvr / surveillance — prefer Milestone-side fleet counts (from
+        // milestone.cam.status[*]) over Zabbix host counts. The per-
+        // camera hosts are filtered out of $hosts by EXCLUDE_HOST_GROUPS;
+        // $up / $total in $d are normally zero on the NVR card. The
+        // caller in buildDomains() also swaps these out of $d, so this
+        // branch can just read $up / $total directly and the numbers
+        // come out right either way.
+        $camsOnline   = $surveillance['online']   ?? $up;
+        $camsTotal    = $surveillance['total']    ?? $total;
+        $camsFaulted  = $surveillance['faulted']  ?? null;
+        $camsDisabled = $surveillance['disabled'] ?? null;
+        $camsDown     = max(0, $camsTotal - $camsOnline);
+        $disabledNote = $camsDisabled !== null && $camsDisabled > 0
+            ? $fmt($camsDisabled).' disabled in XProtect'
+            : '';
         return [
-            ['label' => 'Cameras online', 'value' => $fmt($up).' / '.$fmt($total), 'note' => $down > 0 ? $fmt($down).' unreachable' : 'all online'],
-            ['label' => 'With problems',  'value' => $fmt($withProblems), 'note' => $d['err'] > 0 ? $fmt($d['err']).' critical' : ''],
+            ['label' => 'Cameras online', 'value' => $fmt($camsOnline).' / '.$fmt($camsTotal), 'note' => $camsDown > 0 ? $fmt($camsDown).' offline / faulted' : 'all online'],
+            ['label' => 'With faults',    'value' => $fmt($camsFaulted), 'note' => $disabledNote],
             ['label' => 'Open alerts',    'value' => $fmt($d['problems']), 'note' => $d['err'] > 0 ? 'inc. '.$fmt($d['err']).' critical' : ''],
         ];
     }
@@ -629,6 +670,52 @@ class ActionGlobalData extends ActionDataBase {
             'offline'       => $offline,
             'clients_total' => $sawClients   ? $clients : null,
             'rf_health'     => $rfHealth
+        ];
+    }
+
+    /**
+     * Pull every milestone.cam.status[<cam_id>] item across all monitored
+     * hosts. These live on the Milestone Site host(s), one per LLD-
+     * discovered camera. Each carries the bit-summed combined status:
+     *
+     *    -1  Disabled in XProtect (excluded from "total")
+     *     0  OK (counted as "online")
+     *    1-7 Various fault combinations (counted as "with problems")
+     *
+     * We compute online/total here so the global dashboard's NVR tile
+     * can show real numbers even though the per-camera Zabbix hosts are
+     * filtered out of the host-availability rollup (see
+     * EXCLUDE_HOST_GROUPS — they'd otherwise dominate every counter).
+     *
+     * @return array{online: ?int, total: ?int, faulted: ?int, disabled: ?int}
+     */
+    private function collectSurveillanceFleetKpis(): array {
+        $items = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['key_', 'lastvalue', 'lastclock'],
+            'search'      => ['key_' => 'milestone.cam.status['],
+            'startSearch' => true,
+            'monitored'   => true,
+            'limit'       => 50000
+        ]));
+        if (!$items) {
+            return ['online' => null, 'total' => null, 'faulted' => null, 'disabled' => null];
+        }
+        $online = 0; $total = 0; $faulted = 0; $disabled = 0;
+        foreach ($items as $it) {
+            if (!preg_match('/^milestone\.cam\.status\[/', (string) $it['key_'])) continue;
+            $val = (string) ($it['lastvalue'] ?? '');
+            if ($val === '') continue;
+            $code = (int) $val;
+            if ($code === -1) { $disabled++; continue; }
+            $total++;
+            if      ($code === 0) $online++;
+            elseif  ($code > 0)   $faulted++;
+        }
+        return [
+            'online'   => $online,
+            'total'    => $total,
+            'faulted'  => $faulted,
+            'disabled' => $disabled
         ];
     }
 
