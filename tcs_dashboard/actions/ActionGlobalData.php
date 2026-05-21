@@ -30,6 +30,26 @@ class ActionGlobalData extends ActionDataBase {
      *  they'll get their own overview tile elsewhere. */
     private const HEATMAP_EXCLUDE_HOSTS = ['XIQ_AP'];
 
+    /** Host groups whose members are excluded from the global dashboard
+     *  entirely — totals, sites, domains, problems, the lot. Currently
+     *  only the auto-discovered per-camera hosts created by the
+     *  Milestone XProtect template's host_prototype:
+     *
+     *    Each camera has an SNMP interface as its main interface (set
+     *    by the host_prototype) but most cameras have no SNMP items
+     *    polling that interface (only Bosch models link the SNMP
+     *    vendor template). Zabbix marks the interface as unavailable
+     *    after a few failed checks, and the global "X / Y hosts up"
+     *    counter buckets thousands of cameras as "down".
+     *
+     *  Per-camera health lives in its own dedicated Surveillance
+     *  dashboard (tcs.surveillance.view); the global rollup is for
+     *  infrastructure (servers, switches, APs, NVRs) where camera
+     *  noise actively misleads. */
+    private const EXCLUDE_HOST_GROUPS = [
+        'Discovered hosts/Milestone Cameras',
+    ];
+
     /** Template-name substrings that bucket a host into a domain card. */
     private const DOMAIN_PATTERNS = [
         'wireless' => ['XIQ', 'Extreme AP', 'WLC', 'wireless'],
@@ -82,6 +102,22 @@ class ActionGlobalData extends ActionDataBase {
             'monitored_hosts'       => true,
             'preservekeys'          => true
         ]));
+
+        // Drop hosts belonging to any EXCLUDE_HOST_GROUPS group before
+        // anything downstream sees them. The discovered Milestone
+        // camera hosts in particular flood the host-availability
+        // counters with thousands of "down" SNMP interfaces that
+        // operators monitor via the dedicated Surveillance dashboard.
+        if (self::EXCLUDE_HOST_GROUPS) {
+            $hosts = array_filter($hosts, function ($h) {
+                foreach ($h['hostgroups'] ?? [] as $g) {
+                    if (in_array($g['name'] ?? '', self::EXCLUDE_HOST_GROUPS, true)) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+        }
 
         // Zabbix 7.0+ renamed proxy.host to proxy.name. Use 'name'.
         $proxies = $this->safeGet(fn() => API::Proxy()->get(['output' => ['proxyid', 'name']]));
