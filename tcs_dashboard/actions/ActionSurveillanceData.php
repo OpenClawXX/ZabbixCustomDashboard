@@ -173,6 +173,7 @@ class ActionSurveillanceData extends ActionDataBase {
      *       site:    [logical => lastvalue, ...],
      *       rs:      [rsId => [field => value, ...]],
      *       cam:     [camId => [field => value, ...]],
+     *       grp:     [groupId => [field => value, cameraIds: [...], ...]]
      *   ]]
      */
     private function collectSiteItems(array $host_ids): array {
@@ -192,7 +193,7 @@ class ActionSurveillanceData extends ActionDataBase {
             $hid = (string) $it['hostid'];
             $key = (string) $it['key_'];
             $val = $it['lastvalue'] ?? '';
-            $out[$hid] ??= ['site' => [], 'rs' => [], 'cam' => []];
+            $out[$hid] ??= ['site' => [], 'rs' => [], 'cam' => [], 'grp' => []];
 
             // Direct site-level scalars
             if (isset($key_to_site_logical[$key])) {
@@ -211,6 +212,27 @@ class ActionSurveillanceData extends ActionDataBase {
             if (preg_match('/^milestone\.cam\.([a-z.]+)\[([^\]]+)\]$/i', $key, $m)) {
                 $field = $m[1]; $cam_id = trim($m[2], '"\'');
                 $out[$hid]['cam'][$cam_id][$field] = $val;
+                continue;
+            }
+
+            // Per-group items: milestone.grp.<field>[<groupId>]
+            // The 'raw' field is a JSON blob with cameraIds[] / hardwareIds[];
+            // decode it here so buildSites() can bucket cameras by group
+            // without re-parsing per row.
+            if (preg_match('/^milestone\.grp\.([a-z.]+)\[([^\]]+)\]$/i', $key, $m)) {
+                $field  = $m[1];
+                $grp_id = trim($m[2], '"\'');
+                if ($field === 'raw' && $val !== '') {
+                    $blob = json_decode($val, true);
+                    if (is_array($blob)) {
+                        $out[$hid]['grp'][$grp_id] = array_merge(
+                            $out[$hid]['grp'][$grp_id] ?? [],
+                            $blob
+                        );
+                    }
+                } else {
+                    $out[$hid]['grp'][$grp_id][$field] = $val;
+                }
                 continue;
             }
         }
@@ -307,23 +329,23 @@ class ActionSurveillanceData extends ActionDataBase {
     /* --------------------------------------------------------------------- */
 
     /**
-     * Per-site rollup for the dashboard's SITES tile. Bucket by site host —
-     * each XProtect "site" in the template = one Zabbix host running the
-     * site template. Storage capacity isn't templated yet so storageGB /
-     * storageCapGB stay null.
+     * Per-site rollup for the dashboard's SITES tile.
+     *
+     * Two bucketing modes:
+     *   1. By Milestone camera-group (preferred). When any site host's
+     *      milestone.grp.raw[*] items are populated, each group becomes
+     *      a "site" row and cameras are bucketed via the group's
+     *      cameraIds list. This matches how operators think about the
+     *      fleet in Smart Client (Bryant HS folder → cameras under it).
+     *   2. By Zabbix site host (fallback). One row per Milestone host;
+     *      cameras bucketed by which host discovered them. Used when
+     *      milestone_groups_refresh.sh hasn't run yet or the install
+     *      doesn't use camera groups.
+     *
+     * Storage capacity isn't templated yet so storageGB / storageCapGB
+     * stay null in both modes.
      */
     private function buildSites(array $site_hosts, array $site_items, array $cam_hosts, array $problems): array {
-        // Cross-reference camera Zabbix hosts back to their site via the
-        // cam_id tag stamped by the host_prototype. cam_id matches the
-        // Milestone camera GUID, so we can use it to attribute each
-        // discovered host to its site host.
-        $camid_to_site = [];
-        foreach ($site_items as $site_hid => $bundle) {
-            foreach ($bundle['cam'] ?? [] as $cam_id => $_) {
-                $camid_to_site[$cam_id] = $site_hid;
-            }
-        }
-
         $problems_by_host = [];
         foreach ($problems as $p) {
             foreach ($p['hosts'] ?? [] as $h) {
@@ -331,6 +353,16 @@ class ActionSurveillanceData extends ActionDataBase {
             }
         }
 
+        // Group bucketing takes priority when any host has group data.
+        $any_groups = false;
+        foreach ($site_items as $bundle) {
+            if (!empty($bundle['grp'])) { $any_groups = true; break; }
+        }
+        if ($any_groups) {
+            return $this->buildSitesByGroup($site_hosts, $site_items, $problems_by_host);
+        }
+
+        // Fallback: one row per Zabbix site host (the original behaviour).
         $out = [];
         foreach ($site_hosts as $hid => $h) {
             $bundle = $site_items[$hid] ?? ['site' => [], 'rs' => [], 'cam' => []];
@@ -366,10 +398,95 @@ class ActionSurveillanceData extends ActionDataBase {
                 'server'       => $primary_rs ?? '—',
                 'storageGB'    => null,
                 'storageCapGB' => null,
-                'problems'     => $problems_by_host[$hid] ?? 0
+                'problems'     => $problems_by_host[$hid] ?? 0,
+                'source'       => 'host'
             ];
         }
 
+        usort($out, fn($a, $b) => $b['err'] <=> $a['err'] ?: $b['warn'] <=> $a['warn'] ?: strcmp($a['name'], $b['name']));
+        return $out;
+    }
+
+    /**
+     * Sites bucketed by Milestone camera group — the operator-facing
+     * organisational axis (the folders Smart Client shows). Each group
+     * becomes one row; cameras are attributed to a group via the
+     * cameraIds list inside milestone.grp.raw[<groupId>].
+     *
+     * Cross-host group merge: if two Milestone Zabbix hosts both report
+     * the same group GUID (unusual — would mean two separate XProtect
+     * sites pointing at the same group) the rows are summed.
+     */
+    private function buildSitesByGroup(array $site_hosts, array $site_items, array $problems_by_host): array {
+        // Camera-status lookup keyed by camera GUID (folds enabled / status
+        // across every host so a group with cameras spread over multiple
+        // hosts still gets the right rollup).
+        $cam_state = [];   // cam_id => ['enabled' => bool, 'status' => int]
+        foreach ($site_items as $bundle) {
+            foreach ($bundle['cam'] ?? [] as $cam_id => $cam) {
+                $enabled = strtolower((string) ($cam['enabled'] ?? '')) === 'true';
+                $status  = isset($cam['status']) ? (int) $cam['status'] : -2; // -2 = no data
+                $cam_state[$cam_id] = ['enabled' => $enabled, 'status' => $status];
+            }
+        }
+
+        // Primary RS per site host — used as the default 'server' label for
+        // any group surfaced by that host. Cross-host groups get the first
+        // host's RS to avoid an arbitrary winner.
+        $primary_rs_by_host = [];
+        foreach ($site_items as $hid => $bundle) {
+            foreach ($bundle['rs'] ?? [] as $rs_id => $rs) {
+                $primary_rs_by_host[$hid] = $rs['hostname'] ?? $rs_id;
+                break;
+            }
+        }
+
+        $sites = [];
+        foreach ($site_items as $hid => $bundle) {
+            foreach ($bundle['grp'] ?? [] as $grp_id => $grp) {
+                $key = (string) $grp_id;
+                if (!isset($sites[$key])) {
+                    $sites[$key] = [
+                        'name'         => (string) ($grp['name'] ?? $grp['path'] ?? $grp_id),
+                        'groupId'      => (string) $grp_id,
+                        'hostid'       => $hid,
+                        'cams'         => 0,
+                        'online'       => 0,
+                        'warn'         => 0,
+                        'err'          => 0,
+                        'server'       => $primary_rs_by_host[$hid] ?? '—',
+                        'storageGB'    => null,
+                        'storageCapGB' => null,
+                        'problems'     => $problems_by_host[$hid] ?? 0,
+                        'source'       => 'group'
+                    ];
+                }
+
+                // Walk the cameraIds list from the group's raw JSON. If
+                // the LLD has fired but the raw item hasn't populated
+                // yet, cameraCount is the only thing we'll have — use
+                // it as a best-effort total so the row isn't blank.
+                $cam_ids = is_array($grp['cameraIds'] ?? null) ? $grp['cameraIds'] : [];
+                if ($cam_ids) {
+                    foreach ($cam_ids as $cid) {
+                        $sites[$key]['cams']++;
+                        $st = $cam_state[(string) $cid] ?? null;
+                        if (!$st) { $sites[$key]['online']++; continue; }
+                        if (!$st['enabled']) continue;
+                        $code = $st['status'];
+                        if      ($code === 0)  $sites[$key]['online']++;
+                        elseif  ($code === 1)  { $sites[$key]['online']++; $sites[$key]['warn']++; }
+                        elseif  ($code >= 2)   $sites[$key]['err']++;
+                        else                   $sites[$key]['online']++;
+                    }
+                } elseif (isset($grp['cameraCount'])) {
+                    $sites[$key]['cams']   = (int) $grp['cameraCount'];
+                    $sites[$key]['online'] = (int) $grp['cameraCount'];
+                }
+            }
+        }
+
+        $out = array_values($sites);
         usort($out, fn($a, $b) => $b['err'] <=> $a['err'] ?: $b['warn'] <=> $a['warn'] ?: strcmp($a['name'], $b['name']));
         return $out;
     }
