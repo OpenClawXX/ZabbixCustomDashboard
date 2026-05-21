@@ -430,17 +430,13 @@ class ActionSurveillanceData extends ActionDataBase {
             }
         }
 
-        // Primary RS per site host — used as the default 'server' label for
-        // any group surfaced by that host. Cross-host groups get the first
-        // host's RS to avoid an arbitrary winner.
-        $primary_rs_by_host = [];
-        foreach ($site_items as $hid => $bundle) {
-            foreach ($bundle['rs'] ?? [] as $rs_id => $rs) {
-                $primary_rs_by_host[$hid] = $rs['hostname'] ?? $rs_id;
-                break;
-            }
-        }
-
+        // Camera → recording-server lookup. Each per-camera item gives
+        // us 'rs' (which is actually the parent-hardware GUID, named
+        // historically; see milestone.cam.rs definition). To attribute
+        // a group to an RS we'd need hardware → RS, which the template
+        // doesn't surface today. Until that arrives, leave the server
+        // column blank rather than misattributing every group to the
+        // first RS on the Milestone host.
         $sites = [];
         foreach ($site_items as $hid => $bundle) {
             foreach ($bundle['grp'] ?? [] as $grp_id => $grp) {
@@ -454,7 +450,11 @@ class ActionSurveillanceData extends ActionDataBase {
                         'online'       => 0,
                         'warn'         => 0,
                         'err'          => 0,
-                        'server'       => $primary_rs_by_host[$hid] ?? '—',
+                        // Per-group RS attribution would need a cam→
+                        // hardware→RS map we don't have yet. Show '—'
+                        // until we wire that lookup in, rather than
+                        // misattributing every group to the same RS.
+                        'server'       => '—',
                         'storageGB'    => null,
                         'storageCapGB' => null,
                         'problems'     => $problems_by_host[$hid] ?? 0,
@@ -464,8 +464,10 @@ class ActionSurveillanceData extends ActionDataBase {
 
                 // Walk the cameraIds list from the group's raw JSON. If
                 // the LLD has fired but the raw item hasn't populated
-                // yet, cameraCount is the only thing we'll have — use
-                // it as a best-effort total so the row isn't blank.
+                // yet (or the role can't read /cameraGroups/{id}/cameras),
+                // cameraCount is the only thing we'll have — use it as a
+                // best-effort total. If neither is present, the row
+                // honestly shows 0 cameras instead of guessing.
                 $cam_ids = is_array($grp['cameraIds'] ?? null) ? $grp['cameraIds'] : [];
                 if ($cam_ids) {
                     foreach ($cam_ids as $cid) {
@@ -479,7 +481,7 @@ class ActionSurveillanceData extends ActionDataBase {
                         elseif  ($code >= 2)   $sites[$key]['err']++;
                         else                   $sites[$key]['online']++;
                     }
-                } elseif (isset($grp['cameraCount'])) {
+                } elseif (!empty($grp['cameraCount'])) {
                     $sites[$key]['cams']   = (int) $grp['cameraCount'];
                     $sites[$key]['online'] = (int) $grp['cameraCount'];
                 }
