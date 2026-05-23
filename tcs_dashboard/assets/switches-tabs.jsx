@@ -309,15 +309,44 @@ const HealthMetric = ({ label, val, unit, threshold, hist, color }) => {
   );
 };
 
+// Merge live per-member snapshot data (window.STACK_MEMBERS) with the demo
+// rows. Live values win when present; the chassis fields the patch doesn't
+// cover yet (serial, exos version, uptime, fans, PSUs) stay on the demo row
+// so the card stays renderable. Returns one entry per slot the snapshot
+// reported, or the full demo set if the snapshot is empty.
+const buildMemberRows = () => {
+  const demo = window.TAB_STACK_HEALTH || [];
+  const live = Array.isArray(window.STACK_MEMBERS) ? window.STACK_MEMBERS : [];
+  if (live.length === 0) return demo.map(d => ({ ...d, _live: false }));
+
+  const demoByIdx = Object.fromEntries(demo.map(d => [d.idx, d]));
+  return live.map(m => {
+    const d = demoByIdx[m.idx] || demo[0] || {};
+    return {
+      ...d,
+      idx:   m.idx,
+      role:  m.role || d.role || "Member",
+      cpu:   m.cpu  != null ? Math.round(m.cpu)  : d.cpu,
+      cpu5:  m.cpu5 != null ? Math.round(m.cpu5) : d.cpu5,
+      mem:   m.mem  != null ? Math.round(m.mem)  : d.mem,
+      temp:  m.temp != null ? Math.round(m.temp) : d.temp,
+      _live: (m.cpu != null || m.mem != null || m.temp != null)
+    };
+  });
+};
+
 const TabStackHealth = () => {
-  const H = window.TAB_STACK_HEALTH;
+  const H = buildMemberRows();
+  const anyLive = H.some(m => m._live);
   return (
     <div className="tab-pane">
       <div className="card-h-bar">
         <span className="h-title">Stack member health · last 24h</span>
         <SourceBadge src="zbx" />
         <div className="h-spacer" />
-        <span className="h-meta">SNMP · 60s poll · last update 12s ago</span>
+        <span className="h-meta">
+          {anyLive ? "SNMP · live from Zabbix" : "demo — apply per-member-health template patch"}
+        </span>
       </div>
       <div className="health-grid">
         {H.map(m => (
@@ -325,7 +354,7 @@ const TabStackHealth = () => {
             <div className="hc-head">
               <div className="hc-id-block">
                 <div className="hc-id">MEMBER {m.idx}</div>
-                <div className={"hc-role " + m.role.toLowerCase()}>{m.role}</div>
+                <div className={"hc-role " + String(m.role || "").toLowerCase()}>{m.role}</div>
               </div>
               <div className="hc-side">
                 <div className="kv"><span>Serial</span><b>{m.serial}</b></div>
@@ -334,10 +363,10 @@ const TabStackHealth = () => {
               </div>
             </div>
             <div className="hm-grid">
-              <HealthMetric label="CPU 1m"  val={m.cpu}  unit="%"  threshold={85} hist={_spark(m.idx * 11, m.cpu, 6)}    color="var(--info)" />
-              <HealthMetric label="CPU 5m"  val={m.cpu5} unit="%"  threshold={75} hist={_spark(m.idx * 17, m.cpu5, 4)}   color="var(--info)" />
-              <HealthMetric label="Memory"  val={m.mem}  unit="%"  threshold={90} hist={_spark(m.idx * 23, m.mem, 3)}    color="var(--zbx)" />
-              <HealthMetric label="Temp"    val={m.temp} unit="°C" threshold={72} hist={_spark(m.idx * 29, m.temp, 5)}   color="var(--pf)" />
+              <HealthMetric label="CPU 1m"  val={m.cpu}  unit="%"  threshold={85} hist={_spark(m.idx * 11, m.cpu  || 0, 6)} color="var(--info)" />
+              <HealthMetric label="CPU 5m"  val={m.cpu5} unit="%"  threshold={75} hist={_spark(m.idx * 17, m.cpu5 || 0, 4)} color="var(--info)" />
+              <HealthMetric label="Memory"  val={m.mem}  unit="%"  threshold={90} hist={_spark(m.idx * 23, m.mem  || 0, 3)} color="var(--zbx)" />
+              <HealthMetric label="Temp"    val={m.temp} unit="°C" threshold={72} hist={_spark(m.idx * 29, m.temp || 0, 5)} color="var(--pf)" />
             </div>
             <div className="hc-foot">
               <div className="hcf-cell">
@@ -375,7 +404,7 @@ const TabStackHealth = () => {
         </div>
         <div className="thermal-strip">
           {H.map(m => {
-            const hist = _spark(m.idx * 53, m.temp, 6, 48);
+            const hist = _spark(m.idx * 53, m.temp || 0, 6, 48);
             return (
               <div key={m.idx} className="ts-row">
                 <div className="ts-lbl">M{m.idx}</div>
@@ -385,7 +414,7 @@ const TabStackHealth = () => {
                     return <i key={i} className={cls} title={`${v}°C`} />;
                   })}
                 </div>
-                <div className="ts-cur">{m.temp}°C</div>
+                <div className="ts-cur">{m.temp != null ? `${m.temp}°C` : "—"}</div>
               </div>
             );
           })}

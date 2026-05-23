@@ -49,6 +49,7 @@
         window.SWITCH_KPIS     = { cpu: null, mem: null, temp: null, poeWatts: null, poeBudget: null };
         window.ARC_MDF_HISTORY = { cpu: [], mem: [], temp: [], poeWatts: [], uplinkRx: [], uplinkTx: [] };
         window.ARC_MDF_LINKS   = [];
+        window.STACK_MEMBERS   = [];
         window.SWITCH_PROBLEMS = [];
         window.SWITCH_LOADING  = { ...window.SWITCH_LOADING, snapshot: true };
         window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section: "navigate" } }));
@@ -62,6 +63,10 @@
     window.SWITCH_PROBLEMS  = [];
     window.ARC_MDF_LINKS    = [];
     window.ARC_MDF_HISTORY  = { cpu: [], mem: [], temp: [], poeWatts: [], uplinkRx: [], uplinkTx: [] };
+    // Per-stack-member CPU/mem/temp from the snapshot. Empty until the
+    // per-member-health template patch is applied — see
+    // tcs_dashboard/notes/zabbix-template-patches/per-member-health.md.
+    window.STACK_MEMBERS    = [];
     window.SWITCH_SITES     = [];
     window.SWITCH_INFO      = {};
     window.PF_ADMIN_BASE    = "";
@@ -333,6 +338,19 @@
 
         const stack = buildStack(members, ports, poe);
         if (stack) window.ARC_MDF_STACK = stack;
+
+        // Per-stack-member CPU/mem/temp. Members come from the snapshot with
+        // null fields until the per-member-health template patch is applied;
+        // the Stack Health tab falls back to demo data when nothing useful
+        // has arrived yet.
+        window.STACK_MEMBERS = members.map(m => ({
+            idx:   m.index,
+            role:  m.role,
+            cpu:   typeof m.cpu1m === "number" ? m.cpu1m : null,
+            cpu5:  typeof m.cpu5m === "number" ? m.cpu5m : null,
+            mem:   typeof m.mem   === "number" ? m.mem   : null,
+            temp:  typeof m.temp  === "number" ? m.temp  : null
+        }));
 
         const kpiVal = (k) => (kpis[k] && typeof kpis[k].lastvalue === "number") ? kpis[k].lastvalue : null;
         window.SWITCH_KPIS = {

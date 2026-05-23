@@ -318,11 +318,72 @@ class SwitchClient {
                 'index'  => $idx,
                 'role'   => self::stackRoleLabel((string) $it['lastvalue']),
                 'raw'    => (string) $it['lastvalue'],
-                'itemid' => (string) $it['itemid']
+                'itemid' => (string) $it['itemid'],
+                'cpu1m'  => null,
+                'cpu5m'  => null,
+                'mem'    => null,
+                'temp'   => null
             ];
         }
+
+        // Per-member health metrics. The template ships memory util as a
+        // calculated item keyed by slot id (`vm.memory.util[<n>]`); CPU and
+        // temperature are added by the `per-member-health` template patch
+        // — see tcs_dashboard/notes/zabbix-template-patches/per-member-health.md.
+        // If the patch hasn't been applied yet, the keys are absent and the
+        // members come back with null fields (the UI then falls back to its
+        // demo data).
+        foreach ($items as $it) {
+            $k     = (string) $it['key_'];
+            $slot  = self::parseSlotFromKey($k);
+            if ($slot === null || !isset($out[$slot])) continue;
+
+            $field = self::healthFieldFor($k);
+            if ($field === null) continue;
+
+            $val = trim((string) $it['lastvalue']);
+            if ($val === '') continue;
+
+            $out[$slot][$field] = is_numeric($val) ? (float) $val : $val;
+        }
+
         ksort($out);
         return array_values($out);
+    }
+
+    /**
+     * Pull the slot id out of a per-member item key. Handles both the
+     * memory-util keys (where the slot is the only bracket arg) and the
+     * cpu/temp keys (where it follows `…<descriptor>.<slot>`).
+     */
+    private static function parseSlotFromKey(string $key): ?int {
+        $patterns = [
+            // vm.memory.util[1]
+            '/^vm\.memory\.util\[(\d+)\]$/',
+            // system.cpu.util[extremeCpuMonitorSystemUtilization1min.1]
+            '/^system\.cpu\.util\[extremeCpuMonitorSystemUtilization(?:1min|5min)\.(\d+)\]$/',
+            // sensor.temp.value[extremeStackMemberCurrentTemperature.1]
+            '/^sensor\.temp\.value\[extremeStackMemberCurrentTemperature\.(\d+)\]$/'
+        ];
+        foreach ($patterns as $rx) {
+            if (preg_match($rx, $key, $m)) {
+                $slot = (int) $m[1];
+                if ($slot >= 1 && $slot <= self::STACK_LIMIT) return $slot;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Map a per-member item key onto the member-row field it should populate.
+     * Returns null for keys that don't carry health data.
+     */
+    private static function healthFieldFor(string $key): ?string {
+        if (str_starts_with($key, 'vm.memory.util['))                                      return 'mem';
+        if (str_starts_with($key, 'system.cpu.util[extremeCpuMonitorSystemUtilization1min.')) return 'cpu1m';
+        if (str_starts_with($key, 'system.cpu.util[extremeCpuMonitorSystemUtilization5min.')) return 'cpu5m';
+        if (str_starts_with($key, 'sensor.temp.value[extremeStackMemberCurrentTemperature.')) return 'temp';
+        return null;
     }
 
     /** @param array<int,array<string,mixed>> $items */
