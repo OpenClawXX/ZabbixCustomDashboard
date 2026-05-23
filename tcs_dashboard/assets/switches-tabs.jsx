@@ -6,27 +6,6 @@ const { useState: useStateTAB } = React;
 // Shared data for tab content
 // ───────────────────────────────────────────────────────────────────
 
-window.TAB_TOPOLOGY = {
-  upstreams: [
-    { id: "core-arc-1", port: "Te1/0/13", role: "core",  type: "10G SR", util: 18, status: "up" },
-    { id: "core-arc-2", port: "Te1/0/13", role: "core",  type: "10G SR", util: 16, status: "up" },
-  ],
-  downstreams: [
-    { id: "ARC-GYM",     port: "1:25",  type: "1G",    util: 5,   status: "up" },
-    { id: "ARC-IDF-109", port: "1:49",  type: "10G SR", util: 10, status: "up" },
-    { id: "ARC-IDF-217", port: "1:49",  type: "10G SR", util: 4,  status: "up", errors: 2 },
-    { id: "ARCSBC",      port: "1:23",  type: "1G",    util: 1,   status: "down" },
-  ],
-  lldp: [
-    { local: "1:57", remote: "core-arc-1",   remPort: "Te1/0/13", sysDesc: "Aruba CX 8325-48Y8C",     macAge: "12h" },
-    { local: "1:59", remote: "core-arc-2",   remPort: "Te1/0/13", sysDesc: "Aruba CX 8325-48Y8C",     macAge: "12h" },
-    { local: "2:57", remote: "ARC-IDF-109",  remPort: "1:49",     sysDesc: "Extreme 5520-48T EXOS 31.7.1.4", macAge: "4h"  },
-    { local: "3:59", remote: "ARC-IDF-217",  remPort: "1:49",     sysDesc: "Extreme 5320-48P-8XE EXOS 31.7.1.4", macAge: "1h"  },
-    { local: "1:25", remote: "ARC-GYM",      remPort: "1:25",     sysDesc: "Extreme 5520-24T EXOS 31.7.1.4", macAge: "2d"  },
-    { local: "1:23", remote: "ARCSBC",       remPort: "1:23",     sysDesc: "Extreme 5320-24P-8XE", macAge: "15m" },
-  ],
-};
-
 window.TAB_STACK_HEALTH = [
   { idx: 1, role: "Backup",  serial: "1903N-72101", uptime: "127d 04h", cpu: 22, cpu5: 18, mem: 36, temp: 67,  fan1: 5400, fan2: 5320, psu1: 240, psu2: 238, version: "31.7.1.4" },
   { idx: 2, role: "Primary", serial: "1903N-72104", uptime: "127d 04h", cpu: 28, cpu5: 24, mem: 38, temp: 69,  fan1: 5480, fan2: 5410, psu1: 244, psu2: 240, version: "31.7.1.4" },
@@ -156,46 +135,43 @@ window.TAB_DIFF = [
 ];
 
 // ───────────────────────────────────────────────────────────────────
-// 1. TOPOLOGY
+// 1. TOPOLOGY (EDP-driven)
 // ───────────────────────────────────────────────────────────────────
+// EDP gives us, for each Extreme neighbor: which local port it's on,
+// the neighbor's hostname, EXOS version, the neighbor's slot/port, and
+// the age of the entry. EDP doesn't classify direction (uplink vs.
+// downstream) so we render all neighbors in a single tier below the
+// stack and let the operator infer.
+const _fmtAge = (sec) => {
+  if (sec == null || !isFinite(sec)) return "—";
+  if (sec < 60)   return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+};
+
 const TabTopology = ({ host }) => {
-  const T = window.TAB_TOPOLOGY;
   const stack = window.ARC_MDF_STACK;
+  const edp = Array.isArray(window.EDP_NEIGHBORS) ? window.EDP_NEIGHBORS : [];
+  const loading = (window.SWITCH_LOADING && window.SWITCH_LOADING.snapshot);
+  // EDP entries are considered stale if older than 90s — the default
+  // EDP advertisement interval is 60s, so two missed updates means the
+  // peer's likely gone but the table hasn't aged out yet.
+  const isStale = (n) => typeof n.age === "number" && n.age > 90;
+
   return (
     <div className="tab-pane">
       <div className="topo-layout">
         <div className="card topo-canvas-card">
           <div className="card-h">
-            <h3>Stack &amp; uplink topology</h3>
-            <SourceBadge src="ext" />
+            <h3>Stack &amp; EDP neighbors</h3>
             <SourceBadge src="zbx" />
             <div className="h-spacer" />
-            <span className="h-meta">LLDP · 30s discovery</span>
+            <span className="h-meta">
+              {loading ? "loading…" : `EDP · ${edp.length} neighbor${edp.length === 1 ? "" : "s"}`}
+            </span>
           </div>
           <div className="topo-canvas">
-            {/* Upstreams */}
-            <div className="topo-tier topo-tier-up">
-              <div className="topo-tier-label">CORE</div>
-              <div className="topo-row">
-                {T.upstreams.map(u => (
-                  <div key={u.id} className="topo-node core">
-                    <div className="n-id">{u.id}</div>
-                    <div className="n-port">{u.port} · {u.type}</div>
-                    <div className="n-util">
-                      <span className="b"><i style={{ width: `${u.util}%`}} /></span>
-                      <span className="pct">{u.util}%</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Trunk lines */}
-            <svg className="topo-edges topo-edges-up" viewBox="0 0 600 40" preserveAspectRatio="none">
-              <path d="M150,0 C150,20 300,20 300,40" />
-              <path d="M450,0 C450,20 300,20 300,40" />
-            </svg>
-
             {/* Stack */}
             <div className="topo-stack">
               <div className="topo-tier-label">STACK · {host.id}</div>
@@ -228,68 +204,100 @@ const TabTopology = ({ host }) => {
                     <circle cx="8" cy="208" r="3" />
                     <circle cx="32" cy="208" r="3" />
                   </svg>
-                  <div className="ring-label">stack ring<br/>40 Gbps</div>
+                  <div className="ring-label">stack ring</div>
                 </div>
               </div>
             </div>
 
-            <svg className="topo-edges topo-edges-down" viewBox="0 0 800 40" preserveAspectRatio="none">
-              <path d="M400,0 C400,20 100,20 100,40" />
-              <path d="M400,0 C400,20 300,20 300,40" />
-              <path d="M400,0 C400,20 500,20 500,40" />
-              <path d="M400,0 C400,20 700,20 700,40" />
-            </svg>
-
-            {/* Downstreams */}
+            {/* Neighbor tier */}
             <div className="topo-tier topo-tier-down">
-              <div className="topo-tier-label">DOWNSTREAM IDF / EDGE</div>
-              <div className="topo-row">
-                {T.downstreams.map(d => (
-                  <div key={d.id} className={"topo-node edge " + (d.status === "down" ? "down" : "")}>
-                    <div className="n-id">{d.id}</div>
-                    <div className="n-port">{d.port} · {d.type}</div>
-                    <div className="n-util">
-                      <span className="b"><i className={d.util > 50 ? "warn" : ""} style={{ width: `${Math.max(2, d.util)}%`}} /></span>
-                      <span className="pct">{d.util}%</span>
+              <div className="topo-tier-label">EXTREME NEIGHBORS · EDP</div>
+              {loading && (
+                <div className="topo-row" style={{ color: "var(--muted)", padding: "12px 0" }}>
+                  Loading EDP neighbor data from Zabbix…
+                </div>
+              )}
+              {!loading && edp.length === 0 && (
+                <div className="topo-row" style={{ color: "var(--muted)", padding: "12px 0" }}>
+                  No EDP neighbors discovered. Confirm the
+                  vlan-poe-topology template patch is applied and EDP is
+                  enabled on the switch (`enable edp ports all`).
+                </div>
+              )}
+              {!loading && edp.length > 0 && (
+                <div className="topo-row">
+                  {edp.map((n, i) => (
+                    <div key={`${n.localIfIndex}-${n.deviceId}-${i}`}
+                         className={"topo-node edge" + (isStale(n) ? " down" : "")}>
+                      <div className="n-id">{n.name || "(unknown)"}</div>
+                      <div className="n-port">
+                        {n.localLabel || "—"}
+                        {n.peerLabel ? ` → ${n.peerLabel}` : ""}
+                      </div>
+                      {n.version && (
+                        <div className="n-port" style={{ color: "var(--muted)" }}>
+                          EXOS {n.version}
+                        </div>
+                      )}
+                      {isStale(n) && (
+                        <div className="n-err">
+                          <Icon name="alert" size={9}/> stale · {_fmtAge(n.age)}
+                        </div>
+                      )}
                     </div>
-                    {d.errors > 0 && <div className="n-err"><Icon name="alert" size={9}/> {d.errors} err/h</div>}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         <div className="card">
           <div className="card-h">
-            <h3>LLDP neighbors</h3>
-            <SourceBadge src="ext" />
+            <h3>EDP neighbors</h3>
+            <SourceBadge src="zbx" />
             <div className="h-spacer" />
-            <span className="h-meta">{T.lldp.length} learned</span>
+            <span className="h-meta">
+              {loading ? "loading…" : `${edp.length} learned`}
+            </span>
           </div>
-          <table className="link-tbl">
-            <thead>
-              <tr>
-                <th style={{width: 56}}>Local</th>
-                <th>Remote</th>
-                <th style={{width: 56}}>R-Port</th>
-                <th style={{width: 60}}>Age</th>
-              </tr>
-            </thead>
-            <tbody>
-              {T.lldp.map((l, i) => (
-                <tr key={i}>
-                  <td className="fg" style={{color:"var(--accent)"}}>{l.local}</td>
-                  <td style={{whiteSpace: "normal", lineHeight: 1.35}}>
-                    <div style={{color: "var(--fg)"}}>{l.remote}</div>
-                    <div style={{color: "var(--muted)", fontSize: 10}}>{l.sysDesc}</div>
-                  </td>
-                  <td>{l.remPort}</td>
-                  <td style={{color: "var(--muted)"}}>{l.macAge}</td>
+          {loading && (
+            <div style={{ padding: "18px 14px", color: "var(--muted)" }}>
+              Loading EDP neighbor data from Zabbix…
+            </div>
+          )}
+          {!loading && edp.length === 0 && (
+            <div style={{ padding: "18px 14px", color: "var(--muted)" }}>
+              No EDP neighbors learned on this switch.
+            </div>
+          )}
+          {!loading && edp.length > 0 && (
+            <table className="link-tbl">
+              <thead>
+                <tr>
+                  <th style={{width: 56}}>Local</th>
+                  <th>Neighbor</th>
+                  <th style={{width: 70}}>R-Port</th>
+                  <th style={{width: 56}}>Age</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {edp.map((n, i) => (
+                  <tr key={`${n.localIfIndex}-${n.deviceId}-${i}`}>
+                    <td className="fg" style={{color:"var(--accent)"}}>{n.localLabel || "—"}</td>
+                    <td style={{whiteSpace: "normal", lineHeight: 1.35}}>
+                      <div style={{color: "var(--fg)"}}>{n.name || "(unknown)"}</div>
+                      <div style={{color: "var(--muted)", fontSize: 10}}>
+                        {n.version ? `EXOS ${n.version}` : n.deviceId}
+                      </div>
+                    </td>
+                    <td>{n.peerLabel || "—"}</td>
+                    <td style={{color: isStale(n) ? "var(--warn)" : "var(--muted)"}}>{_fmtAge(n.age)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>

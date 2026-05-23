@@ -176,7 +176,6 @@ const SwitchesApp = () => {
           )}
           {activeTab === "topo" && (
             <React.Fragment>
-              <DemoBanner name="Topology" />
               <div className="switch-layout-2col">
                 <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
                 <TabTopology host={host} />

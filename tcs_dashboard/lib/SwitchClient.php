@@ -189,16 +189,17 @@ class SwitchClient {
         $this->derivePoeFromMpower($items, $kpis);
 
         return [
-            'members' => $members,
-            'ports'   => array_values($ports),
-            'poe'     => array_values($poe),
-            'fdb'     => $fdb,
-            'kpis'    => $kpis,
-            'history' => $this->historyForKpis($kpis),
-            'uplinks' => $this->uplinksFromTraffic($traffic = $this->extractTraffic($items)),
-            'traffic' => $traffic,
-            'speeds'  => $this->extractSpeeds($items),
-            'info'    => $this->extractHostInfo($items)
+            'members'      => $members,
+            'ports'        => array_values($ports),
+            'poe'          => array_values($poe),
+            'fdb'          => $fdb,
+            'kpis'         => $kpis,
+            'history'      => $this->historyForKpis($kpis),
+            'uplinks'      => $this->uplinksFromTraffic($traffic = $this->extractTraffic($items)),
+            'traffic'      => $traffic,
+            'speeds'       => $this->extractSpeeds($items),
+            'info'         => $this->extractHostInfo($items),
+            'edpNeighbors' => $this->extractEdpNeighbors($items)
         ];
     }
 
@@ -536,6 +537,134 @@ class SwitchClient {
         foreach ($out as $slot => $list) {
             usort($out[$slot], fn($a, $b) => $a['idx'] <=> $b['idx']);
         }
+        return $out;
+    }
+
+    /**
+     * Extract EDP neighbors from the unified item list.
+     *
+     * Keys produced by the vlan-poe-topology.yaml patch:
+     *   extreme.edp.name[<idx>]     — neighbor's hostname
+     *   extreme.edp.version[<idx>]  — neighbor's EXOS version
+     *   extreme.edp.slot[<idx>]     — neighbor's slot number
+     *   extreme.edp.port[<idx>]     — neighbor's port number
+     *   extreme.edp.age[<idx>]      — seconds since last refresh
+     *
+     * <idx> is the OID-encoded composite index of extremeEdpTable:
+     *   "<localIfIndex>.<8>.<b1>.<b2>.<b3>.<b4>.<b5>.<b6>.<b7>.<b8>"
+     * — local ifIndex followed by the 8-octet ExtremeDeviceId (length
+     * 8 + 8 bytes). Component 0 is the local ifIndex, which we decode
+     * via parseMemberPort to recover (member, port) on the local switch.
+     *
+     * @return array<int, array{
+     *     localIfIndex:int,
+     *     localMember:int|null,
+     *     localPort:int|null,
+     *     localLabel:string,
+     *     deviceId:string,
+     *     name:string,
+     *     version:string,
+     *     peerSlot:int|null,
+     *     peerPort:int|null,
+     *     peerLabel:string,
+     *     age:int|null
+     * }>
+     */
+    private function extractEdpNeighbors(array $items): array {
+        $bag = [];
+        $fieldMap = [
+            'extreme.edp.name['    => 'name',
+            'extreme.edp.version[' => 'version',
+            'extreme.edp.slot['    => 'peerSlot',
+            'extreme.edp.port['    => 'peerPort',
+            'extreme.edp.age['     => 'age'
+        ];
+        foreach ($items as $it) {
+            $k = (string) $it['key_'];
+            foreach ($fieldMap as $prefix => $field) {
+                if (!str_starts_with($k, $prefix)) continue;
+                $idx = substr($k, strlen($prefix), -1); // strip "]" at the end
+                if ($idx === '') break;
+                $row = $bag[$idx] ?? ['_idx' => $idx];
+                $val = trim((string) $it['lastvalue']);
+                if ($val === '') {
+                    $bag[$idx] = $row;
+                    break;
+                }
+                $row[$field] = in_array($field, ['peerSlot', 'peerPort', 'age'], true) && is_numeric($val)
+                    ? (int) $val
+                    : $val;
+                $bag[$idx] = $row;
+                break;
+            }
+        }
+
+        $out = [];
+        foreach ($bag as $idx => $row) {
+            // Decode the composite index. We need the leading local ifIndex
+            // and the trailing 8 bytes (deviceId).
+            $parts = explode('.', $idx);
+            if (count($parts) < 10) continue; // expect "<ifIdx>.8.<8 bytes>" — 10+ parts
+
+            $localIfIndex = (int) $parts[0];
+            $deviceIdBytes = array_slice($parts, 2, 8);
+            $deviceId = implode(':', array_map(
+                fn($b) => sprintf('%02x', max(0, min(255, (int) $b))),
+                $deviceIdBytes
+            ));
+
+            // Decode local ifIndex → (member, port) using the same Extreme
+            // EXOS convention parseMemberPort already handles for the rest
+            // of the snapshot. We can't call parseMemberPort directly (it
+            // takes a key + prefix) so inline the simple branch here.
+            $localMember = null;
+            $localPort   = null;
+            if ($localIfIndex > 0) {
+                if ($localIfIndex < 1000) {
+                    $localMember = 1;
+                    $localPort   = $localIfIndex;
+                } else {
+                    $m = intdiv($localIfIndex, 1000);
+                    $p = $localIfIndex % 1000;
+                    if ($m >= 1 && $m <= self::STACK_LIMIT && $p > 0) {
+                        $localMember = $m;
+                        $localPort   = $p;
+                    }
+                }
+            }
+            $localLabel = ($localMember !== null && $localPort !== null)
+                ? "{$localMember}:{$localPort}"
+                : (string) $localIfIndex;
+
+            $peerSlot = $row['peerSlot'] ?? null;
+            $peerPort = $row['peerPort'] ?? null;
+            $peerLabel = ($peerSlot !== null && $peerPort !== null)
+                ? "{$peerSlot}:{$peerPort}"
+                : '';
+
+            $out[] = [
+                'localIfIndex' => $localIfIndex,
+                'localMember'  => $localMember,
+                'localPort'    => $localPort,
+                'localLabel'   => $localLabel,
+                'deviceId'     => $deviceId,
+                'name'         => (string) ($row['name'] ?? ''),
+                'version'      => (string) ($row['version'] ?? ''),
+                'peerSlot'     => $peerSlot,
+                'peerPort'     => $peerPort,
+                'peerLabel'    => $peerLabel,
+                'age'          => isset($row['age']) ? (int) $row['age'] : null
+            ];
+        }
+
+        // Stable order: local port first, then peer name. Helps the
+        // dashboard render deterministically across snapshot polls.
+        usort($out, function ($a, $b) {
+            $cmp = ($a['localIfIndex'] ?? 0) <=> ($b['localIfIndex'] ?? 0);
+            if ($cmp !== 0) return $cmp;
+            return strcmp($a['name'] ?? '', $b['name'] ?? '');
+        });
+
         return $out;
     }
 

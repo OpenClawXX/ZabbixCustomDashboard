@@ -50,6 +50,7 @@
         window.ARC_MDF_HISTORY = { cpu: [], mem: [], temp: [], poeWatts: [], uplinkRx: [], uplinkTx: [] };
         window.ARC_MDF_LINKS   = [];
         window.STACK_MEMBERS   = [];
+        window.EDP_NEIGHBORS   = [];
         window.SWITCH_PROBLEMS = [];
         window.SWITCH_LOADING  = { ...window.SWITCH_LOADING, snapshot: true };
         window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section: "navigate" } }));
@@ -67,6 +68,9 @@
     // per-member-health template patch is applied — see
     // tcs_dashboard/notes/zabbix-template-patches/per-member-health.md.
     window.STACK_MEMBERS    = [];
+    // EDP-discovered neighbors. Empty until the vlan-poe-topology
+    // template patch (extreme.edp.* items) is applied.
+    window.EDP_NEIGHBORS    = [];
     window.SWITCH_SITES     = [];
     window.SWITCH_INFO      = {};
     window.PF_ADMIN_BASE    = "";
@@ -311,17 +315,23 @@
     }
 
     function applySnapshot(snap) {
-        const members  = Array.isArray(snap.members)  ? snap.members  : [];
-        const ports    = Array.isArray(snap.ports)    ? snap.ports    : [];
-        const poe      = Array.isArray(snap.poe)      ? snap.poe      : [];
-        const fdb      = Array.isArray(snap.fdb)      ? snap.fdb      : [];
-        const uplinks  = Array.isArray(snap.uplinks)  ? snap.uplinks  : [];
-        const problems = Array.isArray(snap.problems) ? snap.problems : [];
+        const members  = Array.isArray(snap.members)      ? snap.members      : [];
+        const ports    = Array.isArray(snap.ports)        ? snap.ports        : [];
+        const poe      = Array.isArray(snap.poe)          ? snap.poe          : [];
+        const fdb      = Array.isArray(snap.fdb)          ? snap.fdb          : [];
+        const uplinks  = Array.isArray(snap.uplinks)      ? snap.uplinks      : [];
+        const problems = Array.isArray(snap.problems)     ? snap.problems     : [];
+        const edp      = Array.isArray(snap.edpNeighbors) ? snap.edpNeighbors : [];
         const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
         const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
         const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
         const speeds   = (snap.speeds  && typeof snap.speeds  === "object") ? snap.speeds  : {};
         const info     = (snap.info    && typeof snap.info    === "object") ? snap.info    : {};
+
+        // EDP neighbors — populated when the vlan-poe-topology template
+        // patch (extreme.edp.* items) is rolled out. Empty array until
+        // then; the Topology tab shows a loading / no-data state.
+        window.EDP_NEIGHBORS = edp;
 
         // Stash speeds for buildStack to consume.
         window._tcsSpeedByKey = speeds;
