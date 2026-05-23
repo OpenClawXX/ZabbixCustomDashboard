@@ -202,8 +202,7 @@ const TabTopology = ({ host }) => {
               <div className="topo-stack-rack">
                 {stack.map((m, i) => {
                   const live = (window.STACK_MEMBERS || [])[i];
-                  const demo = (window.TAB_STACK_HEALTH || [])[i];
-                  const role = (live && live.role) || (demo && demo.role) || "Member";
+                  const role = (live && live.role) || "—";
                   return (
                     <div key={m.idx} className="topo-stack-member">
                       <div className="m-bezel">
