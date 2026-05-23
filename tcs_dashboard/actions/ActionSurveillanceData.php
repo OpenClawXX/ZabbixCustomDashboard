@@ -161,6 +161,7 @@ class ActionSurveillanceData extends ActionDataBase {
             'output'           => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
             'selectInterfaces' => ['ip', 'main', 'available'],
             'selectTags'       => 'extend',
+            'selectHostGroups' => ['groupid', 'name'],
             'templateids'      => array_column($tpls, 'templateid'),
             'monitored_hosts'  => true,
             'preservekeys'     => true
@@ -359,7 +360,7 @@ class ActionSurveillanceData extends ActionDataBase {
             if (!empty($bundle['grp'])) { $any_groups = true; break; }
         }
         if ($any_groups) {
-            return $this->buildSitesByGroup($site_hosts, $site_items, $problems_by_host);
+            return $this->buildSitesByGroup($site_hosts, $site_items, $cam_hosts, $problems_by_host);
         }
 
         // Fallback: one row per Zabbix site host (the original behaviour).
@@ -417,7 +418,33 @@ class ActionSurveillanceData extends ActionDataBase {
      * the same group GUID (unusual — would mean two separate XProtect
      * sites pointing at the same group) the rows are summed.
      */
-    private function buildSitesByGroup(array $site_hosts, array $site_items, array $problems_by_host): array {
+    private function buildSitesByGroup(array $site_hosts, array $site_items, array $cam_hosts, array $problems_by_host): array {
+        // cam_id (Milestone camera GUID) → list of Zabbix host-group names for
+        // the matching per-camera host. Used as a last-resort name source when
+        // milestone.grp.name/path arrive empty — operators label cameras in
+        // Zabbix groups like "Surveillance/Bryant HS", so the most common
+        // group across a Milestone group's cameras usually IS the site.
+        $cam_groups_by_id = [];
+        foreach ($cam_hosts as $ch) {
+            $cam_id = '';
+            foreach ($ch['tags'] ?? [] as $t) {
+                if (($t['tag'] ?? '') === 'cam_id' && ($t['value'] ?? '') !== '') {
+                    $cam_id = $t['value']; break;
+                }
+            }
+            if ($cam_id === '') continue;
+            $names = [];
+            foreach ($ch['hostgroups'] ?? [] as $g) {
+                $n = trim((string) ($g['name'] ?? ''));
+                // Skip the discovery wrapper group the camera template
+                // auto-attaches every per-camera host to — it's the same
+                // for every camera and would always "win" the tally.
+                if ($n === '' || stripos($n, 'Templates') === 0) continue;
+                if (stripos($n, 'Discovered hosts') !== false) continue;
+                $names[] = $n;
+            }
+            if ($names) $cam_groups_by_id[$cam_id] = $names;
+        }
         // Camera-status lookup keyed by camera GUID (folds enabled / status
         // across every host so a group with cameras spread over multiple
         // hosts still gets the right rollup).
@@ -462,8 +489,10 @@ class ActionSurveillanceData extends ActionDataBase {
                     // as "" when the Milestone group has no Name field set or
                     // only the raw JSON's path is populated, so the empty
                     // string would pass through to the UI as a blank cell.
-                    // Walk name → path → last segment of path → groupId,
-                    // skipping any blank along the way.
+                    // Walk name → path → last segment of path → camera
+                    // host-group tally → groupId, skipping any blank along
+                    // the way so the UI never shows a bare GUID when there's
+                    // a human-readable label sitting in Zabbix.
                     $name = '';
                     foreach (['name', 'path'] as $field) {
                         $v = trim((string) ($grp[$field] ?? ''));
@@ -474,6 +503,30 @@ class ActionSurveillanceData extends ActionDataBase {
                         // the trailing segment is what operators recognise.
                         $tail = trim((string) strrchr($name, '/'), '/');
                         if ($tail !== '') $name = $tail;
+                    }
+                    if ($name === '') {
+                        // Tally Zabbix host groups across the cameras in this
+                        // Milestone group; the most common one wins. Cameras
+                        // with no Zabbix host yet are skipped.
+                        $cam_ids_for_name = is_array($grp['cameraIds'] ?? null) ? $grp['cameraIds'] : [];
+                        $hg_tally = [];
+                        foreach ($cam_ids_for_name as $cid) {
+                            foreach ($cam_groups_by_id[(string) $cid] ?? [] as $g) {
+                                $hg_tally[$g] = ($hg_tally[$g] ?? 0) + 1;
+                            }
+                        }
+                        if ($hg_tally) {
+                            arsort($hg_tally);
+                            $hg_name = (string) array_key_first($hg_tally);
+                            // Trim a leading "Surveillance/" or similar
+                            // organising prefix so the row reads "Bryant HS"
+                            // rather than "Surveillance/Bryant HS".
+                            if (str_contains($hg_name, '/')) {
+                                $tail = trim((string) strrchr($hg_name, '/'), '/');
+                                if ($tail !== '') $hg_name = $tail;
+                            }
+                            $name = $hg_name;
+                        }
                     }
                     if ($name === '') $name = (string) $grp_id;
                     $sites[$key] = [
