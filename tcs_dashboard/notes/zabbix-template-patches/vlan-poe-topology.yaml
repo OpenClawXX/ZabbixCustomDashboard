@@ -408,3 +408,95 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: 'Item Type'
                   value: POE
+
+        # ─────────────────────────────────────────────────────────────
+        # Extreme Discovery Protocol (EDP) neighbors.
+        #
+        # Walks EXTREME-EDP-MIB::extremeEdpTable (1.3.6.1.4.1.1916.1.13.2).
+        # Index is (extremeEdpPortIfIndex, extremeEdpNeighborId) where
+        # NeighborId is an 8-octet ExtremeDeviceId; {#SNMPINDEX} therefore
+        # looks like "<ifIndex>.8.<b1>.<b2>...<b8>". The dashboard parses
+        # the first component to recover the local port.
+        #
+        # extremeEdpPortIfIndex and extremeEdpNeighborId are themselves
+        # accessible-for-notify (the MIB only exposes them via traps), but
+        # extremeEdpNeighborName / Slot / Port / SoftwareVersion / EntryAge
+        # are read-only, so we discover off NeighborName and read the
+        # other columns by composite index.
+        # ─────────────────────────────────────────────────────────────
+        - uuid: 7c5e9b0a1d3f4628a4b9d2e7c1f0a385
+          name: 'EDP Neighbor Discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#SNMPVALUE},1.3.6.1.4.1.1916.1.13.2.1.3]'
+          key: extreme.edp.discovery
+          delay: 5m
+          description: |
+            EXTREME-EDP-MIB::extremeEdpTable — Extreme-to-Extreme
+            neighbor discovery (Extreme's predecessor to LLDP, still on
+            by default on EXOS). One row per (local port, neighbor)
+            pair. {#SNMPVALUE} is the neighbor's hostname.
+          item_prototypes:
+            - uuid: 8d6f0a1b2c4e4739b5cae0f8d2014b96
+              name: 'EDP {#SNMPINDEX}: neighbor name'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.1916.1.13.2.1.3.{#SNMPINDEX}'
+              key: 'extreme.edp.name[{#SNMPINDEX}]'
+              delay: 5m
+              trends: '0'
+              value_type: CHAR
+              description: 'extremeEdpNeighborName — peer''s system name.'
+              tags:
+                - tag: component
+                  value: edp
+            - uuid: 9e7a1b2c3d5f484ac6dbf1a9e3125ca7
+              name: 'EDP {#SNMPINDEX}: neighbor software version'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.1916.1.13.2.1.4.{#SNMPINDEX}'
+              key: 'extreme.edp.version[{#SNMPINDEX}]'
+              delay: 1h
+              trends: '0'
+              value_type: CHAR
+              description: 'extremeEdpNeighborSoftwareVersion — peer''s EXOS version.'
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 12h
+              tags:
+                - tag: component
+                  value: edp
+            - uuid: 0f8b2c3d4e6a495bd7eca2b0f4236db8
+              name: 'EDP {#SNMPINDEX}: neighbor slot'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.1916.1.13.2.1.5.{#SNMPINDEX}'
+              key: 'extreme.edp.slot[{#SNMPINDEX}]'
+              delay: 5m
+              trends: '0'
+              description: 'extremeEdpNeighborSlot — peer''s slot number.'
+              tags:
+                - tag: component
+                  value: edp
+            - uuid: 1a9c3d4e5f6b40acf8fdb3c1a53472c9
+              name: 'EDP {#SNMPINDEX}: neighbor port'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.1916.1.13.2.1.6.{#SNMPINDEX}'
+              key: 'extreme.edp.port[{#SNMPINDEX}]'
+              delay: 5m
+              trends: '0'
+              description: 'extremeEdpNeighborPort — peer''s port number.'
+              tags:
+                - tag: component
+                  value: edp
+            - uuid: 2b0d4e5f6a7c41bda9aec4d2b6458310
+              name: 'EDP {#SNMPINDEX}: entry age'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.1916.1.13.2.1.7.{#SNMPINDEX}'
+              key: 'extreme.edp.age[{#SNMPINDEX}]'
+              delay: 5m
+              units: s
+              description: |
+                extremeEdpEntryAge — seconds since this entry was last
+                refreshed. The dashboard can flag stale entries (e.g.,
+                > 90s without refresh likely means the neighbor is gone).
+              tags:
+                - tag: component
+                  value: edp

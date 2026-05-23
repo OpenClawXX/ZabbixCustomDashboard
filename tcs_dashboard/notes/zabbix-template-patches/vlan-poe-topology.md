@@ -23,6 +23,14 @@ per-member health. Apply on top of (or alongside) `per-member-health.yaml`.
   = port `n*8 + k`, MSB-first within each octet) into a port set to render
   the per-port VLAN matrix.
 
+  **Why this table specifically:** EXOS supports the standard
+  Q-BRIDGE-MIB `dot1qVlanCurrentTable`, but on a stack the egress port
+  bitmap mixes all slots into one long octet string keyed by ifIndex —
+  hard to render per-member. `extremeVlanOpaqueTable` is indexed by
+  `(vlanIfIndex, slotNumber)`, so each row's bitmap is already
+  slot-scoped and maps cleanly onto the per-slot port grid in the
+  dashboard.
+
 ### PoE Budget tab
 - `extreme.poe.slot.discovery` walks `EXTREME-POE-MIB::extremePethPseSlotTable`
   (1.3.6.1.4.1.1916.1.27.1.2). One row per PoE-capable stack member.
@@ -55,6 +63,22 @@ already come from the existing `snmp.interfaces.poe.mpower[…]` items.
   port number, which on EXOS happens to equal ifIndex for physical ports
   but the LLDP-MIB doesn't guarantee that. This LLD lets the dashboard
   build a definitive `localPortNum → "<slot>:<port>"` map.
+- `extreme.edp.discovery` walks `EXTREME-EDP-MIB::extremeEdpTable`
+  (1.3.6.1.4.1.1916.1.13.2) — EDP is Extreme's pre-LLDP discovery
+  protocol; useful for Extreme-to-Extreme topology because it carries
+  the peer's slot and port number directly (where LLDP gives you a
+  Port-ID that may be a MAC or an arbitrary string). Index is
+  `<localIfIndex>.8.<deviceId b1>.<b2>...<b8>`. Prototypes:
+  - `extreme.edp.name[<index>]` — peer hostname
+  - `extreme.edp.version[<index>]` — peer EXOS version
+  - `extreme.edp.slot[<index>]` — peer slot number
+  - `extreme.edp.port[<index>]` — peer port number
+  - `extreme.edp.age[<index>]` — seconds since last refresh
+
+  Run EDP alongside LLDP, not instead of it: LLDP covers non-Extreme
+  neighbors (the core switches in your topology demo are Aruba CX, which
+  speak LLDP but not EDP), while EDP gives crisper Extreme↔Extreme
+  edges.
 
 ## What's NOT available via SNMP
 
