@@ -201,13 +201,15 @@ const TabTopology = ({ host }) => {
               <div className="topo-tier-label">STACK · {host.id}</div>
               <div className="topo-stack-rack">
                 {stack.map((m, i) => {
-                  const info = window.TAB_STACK_HEALTH[i];
+                  const live = (window.STACK_MEMBERS || [])[i];
+                  const demo = (window.TAB_STACK_HEALTH || [])[i];
+                  const role = (live && live.role) || (demo && demo.role) || "Member";
                   return (
                     <div key={m.idx} className="topo-stack-member">
                       <div className="m-bezel">
                         <div className="m-led" />
                         <div className="m-id">M{m.idx}</div>
-                        <div className="m-role">{info.role}</div>
+                        <div className="m-role">{role}</div>
                         <div className="m-ports">{m.upCount}↑ {m.downCount}↓</div>
                         <div className="m-bays">
                           {[0,1,2,3].map(b => <div key={b} className={"bay " + (b < 2 ? "lit" : "")} />)}
