@@ -804,7 +804,7 @@
   font-size: 9.5px; letter-spacing: 0.8px; color: var(--muted);
   text-transform: uppercase; font-weight: 600; margin-bottom: 8px;
 }
-.topo-row { display: flex; gap: 18px; justify-content: center; }
+.topo-row { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; row-gap: 12px; }
 
 .topo-node {
   flex: 0 0 200px;
