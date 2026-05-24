@@ -192,7 +192,6 @@ const SwitchesApp = () => {
           )}
           {activeTab === "vlan" && (
             <React.Fragment>
-              <DemoBanner name="VLAN" />
               <div className="switch-layout-2col">
                 <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
                 <TabVlan />

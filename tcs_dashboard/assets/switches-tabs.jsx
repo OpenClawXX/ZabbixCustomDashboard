@@ -22,21 +22,6 @@ function _spark(seed, base, jitter, len = 24) {
   });
 }
 
-window.TAB_VLANS = [
-  { id: 1,    name: "default",     ports: 12,  tagged: 0,  ip: "—",            desc: "system default",         active: false },
-  { id: 10,   name: "MGMT",        ports: 0,   tagged: 4,  ip: "10.24.0.1/24",  desc: "Switch management",      active: true  },
-  { id: 20,   name: "FACULTY",     ports: 38,  tagged: 4,  ip: "10.24.20.1/22", desc: "Domain joined laptops",  active: true  },
-  { id: 30,   name: "STUDENT",     ports: 24,  tagged: 4,  ip: "10.24.30.1/22", desc: "Student devices",        active: true  },
-  { id: 40,   name: "BYOD",        ports: 0,   tagged: 4,  ip: "10.24.40.1/22", desc: "PacketFence-isolated",   active: true  },
-  { id: 50,   name: "AV-WAP",      ports: 14,  tagged: 4,  ip: "10.24.50.1/24", desc: "Wireless APs + cameras", active: true  },
-  { id: 60,   name: "VOIP",        ports: 8,   tagged: 4,  ip: "10.24.60.1/24", desc: "Cisco/Polycom phones",   active: true  },
-  { id: 80,   name: "PRINTERS",    ports: 6,   tagged: 4,  ip: "10.24.80.1/24", desc: "Printers + copiers",     active: true  },
-  { id: 90,   name: "GUEST",       ports: 0,   tagged: 4,  ip: "10.24.90.1/24", desc: "Visitor wifi",           active: true  },
-  { id: 100,  name: "CAMERAS",     ports: 4,   tagged: 4,  ip: "10.24.100.1/24",desc: "AvigilonALTA cameras",   active: true  },
-  { id: 200,  name: "ISOLATION",   ports: 0,   tagged: 4,  ip: "10.24.200.1/24",desc: "PF quarantine VLAN",     active: true  },
-  { id: 999,  name: "BLACKHOLE",   ports: 2,   tagged: 0,  ip: "—",            desc: "Disabled ports",         active: true  },
-];
-
 window.TAB_POE = {
   budget: 720,
   drawn: 428,
@@ -440,82 +425,132 @@ const TabStackHealth = () => {
 // ───────────────────────────────────────────────────────────────────
 // 3. VLAN
 // ───────────────────────────────────────────────────────────────────
+// Lookup port-set membership for a slot. Tagged/untagged ports come
+// from the snapshot as per-slot 1-based port-number arrays. The "M:P"
+// key is the same shape ARC_MDF_STACK uses.
+const _vlanPortClass = (vlan, member, portNum) => {
+  if (!vlan) return "u-out";
+  const tag = (vlan.taggedPorts || {})[member] || [];
+  const un  = (vlan.untaggedPorts || {})[member] || [];
+  if (un.includes(portNum))  return "u-in";
+  if (tag.includes(portNum)) return "u-tag";
+  return "u-out";
+};
+
 const TabVlan = () => {
-  const V = window.TAB_VLANS;
-  const [sel, setSel] = useStateTAB(20);
+  const V = Array.isArray(window.VLANS) ? window.VLANS : [];
+  const loading = (window.SWITCH_LOADING && window.SWITCH_LOADING.snapshot);
+  // Pick the first VLAN by default; track by ifIndex so it stays stable
+  // across snapshot refreshes even if a VID gets renumbered.
+  const [sel, setSel] = useStateTAB(null);
+  const selected = sel !== null
+    ? V.find(v => v.ifIndex === sel)
+    : (V.find(v => v.active) || V[0] || null);
+  const selVid = selected ? selected.vid : null;
+  const userCount = V.filter(v => v.active && (v.vid ?? 0) !== 1).length;
+  const sysCount  = V.length - userCount;
+
   return (
     <div className="tab-pane">
       <div className="vlan-layout">
         <div className="card">
           <div className="card-h">
             <h3>VLAN table</h3>
-            <SourceBadge src="ext" />
+            <SourceBadge src="zbx" />
             <div className="h-spacer" />
-            <span className="h-meta">{V.length} VLANs · 8 user · 4 system</span>
-            <span className="h-link">+ Add VLAN</span>
+            <span className="h-meta">
+              {loading
+                ? "loading…"
+                : `${V.length} VLAN${V.length === 1 ? "" : "s"} · ${userCount} user · ${sysCount} system`}
+            </span>
           </div>
-          <table className="vlan-tbl">
-            <thead>
-              <tr>
-                <th style={{width: 50}}>VID</th>
-                <th>Name</th>
-                <th style={{width: 80}}>Untagged</th>
-                <th style={{width: 70}}>Tagged</th>
-                <th style={{width: 140}}>IP</th>
-                <th style={{width: 60}}>State</th>
-              </tr>
-            </thead>
-            <tbody>
-              {V.map(v => (
-                <tr key={v.id} className={sel === v.id ? "sel" : ""} onClick={() => setSel(v.id)}>
-                  <td className="mono fg" style={{color:"var(--accent)"}}>{v.id}</td>
-                  <td>
-                    <div className="vname">{v.name}</div>
-                    <div className="vdesc">{v.desc}</div>
-                  </td>
-                  <td className="mono">
-                    <span className="port-pill">{v.ports}</span>
-                  </td>
-                  <td className="mono">
-                    <span className="port-pill tag">{v.tagged}</span>
-                  </td>
-                  <td className="mono">{v.ip}</td>
-                  <td>{v.active ? <span className="state-dot ok" title="active" /> : <span className="state-dot off" title="inactive" />}</td>
+          {loading && (
+            <div style={{ padding: "18px 14px", color: "var(--muted)" }}>
+              Loading VLAN data from Zabbix…
+            </div>
+          )}
+          {!loading && V.length === 0 && (
+            <div style={{ padding: "18px 14px", color: "var(--muted)" }}>
+              No VLAN items found on this switch. Confirm the
+              vlan-poe-topology template patch is applied.
+            </div>
+          )}
+          {!loading && V.length > 0 && (
+            <table className="vlan-tbl">
+              <thead>
+                <tr>
+                  <th style={{width: 50}}>VID</th>
+                  <th>Name</th>
+                  <th style={{width: 80}}>Untagged</th>
+                  <th style={{width: 70}}>Tagged</th>
+                  <th style={{width: 60}}>State</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {V.map(v => (
+                  <tr key={v.ifIndex}
+                      className={selected && selected.ifIndex === v.ifIndex ? "sel" : ""}
+                      onClick={() => setSel(v.ifIndex)}>
+                    <td className="mono fg" style={{color:"var(--accent)"}}>{v.vid ?? "—"}</td>
+                    <td>
+                      <div className="vname">{v.name || "(unnamed)"}</div>
+                    </td>
+                    <td className="mono">
+                      <span className="port-pill">{v.untaggedCount}</span>
+                    </td>
+                    <td className="mono">
+                      <span className="port-pill tag">{v.taggedCount}</span>
+                    </td>
+                    <td>{v.active
+                      ? <span className="state-dot ok" title="enabled" />
+                      : <span className="state-dot off" title="disabled" />}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
 
         <div style={{display:"flex", flexDirection:"column", gap: 14, minWidth: 0}}>
           <div className="card">
             <div className="card-h">
-              <h3>VLAN {sel} · port membership</h3>
-              <SourceBadge src="ext" />
+              <h3>{selected ? `VLAN ${selVid ?? "?"} · ${selected.name || "(unnamed)"}` : "Port membership"}</h3>
+              <SourceBadge src="zbx" />
               <div className="h-spacer" />
-              <span className="h-meta">untagged · 1 member</span>
+              <span className="h-meta">
+                {selected
+                  ? `${selected.untaggedCount} untagged · ${selected.taggedCount} tagged`
+                  : "—"}
+              </span>
             </div>
             <div className="vlan-portmap">
-              {window.ARC_MDF_STACK.map(m => (
+              {!selected && (
+                <div style={{ padding: "12px 4px", color: "var(--muted)" }}>
+                  Select a VLAN to see its per-port membership.
+                </div>
+              )}
+              {selected && (window.ARC_MDF_STACK || []).map(m => (
                 <div key={m.idx} className="vp-row">
                   <span className="vp-id">M{m.idx}</span>
                   <div className="vp-grid">
                     {m.ports.map(p => {
                       let cls = "u-absent";
                       if (p.state !== "absent") {
-                        const inV = sel === 20 ? (p.n % 3 === 0 && p.n <= 38) : sel === 30 ? (p.n % 4 === 1) : sel === 50 ? (p.n % 7 === 0) : (p.n % 11 === 0);
-                        cls = inV ? "u-in" : "u-out";
+                        cls = _vlanPortClass(selected, m.idx, p.n);
                       }
                       return <i key={p.n} className={cls} title={`${m.idx}:${p.n}`} />;
                     })}
                   </div>
                 </div>
               ))}
-              <div className="vp-legend">
-                <span><i className="u-in" /> Untagged in VLAN {sel}</span>
-                <span><i className="u-out" /> Other VLAN</span>
-                <span><i className="u-absent" /> Not present</span>
-              </div>
+              {selected && (
+                <div className="vp-legend">
+                  <span><i className="u-in" /> Untagged in VLAN {selVid}</span>
+                  <span><i className="u-tag" /> Tagged in VLAN {selVid}</span>
+                  <span><i className="u-out" /> Other VLAN</span>
+                  <span><i className="u-absent" /> Not present</span>
+                </div>
+              )}
             </div>
           </div>
         </div>

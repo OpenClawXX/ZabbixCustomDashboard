@@ -51,6 +51,7 @@
         window.ARC_MDF_LINKS   = [];
         window.STACK_MEMBERS   = [];
         window.EDP_NEIGHBORS   = [];
+        window.VLANS           = [];
         window.SWITCH_PROBLEMS = [];
         window.SWITCH_LOADING  = { ...window.SWITCH_LOADING, snapshot: true };
         window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section: "navigate" } }));
@@ -71,6 +72,10 @@
     // EDP-discovered neighbors. Empty until the vlan-poe-topology
     // template patch (extreme.edp.* items) is applied.
     window.EDP_NEIGHBORS    = [];
+    // VLAN list with per-slot tagged/untagged port sets. Empty until
+    // the vlan-poe-topology template patch (extreme.vlan.* items) is
+    // applied.
+    window.VLANS            = [];
     window.SWITCH_SITES     = [];
     window.SWITCH_INFO      = {};
     window.PF_ADMIN_BASE    = "";
@@ -322,6 +327,7 @@
         const uplinks  = Array.isArray(snap.uplinks)      ? snap.uplinks      : [];
         const problems = Array.isArray(snap.problems)     ? snap.problems     : [];
         const edp      = Array.isArray(snap.edpNeighbors) ? snap.edpNeighbors : [];
+        const vlans    = Array.isArray(snap.vlans)        ? snap.vlans        : [];
         const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
         const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
         const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
@@ -332,6 +338,9 @@
         // patch (extreme.edp.* items) is rolled out. Empty array until
         // then; the Topology tab shows a loading / no-data state.
         window.EDP_NEIGHBORS = edp;
+        // VLANs + per-slot tagged/untagged port lists from
+        // extreme.vlan.* items (vlan-poe-topology patch).
+        window.VLANS = vlans;
 
         // Stash speeds for buildStack to consume.
         window._tcsSpeedByKey = speeds;

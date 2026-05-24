@@ -199,7 +199,8 @@ class SwitchClient {
             'traffic'      => $traffic,
             'speeds'       => $this->extractSpeeds($items),
             'info'         => $this->extractHostInfo($items),
-            'edpNeighbors' => $this->extractEdpNeighbors($items)
+            'edpNeighbors' => $this->extractEdpNeighbors($items),
+            'vlans'        => $this->extractVlans($items)
         ];
     }
 
@@ -703,6 +704,159 @@ class SwitchClient {
             $cmp = ($a['localIfIndex'] ?? 0) <=> ($b['localIfIndex'] ?? 0);
             if ($cmp !== 0) return $cmp;
             return strcmp($a['name'] ?? '', $b['name'] ?? '');
+        });
+
+        return $out;
+    }
+
+    /**
+     * Parse a PortList octet string (RFC 2674 §5) into a list of 1-based
+     * port numbers. Each octet covers eight ports, MSB-first: octet 0
+     * bit 7 = port 1, octet 0 bit 0 = port 8, octet 1 bit 7 = port 9,
+     * etc. Accepts the various display forms net-snmp can return:
+     *   - hex with separators: "FF 00 80", "ff:00:80", "ff-00-80"
+     *   - bare hex:            "ff0080"
+     *   - "Hex-STRING: …"      (Zabbix preserves the snmpwalk prefix)
+     *
+     * @return int[]
+     */
+    private static function parsePortList(string $raw): array {
+        $s = trim($raw);
+        if ($s === '') return [];
+        // Strip common prefixes Zabbix can preserve.
+        if (str_starts_with($s, 'Hex-STRING:')) $s = trim(substr($s, 11));
+        if (str_starts_with($s, '0x') || str_starts_with($s, '0X')) $s = substr($s, 2);
+        // Remove non-hex separators.
+        $hex = preg_replace('/[^0-9a-fA-F]/', '', $s) ?? '';
+        if ($hex === '' || strlen($hex) % 2 !== 0) return [];
+
+        $ports = [];
+        $octetCount = intdiv(strlen($hex), 2);
+        for ($i = 0; $i < $octetCount; $i++) {
+            $byte = hexdec(substr($hex, $i * 2, 2));
+            if ($byte === 0) continue;
+            for ($bit = 0; $bit < 8; $bit++) {
+                // MSB (bit 7) is the lowest-numbered port in this octet.
+                if (($byte >> (7 - $bit)) & 1) {
+                    $ports[] = $i * 8 + $bit + 1;
+                }
+            }
+        }
+        return $ports;
+    }
+
+    /**
+     * Build the live VLAN list with per-slot tagged/untagged port sets.
+     *
+     * Reads items from the vlan-poe-topology template patch:
+     *   extreme.vlan.id[<vlanIfIndex>]        — 802.1Q VID
+     *   extreme.vlan.descr[<vlanIfIndex>]     — VLAN name (DisplayString)
+     *   extreme.vlan.admin[<vlanIfIndex>]     — admin status (1=enabled)
+     *   extreme.vlan.encaps[<vlanIfIndex>]    — 1=8021q, 2=none
+     *   extreme.vlan.tagged[<vlanIfIndex>.<slot>]   — PortList bitmap
+     *   extreme.vlan.untagged[<vlanIfIndex>.<slot>] — PortList bitmap
+     *
+     * @return array<int, array{
+     *     ifIndex:int,
+     *     vid:int|null,
+     *     name:string,
+     *     active:bool,
+     *     encaps:int|null,
+     *     taggedPorts:array<int,int[]>,
+     *     untaggedPorts:array<int,int[]>,
+     *     untaggedCount:int,
+     *     taggedCount:int
+     * }>
+     */
+    private function extractVlans(array $items): array {
+        $vlans = [];
+
+        $scalarMap = [
+            'extreme.vlan.id['     => 'vid',
+            'extreme.vlan.descr['  => 'name',
+            'extreme.vlan.admin['  => 'admin',
+            'extreme.vlan.encaps[' => 'encaps'
+        ];
+
+        foreach ($items as $it) {
+            $k = (string) $it['key_'];
+
+            foreach ($scalarMap as $prefix => $field) {
+                if (!str_starts_with($k, $prefix)) continue;
+                $ifIdx = (int) substr($k, strlen($prefix), -1);
+                if ($ifIdx <= 0) break;
+                $row = $vlans[$ifIdx] ?? [
+                    'ifIndex'       => $ifIdx,
+                    'vid'           => null,
+                    'name'          => '',
+                    'admin'         => null,
+                    'encaps'        => null,
+                    'taggedPorts'   => [],
+                    'untaggedPorts' => []
+                ];
+                $val = trim((string) $it['lastvalue']);
+                if ($val !== '') {
+                    if ($field === 'name') {
+                        $row['name'] = $val;
+                    } elseif (is_numeric($val)) {
+                        $row[$field] = (int) $val;
+                    }
+                }
+                $vlans[$ifIdx] = $row;
+                break;
+            }
+
+            // Port-membership bitmaps. Key is
+            // extreme.vlan.{tagged,untagged}[<ifIndex>.<slot>] — split on
+            // the "." inside the bracket.
+            if (preg_match('/^extreme\.vlan\.(tagged|untagged)\[(\d+)\.(\d+)\]$/', $k, $m)) {
+                $kind  = $m[1];
+                $ifIdx = (int) $m[2];
+                $slot  = (int) $m[3];
+                if ($ifIdx <= 0 || $slot < 1 || $slot > self::STACK_LIMIT) continue;
+                $row = $vlans[$ifIdx] ?? [
+                    'ifIndex'       => $ifIdx,
+                    'vid'           => null,
+                    'name'          => '',
+                    'admin'         => null,
+                    'encaps'        => null,
+                    'taggedPorts'   => [],
+                    'untaggedPorts' => []
+                ];
+                $ports = self::parsePortList((string) $it['lastvalue']);
+                if (!empty($ports)) {
+                    $bucket = $kind === 'tagged' ? 'taggedPorts' : 'untaggedPorts';
+                    $row[$bucket][$slot] = $ports;
+                }
+                $vlans[$ifIdx] = $row;
+            }
+        }
+
+        // Finalize: derive per-VLAN tagged/untagged port counts, drop the
+        // raw admin field, expose `active` boolean.
+        $out = [];
+        foreach ($vlans as $ifIdx => $row) {
+            $taggedCount = array_sum(array_map('count', $row['taggedPorts']));
+            $untaggedCount = array_sum(array_map('count', $row['untaggedPorts']));
+            $out[] = [
+                'ifIndex'       => $row['ifIndex'],
+                'vid'           => $row['vid'],
+                'name'          => $row['name'],
+                'active'        => ($row['admin'] ?? 0) === 1,
+                'encaps'        => $row['encaps'],
+                'taggedPorts'   => $row['taggedPorts'],
+                'untaggedPorts' => $row['untaggedPorts'],
+                'taggedCount'   => $taggedCount,
+                'untaggedCount' => $untaggedCount
+            ];
+        }
+
+        // Order by VID where known, falling back to ifIndex.
+        usort($out, function ($a, $b) {
+            $av = $a['vid'] ?? PHP_INT_MAX;
+            $bv = $b['vid'] ?? PHP_INT_MAX;
+            $cmp = $av <=> $bv;
+            return $cmp !== 0 ? $cmp : ($a['ifIndex'] <=> $b['ifIndex']);
         });
 
         return $out;
