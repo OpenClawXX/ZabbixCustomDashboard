@@ -68,7 +68,9 @@ already come from the existing `snmp.interfaces.poe.mpower[…]` items.
   protocol; useful for Extreme-to-Extreme topology because it carries
   the peer's slot and port number directly (where LLDP gives you a
   Port-ID that may be a MAC or an arbitrary string). Index is
-  `<localIfIndex>.8.<deviceId b1>.<b2>...<b8>`. Prototypes:
+  `<localIfIndex>.<b1>.<b2>.<b3>.<b4>.<b5>.<b6>.<b7>.<b8>` (9 sub-OIDs;
+  fixed-size `OCTET STRING (SIZE (8))` without `IMPLIED` encodes each
+  byte as its own sub-OID with no length prefix). Prototypes:
   - `extreme.edp.name[<index>]` — peer hostname
   - `extreme.edp.version[<index>]` — peer EXOS version
   - `extreme.edp.slot[<index>]` — peer slot number

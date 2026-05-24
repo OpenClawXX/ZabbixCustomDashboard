@@ -415,8 +415,11 @@ zabbix_export:
         # Walks EXTREME-EDP-MIB::extremeEdpTable (1.3.6.1.4.1.1916.1.13.2).
         # Index is (extremeEdpPortIfIndex, extremeEdpNeighborId) where
         # NeighborId is an 8-octet ExtremeDeviceId; {#SNMPINDEX} therefore
-        # looks like "<ifIndex>.8.<b1>.<b2>...<b8>". The dashboard parses
-        # the first component to recover the local port.
+        # looks like "<ifIndex>.<b1>.<b2>.<b3>.<b4>.<b5>.<b6>.<b7>.<b8>"
+        # (9 sub-OIDs — fixed-size OCTET STRING (SIZE(8)) without IMPLIED
+        # encodes each byte as its own sub-OID with no length prefix per
+        # SMIv2). The dashboard parses the first component to recover the
+        # local port.
         #
         # extremeEdpPortIfIndex and extremeEdpNeighborId are themselves
         # accessible-for-notify (the MIB only exposes them via traps), but

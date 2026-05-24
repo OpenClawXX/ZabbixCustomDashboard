@@ -601,13 +601,23 @@ class SwitchClient {
 
         $out = [];
         foreach ($bag as $idx => $row) {
-            // Decode the composite index. We need the leading local ifIndex
-            // and the trailing 8 bytes (deviceId).
+            // Decode the composite index. For extremeEdpTable indexed by
+            // (extremeEdpPortIfIndex, extremeEdpNeighborId), where
+            // NeighborId is OCTET STRING (SIZE (8)) — fixed size, no
+            // IMPLIED — SMIv2 maps each octet to its own sub-OID with
+            // NO length prefix. So {#SNMPINDEX} is 9 components:
+            //   <ifIndex>.<b1>.<b2>.<b3>.<b4>.<b5>.<b6>.<b7>.<b8>
+            // Accept the 10-component form too (length-prefixed) defensively
+            // in case some EXOS build does include the length byte.
             $parts = explode('.', $idx);
-            if (count($parts) < 10) continue; // expect "<ifIdx>.8.<8 bytes>" — 10+ parts
+            if (count($parts) < 9) continue;
 
-            $localIfIndex = (int) $parts[0];
-            $deviceIdBytes = array_slice($parts, 2, 8);
+            $localIfIndex  = (int) $parts[0];
+            if (count($parts) >= 10 && (int) $parts[1] === 8) {
+                $deviceIdBytes = array_slice($parts, 2, 8);
+            } else {
+                $deviceIdBytes = array_slice($parts, 1, 8);
+            }
             $deviceId = implode(':', array_map(
                 fn($b) => sprintf('%02x', max(0, min(255, (int) $b))),
                 $deviceIdBytes
