@@ -22,31 +22,6 @@ function _spark(seed, base, jitter, len = 24) {
   });
 }
 
-window.TAB_POE = {
-  budget: 720,
-  drawn: 428,
-  reserved: 64,
-  available: 228,
-  perMember: [
-    { idx: 1, drawn: 96,  budget: 180, ports: 9 },
-    { idx: 2, drawn: 128, budget: 180, ports: 12 },
-    { idx: 3, drawn: 88,  budget: 180, ports: 8 },
-    { idx: 4, drawn: 116, budget: 180, ports: 9 },
-  ],
-  topConsumers: [
-    { port: "2:14", device: "ARC-WAP-N4-23",  vendor: "Extreme Networks", watts: 25.1, cls: 4 },
-    { port: "1:18", device: "ARC-WAP-N3-04",  vendor: "Extreme Networks", watts: 23.6, cls: 4 },
-    { port: "4:33", device: "ARC-WAP-N1-09",  vendor: "Extreme Networks", watts: 22.2, cls: 4 },
-    { port: "3:21", device: "ALTA-CAM-072",   vendor: "Avigilon",          watts: 18.4, cls: 4 },
-    { port: "2:08", device: "ALTA-CAM-049",   vendor: "Avigilon",          watts: 17.9, cls: 4 },
-    { port: "1:42", device: "VLN-PHONE-201",  vendor: "Polycom",           watts: 12.6, cls: 3 },
-    { port: "4:11", device: "VLN-PHONE-117",  vendor: "Polycom",           watts: 12.4, cls: 3 },
-    { port: "3:35", device: "ALTA-CAM-088",   vendor: "Avigilon",          watts: 11.8, cls: 3 },
-    { port: "1:07", device: "ARC-WAP-N2-12",  vendor: "Extreme Networks", watts:  9.2, cls: 4 },
-    { port: "2:31", device: "ALTA-CAM-051",   vendor: "Avigilon",          watts:  8.4, cls: 3 },
-  ],
-};
-
 window.TAB_MACROS = [
   { k: "{$AGENT.NODATA.TIMEOUT}",       v: "30m",                ctx: "Template Net Extreme EXOS", sys: false },
   { k: "{$CPU.UTIL.MAX}",               v: "85",                 ctx: "Template Net Extreme EXOS", sys: false },
@@ -562,36 +537,98 @@ const TabVlan = () => {
 // ───────────────────────────────────────────────────────────────────
 // 4. PoE BUDGET
 // ───────────────────────────────────────────────────────────────────
+// Resolve a port "m.p" key into the freshest PF-known device, if any.
+// The bridge populates _tcsPfByKey with one or more device rows per
+// port; we take the first because (in PF v11+) it's the active node.
+const _poePfDevice = (member, port) => {
+  const bag = window._tcsPfByKey || {};
+  const rows = bag[`${member}.${port}`];
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const r = rows[0] || {};
+  return {
+    device: r.computername || r.hostname || r.mac || "—",
+    vendor: r.vendor || r.fingerprint || r.dhcp_fingerprint || "—",
+    mac:    r.mac || ""
+  };
+};
+
 const TabPoe = () => {
-  const P = window.TAB_POE;
-  const pctTotal = Math.round((P.drawn / P.budget) * 100);
+  const P       = window.POE_BUDGET;
+  const loading = (window.SWITCH_LOADING && window.SWITCH_LOADING.snapshot) || P === null;
+
+  if (loading) {
+    return (
+      <div className="tab-pane">
+        <div className="card" style={{ padding: "24px 18px", textAlign: "center", color: "var(--muted)" }}>
+          Loading PoE budget data from Zabbix…
+        </div>
+      </div>
+    );
+  }
+
+  const totals  = P.totals  || { drawn: 0, budget: 0, available: 0, measured: 0, pct: 0 };
+  const members = Array.isArray(P.members) ? P.members : [];
+  const ports   = Array.isArray(P.ports)   ? P.ports   : [];
+
+  if (members.length === 0 && ports.length === 0) {
+    return (
+      <div className="tab-pane">
+        <div className="card" style={{ padding: "24px 18px", textAlign: "center", color: "var(--muted)" }}>
+          No PoE items found on this switch. Confirm the vlan-poe-topology
+          template patch is applied and the switch has PoE-capable hardware.
+        </div>
+      </div>
+    );
+  }
+
+  // PSU redundancy comes from the per-member-health PSU data the Stack
+  // Health tab already uses. Worst-case across members: any "absent" PSU
+  // → N+0 / err; any "fault" → degraded / warn; otherwise N+1 / ok.
+  const allPsus = (window.STACK_MEMBERS || []).flatMap(m => Array.isArray(m.psus) ? m.psus : []);
+  let psuLabel = "—", psuClass = "", psuSub = "";
+  if (allPsus.length > 0) {
+    const absent = allPsus.filter(p => !p.present).length;
+    const fault  = allPsus.filter(p => p.present && !p.ok).length;
+    if (absent > 0)      { psuLabel = "N+0"; psuClass = "err";  psuSub = `${absent} PSU absent`; }
+    else if (fault > 0)  { psuLabel = "DEGRADED"; psuClass = "warn"; psuSub = `${fault} PSU fault`; }
+    else                 { psuLabel = "N+1"; psuClass = "ok";   psuSub = `${allPsus.length} PSUs ok`; }
+  }
+
   return (
     <div className="tab-pane">
       <div className="poe-top">
         <div className="card poe-headline">
           <div className="poe-hl-left">
-            <Ring value={P.drawn} max={P.budget} size={140} color="var(--warn)" label={`${P.drawn} W`} sub={`of ${P.budget} W budget`} threshold={P.budget * 0.85} />
+            <Ring
+              value={totals.drawn}
+              max={Math.max(totals.budget, totals.drawn, 1)}
+              size={140}
+              color="var(--warn)"
+              label={`${Math.round(totals.drawn)} W`}
+              sub={`of ${Math.round(totals.budget)} W budget`}
+              threshold={totals.budget * 0.85}
+            />
           </div>
           <div className="poe-hl-stats">
             <div className="phs">
-              <span className="lbl">Drawn</span>
-              <span className="v warn">{P.drawn} W</span>
-              <span className="sub">{pctTotal}% utilised</span>
+              <span className="lbl">Drawn (allocated)</span>
+              <span className="v warn">{Math.round(totals.drawn)} W</span>
+              <span className="sub">{totals.pct}% utilised</span>
             </div>
             <div className="phs">
-              <span className="lbl">Reserved (LLDP MED)</span>
-              <span className="v">{P.reserved} W</span>
-              <span className="sub">8 ports negotiated</span>
+              <span className="lbl">Measured</span>
+              <span className="v">{Math.round(totals.measured)} W</span>
+              <span className="sub">actual draw across PSEs</span>
             </div>
             <div className="phs">
               <span className="lbl">Available</span>
-              <span className="v ok">{P.available} W</span>
-              <span className="sub">enough for ~22 class-4 APs</span>
+              <span className="v ok">{Math.round(totals.available)} W</span>
+              <span className="sub">{ports.length} port{ports.length === 1 ? "" : "s"} drawing</span>
             </div>
             <div className="phs">
               <span className="lbl">PSU redundancy</span>
-              <span className="v err">N+0</span>
-              <span className="sub">PSU2 slot-3 absent</span>
+              <span className={"v " + psuClass}>{psuLabel}</span>
+              <span className="sub">{psuSub || "—"}</span>
             </div>
           </div>
         </div>
@@ -602,16 +639,21 @@ const TabPoe = () => {
             <SourceBadge src="zbx" />
           </div>
           <div className="poe-perm-body">
-            {P.perMember.map(m => {
-              const pct = Math.round((m.drawn / m.budget) * 100);
+            {members.length === 0 && (
+              <div style={{ padding: "12px 4px", color: "var(--muted)" }}>
+                No per-slot PoE items reported.
+              </div>
+            )}
+            {members.map(m => {
+              const pct = m.budget > 0 ? Math.round((m.drawn / m.budget) * 100) : 0;
               return (
                 <div key={m.idx} className="ppm-row">
                   <div className="ppm-id">MEMBER {m.idx}</div>
                   <div className="ppm-bar">
-                    <i className={pct > 80 ? "warn" : ""} style={{ width: `${pct}%` }} />
-                    <span className="ppm-val">{m.drawn} / {m.budget} W</span>
+                    <i className={pct > 80 ? "warn" : ""} style={{ width: `${Math.min(100, pct)}%` }} />
+                    <span className="ppm-val">{Math.round(m.drawn)} / {Math.round(m.budget)} W</span>
                   </div>
-                  <div className="ppm-ports">{m.ports} ports</div>
+                  <div className="ppm-ports">{m.portCount} port{m.portCount === 1 ? "" : "s"}</div>
                   <div className="ppm-pct">{pct}%</div>
                 </div>
               );
@@ -626,37 +668,54 @@ const TabPoe = () => {
           <SourceBadge src="zbx" />
           <SourceBadge src="pf" />
           <div className="h-spacer" />
-          <span className="h-meta">cross-referenced PacketFence · sorted by W draw</span>
+          <span className="h-meta">
+            {ports.length === 0 ? "no ports drawing" : `${Math.min(ports.length, 25)} of ${ports.length} shown · sorted by W`}
+          </span>
         </div>
-        <table className="link-tbl poe-tbl">
-          <thead>
-            <tr>
-              <th style={{width: 60}}>Port</th>
-              <th>Device</th>
-              <th>Vendor</th>
-              <th style={{width: 70}}>Class</th>
-              <th style={{width: 160}}>Draw</th>
-              <th style={{width: 80, textAlign:"right"}}>Watts</th>
-            </tr>
-          </thead>
-          <tbody>
-            {P.topConsumers.map((c, i) => {
-              const pct = Math.round((c.watts / 30) * 100);
-              return (
-                <tr key={i}>
-                  <td className="fg" style={{color: "var(--accent)"}}>{c.port}</td>
-                  <td style={{color: "var(--fg)"}}>{c.device}</td>
-                  <td>{c.vendor}</td>
-                  <td><span className={"poe-cls cls-" + c.cls}>Class {c.cls}</span></td>
-                  <td>
-                    <span className="util-bar"><i style={{ width: `${pct}%`, background: c.cls === 4 ? "var(--warn)" : "var(--ok)" }} /></span>
-                  </td>
-                  <td style={{textAlign:"right"}}>{c.watts.toFixed(1)} W</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        {ports.length === 0 && (
+          <div style={{ padding: "18px 14px", color: "var(--muted)" }}>
+            No ports reporting measured PoE draw.
+          </div>
+        )}
+        {ports.length > 0 && (
+          <table className="link-tbl poe-tbl">
+            <thead>
+              <tr>
+                <th style={{width: 60}}>Port</th>
+                <th>Device</th>
+                <th>Vendor</th>
+                <th style={{width: 70}}>Class</th>
+                <th style={{width: 160}}>Draw</th>
+                <th style={{width: 80, textAlign:"right"}}>Watts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ports.slice(0, 25).map((c, i) => {
+                const pf = _poePfDevice(c.member, c.port);
+                // class-4 ports can draw up to 25.5W; use that as the bar
+                // ceiling so the bar reflects "fraction of class-4 max".
+                const pct = Math.min(100, Math.round((c.watts / 25.5) * 100));
+                const isClass4 = c.class === 5; // 5 = class4 (802.3at), 1..4 → class 0..3
+                return (
+                  <tr key={`${c.member}.${c.port}`}>
+                    <td className="fg" style={{color: "var(--accent)"}}>{c.member}:{c.port}</td>
+                    <td style={{color: "var(--fg)"}}>{pf ? pf.device : "—"}</td>
+                    <td>{pf ? pf.vendor : "—"}</td>
+                    <td>
+                      {c.class != null
+                        ? <span className={"poe-cls cls-" + c.class}>Class {c.class - 1}</span>
+                        : <span style={{color: "var(--muted)"}}>—</span>}
+                    </td>
+                    <td>
+                      <span className="util-bar"><i style={{ width: `${pct}%`, background: isClass4 ? "var(--warn)" : "var(--ok)" }} /></span>
+                    </td>
+                    <td style={{textAlign:"right"}}>{c.watts.toFixed(1)} W</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

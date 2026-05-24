@@ -200,7 +200,8 @@ class SwitchClient {
             'speeds'       => $this->extractSpeeds($items),
             'info'         => $this->extractHostInfo($items),
             'edpNeighbors' => $this->extractEdpNeighbors($items),
-            'vlans'        => $this->extractVlans($items)
+            'vlans'        => $this->extractVlans($items),
+            'poeBudget'    => $this->extractPoeBudget($items)
         ];
     }
 
@@ -860,6 +861,129 @@ class SwitchClient {
         });
 
         return $out;
+    }
+
+    /**
+     * Build the PoE Budget payload — per-slot budget/draw figures from the
+     * vlan-poe-topology template patch's extreme.poe.* items, plus the
+     * per-port watts/class needed for the top-consumers table.
+     *
+     * Per-slot items (W unless noted):
+     *   extreme.poe.budget[<slot>]    — extremePethSlotPowerLimit
+     *   extreme.poe.drawn[<slot>]     — extremePethSlotConsumptionPower (allocated)
+     *   extreme.poe.measured[<slot>]  — extremePethSlotMeasuredPower
+     *   extreme.poe.available[<slot>] — extremePethSlotMaxAvailPower
+     *   extreme.poe.capacity[<slot>]  — extremePethSlotMaxCapacity
+     *   extreme.poe.status[<slot>]    — extremePethSlotPoeStatus (2=operational)
+     *
+     * Per-port items (already in the base template):
+     *   snmp.interfaces.poe.mpower[<idx>] — measured power in milliwatts
+     *   snmp.interfaces.poe.dstatus[<idx>] — PoE detection status
+     * Plus the patch adds:
+     *   snmp.interfaces.poe.class[<idx>]  — pethPsePortPowerClassifications
+     *
+     * @return array{
+     *     totals:  array{drawn:float, budget:float, available:float, measured:float, pct:int},
+     *     members: array<int, array{idx:int, drawn:float, budget:float, available:float, measured:float|null, capacity:float|null, status:int|null, portCount:int}>,
+     *     ports:   array<int, array{member:int, port:int, watts:float, class:int|null}>
+     * }
+     */
+    private function extractPoeBudget(array $items): array {
+        $perSlot = [];
+        $perPortWatts = []; // "m.p" → watts
+        $perPortClass = []; // "m.p" → class (1..5)
+
+        foreach ($items as $it) {
+            $k = (string) $it['key_'];
+            $v = trim((string) $it['lastvalue']);
+            if ($v === '') continue;
+
+            if (preg_match('/^extreme\.poe\.(budget|drawn|measured|available|capacity|status)\[(\d+)\]$/', $k, $m)) {
+                $slot  = (int) $m[2];
+                $field = $m[1];
+                if ($slot < 1 || $slot > self::STACK_LIMIT) continue;
+                $perSlot[$slot][$field] = is_numeric($v) ? (float) $v : 0.0;
+                continue;
+            }
+
+            // Per-port mpower (milliwatts). Reuse parseMemberPort for the
+            // single-ifIndex vs "m.p" key shapes.
+            $idx = self::parseMemberPort($k, 'snmp.interfaces.poe.mpower[');
+            if ($idx !== null) {
+                [$mem, $port] = $idx;
+                $watts = ((float) $v) / 1000.0;
+                if ($watts > 0) $perPortWatts["{$mem}.{$port}"] = $watts;
+                continue;
+            }
+
+            // Per-port PoE class.
+            $idx = self::parseMemberPort($k, 'snmp.interfaces.poe.class[');
+            if ($idx !== null) {
+                [$mem, $port] = $idx;
+                $cls = (int) $v;
+                if ($cls >= 1 && $cls <= 5) $perPortClass["{$mem}.{$port}"] = $cls;
+                continue;
+            }
+        }
+
+        // Per-member: also count how many ports on the slot are drawing
+        // power, for the "X ports" column in the per-member table.
+        $portCount = [];
+        foreach ($perPortWatts as $mp => $w) {
+            [$mem] = explode('.', $mp);
+            $portCount[(int) $mem] = ($portCount[(int) $mem] ?? 0) + 1;
+        }
+
+        $members = [];
+        $totalDrawn     = 0.0;
+        $totalBudget    = 0.0;
+        $totalAvailable = 0.0;
+        $totalMeasured  = 0.0;
+        foreach ($perSlot as $slot => $row) {
+            $drawn     = (float) ($row['drawn']     ?? 0);
+            $budget    = (float) ($row['budget']    ?? 0);
+            $available = (float) ($row['available'] ?? max(0.0, $budget - $drawn));
+            $measured  = $row['measured'] ?? null;
+            $totalDrawn     += $drawn;
+            $totalBudget    += $budget;
+            $totalAvailable += $available;
+            if ($measured !== null) $totalMeasured += (float) $measured;
+            $members[] = [
+                'idx'       => $slot,
+                'drawn'     => $drawn,
+                'budget'    => $budget,
+                'available' => $available,
+                'measured'  => $measured !== null ? (float) $measured : null,
+                'capacity'  => isset($row['capacity']) ? (float) $row['capacity'] : null,
+                'status'    => isset($row['status'])   ? (int)   $row['status']   : null,
+                'portCount' => $portCount[$slot] ?? 0
+            ];
+        }
+        usort($members, fn($a, $b) => $a['idx'] <=> $b['idx']);
+
+        $ports = [];
+        foreach ($perPortWatts as $mp => $watts) {
+            [$mem, $port] = explode('.', $mp);
+            $ports[] = [
+                'member' => (int) $mem,
+                'port'   => (int) $port,
+                'watts'  => round($watts, 1),
+                'class'  => $perPortClass[$mp] ?? null
+            ];
+        }
+        usort($ports, fn($a, $b) => $b['watts'] <=> $a['watts']);
+
+        return [
+            'totals' => [
+                'drawn'     => round($totalDrawn, 1),
+                'budget'    => round($totalBudget, 1),
+                'available' => round($totalAvailable, 1),
+                'measured'  => round($totalMeasured, 1),
+                'pct'       => $totalBudget > 0 ? (int) round(($totalDrawn / $totalBudget) * 100) : 0
+            ],
+            'members' => $members,
+            'ports'   => $ports
+        ];
     }
 
     /** @param array<int,array<string,mixed>> $items */

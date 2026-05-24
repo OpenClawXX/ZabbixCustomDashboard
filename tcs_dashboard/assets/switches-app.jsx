@@ -200,7 +200,6 @@ const SwitchesApp = () => {
           )}
           {activeTab === "poe" && (
             <React.Fragment>
-              <DemoBanner name="PoE Budget" />
               <div className="switch-layout-2col">
                 <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
                 <TabPoe />

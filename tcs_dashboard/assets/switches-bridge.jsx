@@ -52,6 +52,7 @@
         window.STACK_MEMBERS   = [];
         window.EDP_NEIGHBORS   = [];
         window.VLANS           = [];
+        window.POE_BUDGET      = null;
         window.SWITCH_PROBLEMS = [];
         window.SWITCH_LOADING  = { ...window.SWITCH_LOADING, snapshot: true };
         window.dispatchEvent(new CustomEvent("tcs:switch-data", { detail: { section: "navigate" } }));
@@ -76,6 +77,9 @@
     // the vlan-poe-topology template patch (extreme.vlan.* items) is
     // applied.
     window.VLANS            = [];
+    // PoE budget snapshot. null until the snapshot arrives; empty
+    // members/ports arrays once it does if the patch isn't applied.
+    window.POE_BUDGET       = null;
     window.SWITCH_SITES     = [];
     window.SWITCH_INFO      = {};
     window.PF_ADMIN_BASE    = "";
@@ -328,6 +332,7 @@
         const problems = Array.isArray(snap.problems)     ? snap.problems     : [];
         const edp      = Array.isArray(snap.edpNeighbors) ? snap.edpNeighbors : [];
         const vlans    = Array.isArray(snap.vlans)        ? snap.vlans        : [];
+        const poeBudget = (snap.poeBudget && typeof snap.poeBudget === "object") ? snap.poeBudget : null;
         const kpis     = (snap.kpis    && typeof snap.kpis    === "object") ? snap.kpis    : {};
         const history  = (snap.history && typeof snap.history === "object") ? snap.history : {};
         const traffic  = (snap.traffic && typeof snap.traffic === "object") ? snap.traffic : {};
@@ -341,6 +346,10 @@
         // VLANs + per-slot tagged/untagged port lists from
         // extreme.vlan.* items (vlan-poe-topology patch).
         window.VLANS = vlans;
+        // PoE budget — stack totals, per-slot draw/budget, and per-port
+        // wattages (sorted desc) ready to join with PF data for the
+        // top-consumers table.
+        window.POE_BUDGET = poeBudget;
 
         // Stash speeds for buildStack to consume.
         window._tcsSpeedByKey = speeds;
