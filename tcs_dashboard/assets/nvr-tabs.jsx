@@ -309,46 +309,75 @@ const NvrTabServers = () => {
                 <tr>
                   <th style={{ width: 20 }}></th>
                   <th style={{ width: 170 }}>Host</th>
-                  <th style={{ width: 130 }}>Role</th>
+                  <th style={{ width: 100 }}>Service</th>
                   <th>Site</th>
                   <th style={{ width: 120 }}>IP</th>
-                  <th style={{ width: 100 }}>OS</th>
-                  <th style={{ width: 100, textAlign: "right" }}>Channels</th>
-                  <th style={{ width: 130 }}>CPU</th>
-                  <th style={{ width: 130 }}>Mem</th>
-                  <th style={{ width: 130 }}>Disk</th>
-                  <th style={{ width: 80, textAlign: "right" }}>Lag</th>
-                  <th style={{ width: 80 }}>RAID</th>
-                  <th style={{ width: 60, textAlign: "right" }}>Up</th>
+                  <th style={{ width: 90, textAlign: "right" }}>Cameras</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Devices</th>
+                  <th style={{ width: 110 }}>CPU</th>
+                  <th style={{ width: 110 }}>Mem</th>
+                  <th style={{ width: 180 }}>Storage</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Retention</th>
+                  <th style={{ width: 70 }}>RAID</th>
+                  <th style={{ width: 50, textAlign: "right" }}>Up</th>
                 </tr>
               </thead>
               <tbody>
                 {SR.map(s => {
                   const tileState = s.state || (_tabsNz(s.disk) > 90 || _tabsNz(s.cpu) > 80 || s.raid === "warn" || s.raid === "err" ? "warn" : "ok");
+                  // Service pill: prefer Milestone-reported state when
+                  // available (svcState), otherwise fall back to the
+                  // handshake age (>5m → stale). Anything not in the
+                  // "running" set lights red.
+                  const svc = (s.svcState || "").toLowerCase();
+                  const svcOk   = svc === "" ? null : ["server","running","started","ok"].includes(svc);
+                  const svcLabel = svc || (s.handshakeAge > 300 ? "stale" : (s.handshakeAge >= 0 ? "running" : "—"));
+                  // Per-RS storage: use the new RS-extras rollup if
+                  // present (storageTotalGB/UsedGB from /storages), else
+                  // fall back to the agent's disk % so old installs
+                  // without the extras template still get something.
+                  const haveStorage = _tabsNz(s.storageTotalGB) > 0;
+                  const storUsedGB  = _tabsNz(s.storageUsedGB);
+                  const storCapGB   = _tabsNz(s.storageTotalGB);
+                  const storPct     = haveStorage ? (storUsedGB / storCapGB) * 100 : _tabsNz(s.disk);
+                  const retDays     = _tabsNz(s.retentionMin) > 0 ? Math.round(s.retentionMin / 1440) : 0;
                   return (
                     <tr key={s.id}
                         onClick={() => { if (s.agentHostid) location.href = `zabbix.php?action=tcs.server.view&hostid=${s.agentHostid}`; }}>
                       <td><StatusDot state={tileState}/></td>
                       <td className="mono" style={{ color: "var(--accent)" }}>{s.id}</td>
                       <td>
-                        <span className={"role-tag " + (s.role === "Failover" ? "ovr" : s.role === "Management Server" ? "tpl" : "")}>{s.role}</span>
+                        {svcOk === null
+                          ? <span style={{ color: "var(--muted)" }}>—</span>
+                          : <span className={"state-pill " + (svcOk ? "ok" : "err")}>{svcLabel}</span>}
                       </td>
                       <td style={{ color: "var(--fg-2)" }}>{s.site}</td>
                       <td className="mono" style={{ fontSize: 11 }}>{s.ip || "—"}</td>
-                      <td style={{ fontSize: 11, color: "var(--muted)" }}>{(s.os || "").replace("Win Server ", "WS ").replace("Microsoft Windows Server ", "WS ") || "—"}</td>
                       <td className="mono" style={{ textAlign: "right" }}>
-                        {_tabsNz(s.chans) === 0 ? <span style={{ color: "var(--muted)" }}>—</span> :
-                          <>
-                            <span style={{ color: _tabsNz(s.recording) < _tabsNz(s.chans) ? "var(--warn)" : "var(--ok)" }}>{s.recording}</span>
-                            <span style={{ color: "var(--muted)" }}> / {s.chans}</span>
-                          </>
-                        }
+                        {_tabsNz(s.chans) === 0
+                          ? <span style={{ color: "var(--muted)" }}>—</span>
+                          : <span style={{ color: "var(--fg)" }}>{_tabsNz(s.chans).toLocaleString()}</span>}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right", color: "var(--muted)" }}>
+                        {_tabsNz(s.hwDevices) === 0 ? "—" : _tabsNz(s.hwDevices).toLocaleString()}
                       </td>
                       <td><InlineBar v={s.cpu}  max={100} warn={75} crit={90} unit="%" /></td>
                       <td><InlineBar v={s.mem}  max={100} warn={80} crit={92} unit="%" /></td>
-                      <td><InlineBar v={s.disk} max={100} warn={80} crit={90} unit="%" /></td>
-                      <td className="mono" style={{ textAlign: "right", color: _tabsNz(s.archiveLagH) > 2 ? "var(--warn)" : _tabsNz(s.archiveLagH) > 0 ? "var(--fg-2)" : "var(--muted)" }}>
-                        {_tabsNz(s.archiveLagH) > 0 ? `${s.archiveLagH}h` : "—"}
+                      <td>
+                        {haveStorage
+                          ? <div className="storage-bar compact">
+                              <div className="label-row">
+                                <span className="name mono" style={{ color: "var(--muted)", fontSize: 10.5 }}>
+                                  {(storUsedGB / 1000).toFixed(1)} / {(storCapGB / 1000).toFixed(1)} TB
+                                </span>
+                                <span className="pct">{storPct.toFixed(0)}%</span>
+                              </div>
+                              <div className="track"><div className={"fill " + (storPct > 90 ? "err" : storPct > 80 ? "warn" : "")} style={{ width: `${storPct}%` }}/></div>
+                            </div>
+                          : <InlineBar v={s.disk} max={100} warn={80} crit={90} unit="%" />}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right", color: retDays === 0 ? "var(--muted)" : retDays < 30 ? "var(--warn)" : "var(--fg-2)" }}>
+                        {retDays === 0 ? "—" : `${retDays}d`}
                       </td>
                       <td>
                         {s.raid && s.raid !== "unknown"
@@ -456,8 +485,12 @@ const NvrTabStorage = () => {
   }, window.MILESTONE || {});
   const S  = _tabsArr(window.SITES);
   const SR = _tabsArr(window.SERVERS).filter(s => s.role === "Recording Server");
-  const usedTB  = _tabsNz(M.storageUsedTB);
-  const totalTB = _tabsNz(M.storageTotalTB);
+  // Prefer the top-level Milestone summary if it ever gets templated;
+  // otherwise sum the per-RS rollup the extras template now publishes.
+  const rsTotalTB = SR.reduce((a, s) => a + _tabsNz(s.storageTotalGB), 0) / 1000;
+  const rsUsedTB  = SR.reduce((a, s) => a + _tabsNz(s.storageUsedGB),  0) / 1000;
+  const usedTB  = _tabsNz(M.storageUsedTB)  || rsUsedTB;
+  const totalTB = _tabsNz(M.storageTotalTB) || rsTotalTB;
   const freeTB  = Math.max(0, totalTB - usedTB);
   const pct     = totalTB > 0 ? (usedTB / totalTB) * 100 : 0;
   const nearLimit = S.filter(s => _tabsNz(s.storageCapGB,1) && (s.storageGB / s.storageCapGB) > 0.9).length;
@@ -512,7 +545,11 @@ const NvrTabStorage = () => {
                         </div>
                         <div className="track"><div className={"fill " + (sitePct > 90 ? "err" : sitePct > 80 ? "warn" : "")} style={{ width: `${sitePct}%` }}/></div>
                       </div>
-                      <div className="sr-retention mono">{M.retentionDays ? `${M.retentionDays}d` : "—"}</div>
+                      <div className="sr-retention mono">
+                        {_tabsNz(s.retentionMin) > 0
+                          ? `${Math.round(s.retentionMin / 1440)}d`
+                          : (M.retentionDays ? `${M.retentionDays}d` : "—")}
+                      </div>
                     </div>
                   );
                 })}
@@ -524,8 +561,9 @@ const NvrTabStorage = () => {
         <div className="card-h">
           <h3>Storage volumes</h3>
           <SourceBadge src="zbx"/>
+          <SourceBadge src="ext"/>
           <div className="h-spacer"/>
-          <span className="h-meta">per recording server</span>
+          <span className="h-meta">per recording server · Milestone /storages rollup</span>
         </div>
         {SR.length === 0
           ? <div style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>No recording-server volumes discovered.</div>
@@ -535,29 +573,49 @@ const NvrTabStorage = () => {
                   <th style={{ width: 20 }}></th>
                   <th>Recording server</th>
                   <th>Site</th>
-                  <th style={{ width: 80, textAlign: "right" }}>Used %</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Cameras</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Devices</th>
+                  <th style={{ width: 160, textAlign: "right" }}>Used / Total</th>
+                  <th style={{ width: 70, textAlign: "right" }}>Used %</th>
                   <th style={{ width: 200 }}>Utilisation</th>
-                  <th style={{ width: 90 }}>RAID</th>
-                  <th style={{ width: 90, textAlign: "right" }}>Archive lag</th>
+                  <th style={{ width: 90, textAlign: "right" }}>Retention</th>
+                  <th style={{ width: 80 }}>RAID</th>
                 </tr>
               </thead>
               <tbody>
                 {SR.map(s => {
-                  const disk = _tabsNz(s.disk);
+                  const haveStorage = _tabsNz(s.storageTotalGB) > 0;
+                  const usedGB = _tabsNz(s.storageUsedGB);
+                  const capGB  = _tabsNz(s.storageTotalGB);
+                  const pct    = haveStorage ? (usedGB / capGB) * 100 : _tabsNz(s.disk);
+                  const retDays = _tabsNz(s.retentionMin) > 0 ? Math.round(s.retentionMin / 1440) : 0;
+                  const dotState = s.raid === "err" || pct > 90 ? "err"
+                    : s.raid === "warn" || pct > 80 ? "warn" : "ok";
                   return (
                     <tr key={s.id}>
-                      <td><StatusDot state={s.raid === "err" ? "err" : (disk > 90 ? "warn" : s.raid === "warn" ? "warn" : "ok")}/></td>
+                      <td><StatusDot state={dotState}/></td>
                       <td className="mono" style={{ color: "var(--accent)" }}>{s.id}</td>
                       <td style={{ color: "var(--fg-2)" }}>{s.site}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>{disk ? `${disk.toFixed(0)}%` : "—"}</td>
-                      <td>{disk ? <InlineBar v={disk} max={100} warn={80} crit={90} unit="%" /> : <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {_tabsNz(s.chans) === 0 ? <span style={{ color: "var(--muted)" }}>—</span> : _tabsNz(s.chans).toLocaleString()}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right", color: "var(--muted)" }}>
+                        {_tabsNz(s.hwDevices) === 0 ? "—" : _tabsNz(s.hwDevices).toLocaleString()}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {haveStorage
+                          ? <>{(usedGB/1000).toFixed(1)}<span style={{ color: "var(--muted)" }}> / {(capGB/1000).toFixed(1)} TB</span></>
+                          : <span style={{ color: "var(--muted)" }}>—</span>}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right" }}>{pct > 0 ? `${pct.toFixed(0)}%` : "—"}</td>
+                      <td>{pct > 0 ? <InlineBar v={pct} max={100} warn={80} crit={90} unit="%" /> : <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                      <td className="mono" style={{ textAlign: "right", color: retDays === 0 ? "var(--muted)" : retDays < 30 ? "var(--warn)" : "var(--fg-2)" }}>
+                        {retDays === 0 ? "—" : `${retDays}d`}
+                      </td>
                       <td>
                         {s.raid && s.raid !== "unknown"
                           ? <span className={"state-pill " + (s.raid === "ok" ? "ok" : s.raid === "err" ? "err" : "warn")}>{s.raid}</span>
                           : <span style={{ color: "var(--muted)" }}>—</span>}
-                      </td>
-                      <td className="mono" style={{ textAlign: "right", color: _tabsNz(s.archiveLagH) > 2 ? "var(--warn)" : "var(--muted)" }}>
-                        {_tabsNz(s.archiveLagH) > 0 ? `${s.archiveLagH}h` : "—"}
                       </td>
                     </tr>
                   );
