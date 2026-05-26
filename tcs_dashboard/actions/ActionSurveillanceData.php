@@ -186,6 +186,25 @@ class ActionSurveillanceData extends ActionDataBase {
             'webitems' => false
         ]));
 
+        // The Milestone XProtect by HTTP template's per-group dependent items
+        // (milestone.grp.name[<id>] etc.) extract from
+        // milestone.grp.raw[<id>] via $["<id>"], which assumes the snapshot
+        // file written by milestone_groups_refresh.sh exposes each group as a
+        // top-level GUID key. On installs where the script only emits the
+        // $.__array list, every per-group dep item stays empty and the Sites
+        // tab falls through to the bare GUID even though the canonical name
+        // is sitting in the snapshot. Pull the snapshot directly so we can
+        // back-fill name / path / cameraCount per group when the dep items
+        // are blank.
+        $snapshots = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['itemid', 'hostid', 'key_', 'lastvalue'],
+            'hostids'     => $host_ids,
+            'search'      => ['key_' => 'milestone_groups_read.sh'],
+            'startSearch' => true,
+            'monitored'   => true,
+            'webitems'    => false
+        ]));
+
         $out = [];
         $key_to_site_logical = array_flip(self::SITE_KEYS);
 
@@ -248,6 +267,33 @@ class ActionSurveillanceData extends ActionDataBase {
                     }
                 }
                 continue;
+            }
+        }
+
+        // Back-fill per-group fields from the groups snapshot's $.__array
+        // when the dep items came through empty (script only emitted the
+        // array form, not the GUID-keyed top-level entries the template's
+        // $["<id>"] JSONPath needs). Values already populated by the dep
+        // items win — we only fill blanks.
+        foreach ($snapshots as $snap) {
+            $hid = (string) $snap['hostid'];
+            $raw = (string) ($snap['lastvalue'] ?? '');
+            if ($raw === '') continue;
+            $blob = json_decode($raw, true);
+            if (!is_array($blob)) continue;
+            $arr = is_array($blob['__array'] ?? null) ? $blob['__array'] : [];
+            $out[$hid] ??= ['site' => [], 'rs' => [], 'cam' => [], 'grp' => []];
+            foreach ($arr as $g) {
+                if (!is_array($g)) continue;
+                $gid = (string) ($g['id'] ?? '');
+                if ($gid === '') continue;
+                $out[$hid]['grp'][$gid] ??= [];
+                foreach ($g as $k => $v) {
+                    $existing = $out[$hid]['grp'][$gid][$k] ?? null;
+                    if ($existing === null || $existing === '' || $existing === []) {
+                        $out[$hid]['grp'][$gid][$k] = $v;
+                    }
+                }
             }
         }
         return $out;
