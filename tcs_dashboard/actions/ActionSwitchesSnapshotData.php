@@ -302,16 +302,18 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
 
     /**
      * Build the ssheasy auto-connect descriptor for the live CLI console.
-     * ssheasy auto-connects from query params on its /connect route; we
-     * prefill host/port/user/password from macros so the embedded terminal
-     * opens straight into the switch.
+     * Targets ssheasy's dedicated /terminal page (terminal-only: just
+     * xterm.js + the WASM SSH client, no navbar / connection form / file
+     * browser), passing embed=1 so the page renders chrome-free for iframing.
+     * Host/port/user/password are prefilled from macros so the terminal opens
+     * straight into the switch.
      *
      * Macros (resolved host → template → global):
      *   {$SSHEASY.URL}    base URL of the ssheasy server (required)
      *   {$SSH.USER}       SSH username
      *   {$SSH.PASSWORD}   SSH password — must be a TEXT macro; Secret/Vault
      *                     macros are never returned by the API, so a secret
-     *                     password yields a manual-auth session instead.
+     *                     password yields an in-terminal password prompt.
      *   {$SSH.PORT}       SSH port (default 22)
      *
      * The SSH target IP is the address Zabbix actually reaches the switch on:
@@ -333,13 +335,14 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         $user = (string) ($bag['{$SSH.USER}'] ?? '');
         $pass = (string) ($bag['{$SSH.PASSWORD}'] ?? '');
 
-        $q = ['host' => $ip, 'port' => $port];
+        // embed=1 strips ssheasy's chrome; the /terminal page auto-connects
+        // by default (connect defaults to "true").
+        $q = ['host' => $ip, 'port' => $port, 'embed' => '1'];
         if ($user !== '') $q['user']     = $user;
         if ($pass !== '') $q['password'] = $pass;
-        $q['connect'] = 'true';
 
         return [
-            'url'  => $base.'/connect?'.http_build_query($q),
+            'url'  => $base.'/terminal?'.http_build_query($q),
             'host' => $ip,
             'port' => $port,
             'user' => $user
