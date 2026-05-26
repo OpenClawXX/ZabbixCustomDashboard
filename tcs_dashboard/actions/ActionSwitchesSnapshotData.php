@@ -84,6 +84,25 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         // macro rather than deriving from {$PF.URL}.
         $payload['pfBase'] = $this->resolvePfAdminUrl($hostid);
 
+        // User macros table (Macros · CLI tab) — every macro resolved for the
+        // host through global → template → host precedence, tagged with its
+        // effective source.
+        try {
+            $payload['macros'] = $this->collectAllMacros($hostid);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] snapshot.data macros: '.$e->getMessage());
+            $payload['macros'] = [];
+        }
+
+        // ssheasy connect descriptor for the live CLI console. null when
+        // {$SSHEASY.URL} isn't set or the host has no management IP.
+        try {
+            $payload['ssh'] = $this->collectSshConnect($hostid, $payload['host']);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] snapshot.data ssh: '.$e->getMessage());
+            $payload['ssh'] = null;
+        }
+
         $this->setResponse(new CControllerResponseData([
             'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES)
         ]));
@@ -202,6 +221,129 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
     private function resolvePfAdminUrl(string $hostid): string {
         $bag = $this->macroChain($hostid, ['{$PF.ADMIN_URL}']);
         return rtrim((string) ($bag['{$PF.ADMIN_URL}'] ?? ''), '/');
+    }
+
+    /**
+     * Every user macro resolved for the host, with the same global →
+     * template → host precedence the macroChain helper uses, but for the
+     * full macro set rather than a fixed name list. Each row carries the
+     * effective value and a `ctx` label naming where the winning definition
+     * lives; host-level definitions get a " (override)" suffix so the
+     * frontend renders the "host" pill.
+     *
+     * Secret/Vault macros (type != 0) never return a value through the API —
+     * their value is masked and the row is flagged `sys` so the table dims it.
+     *
+     * @return array<int, array{k:string, v:string, ctx:string, sys:bool}>
+     */
+    private function collectAllMacros(string $hostid): array {
+        // macro => ['v' => string, 'ctx' => string, 'sys' => bool]
+        $bag = [];
+
+        $valueOf = static function (array $r): string {
+            $type = (int) ($r['type'] ?? 0);
+            if ($type !== 0) return '********';          // secret / vault — never exposed
+            return array_key_exists('value', $r) ? (string) $r['value'] : '';
+        };
+        $isSecret = static fn (array $r): bool => ((int) ($r['type'] ?? 0)) !== 0;
+
+        // 1. Globals (lowest precedence).
+        $globals = API::UserMacro()->get([
+            'output'      => ['macro', 'value', 'type'],
+            'globalmacro' => true
+        ]) ?: [];
+        foreach ($globals as $r) {
+            $bag[$r['macro']] = ['v' => $valueOf($r), 'ctx' => 'Global macro', 'sys' => $isSecret($r)];
+        }
+
+        // 2. Template-inherited macros — full ancestry, labelled by template name.
+        $templateIds = self::collectTemplateAncestry($hostid);
+        if ($templateIds) {
+            $tpls = API::Template()->get([
+                'output'       => ['templateid', 'name'],
+                'templateids'  => $templateIds,
+                'preservekeys' => true
+            ]) ?: [];
+            $tplMacros = API::UserMacro()->get([
+                'output'  => ['macro', 'value', 'type', 'hostid'],
+                'hostids' => $templateIds
+            ]) ?: [];
+            foreach ($tplMacros as $r) {
+                $tname = (string) ($tpls[$r['hostid']]['name'] ?? 'Template');
+                $bag[$r['macro']] = ['v' => $valueOf($r), 'ctx' => $tname, 'sys' => $isSecret($r)];
+            }
+        }
+
+        // 3. Host-level (highest precedence) — flagged as an override.
+        $hosts = API::Host()->get([
+            'output'  => ['hostid', 'name'],
+            'hostids' => [$hostid]
+        ]) ?: [];
+        $hostLabel = (string) ($hosts[0]['name'] ?? 'host');
+        $hostMacros = API::UserMacro()->get([
+            'output'  => ['macro', 'value', 'type'],
+            'hostids' => [$hostid]
+        ]) ?: [];
+        foreach ($hostMacros as $r) {
+            $bag[$r['macro']] = [
+                'v'   => $valueOf($r),
+                'ctx' => $hostLabel.' (override)',
+                'sys' => $isSecret($r)
+            ];
+        }
+
+        ksort($bag, SORT_STRING);
+        $out = [];
+        foreach ($bag as $k => $info) {
+            $out[] = ['k' => $k, 'v' => $info['v'], 'ctx' => $info['ctx'], 'sys' => $info['sys']];
+        }
+        return $out;
+    }
+
+    /**
+     * Build the ssheasy auto-connect descriptor for the live CLI console.
+     * ssheasy auto-connects from query params on its /connect route; we
+     * prefill host/port/user/password from macros so the embedded terminal
+     * opens straight into the switch.
+     *
+     * Macros (resolved host → template → global):
+     *   {$SSHEASY.URL}    base URL of the ssheasy server (required)
+     *   {$SSH.USER}       SSH username
+     *   {$SSH.PASSWORD}   SSH password — must be a TEXT macro; Secret/Vault
+     *                     macros are never returned by the API, so a secret
+     *                     password yields a manual-auth session instead.
+     *   {$SSH.PORT}       SSH port (default 22)
+     *
+     * The switch management IP comes from the host's main interface (the
+     * collectHost payload), not a macro.
+     *
+     * @param array<string, mixed>|null $host
+     * @return array{url:string, host:string, port:string, user:string}|null
+     */
+    private function collectSshConnect(string $hostid, ?array $host): ?array {
+        $bag  = $this->macroChain($hostid, ['{$SSHEASY.URL}', '{$SSH.USER}', '{$SSH.PASSWORD}', '{$SSH.PORT}']);
+        $base = rtrim((string) ($bag['{$SSHEASY.URL}'] ?? ''), '/');
+        if ($base === '') return null;
+
+        $ip = (string) ($host['ip'] ?? '');
+        if ($ip === '') return null;
+
+        $port = (string) ($bag['{$SSH.PORT}'] ?? '');
+        if ($port === '') $port = '22';
+        $user = (string) ($bag['{$SSH.USER}'] ?? '');
+        $pass = (string) ($bag['{$SSH.PASSWORD}'] ?? '');
+
+        $q = ['host' => $ip, 'port' => $port];
+        if ($user !== '') $q['user']     = $user;
+        if ($pass !== '') $q['password'] = $pass;
+        $q['connect'] = 'true';
+
+        return [
+            'url'  => $base.'/connect?'.http_build_query($q),
+            'host' => $ip,
+            'port' => $port,
+            'user' => $user
+        ];
     }
 
     /**
