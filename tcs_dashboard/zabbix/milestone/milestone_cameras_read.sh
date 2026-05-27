@@ -7,15 +7,20 @@
 #
 # Why slim: the full snapshot keeps the entire Milestone camera object per
 # camera (createdDate, gisPoint, coverage*, prebuffer*, edge-storage flags,
-# relations, …). At ~2,650 cameras that's ~6 MB. The dashboard only consumes
-# address / mac / hardware name+model / displayName / enabled (status comes
-# from the ESS calc, not here), so we keep just those. Slimming drops it to
-# under ~2 MB and keeps both the __array (for LLD) and the per-GUID lookup
-# (for the milestone.cam.<field>[<id>] dependent items' JSONPath).
+# …). At ~2,650 cameras that's ~6 MB. We keep only the fields the template's
+# LLD macros and milestone.cam.* dependent items actually extract, dropping
+# it to ~2 MB while preserving both the __array (for LLD) and the per-GUID
+# lookup (for the milestone.cam.raw[<id>] = $["<id>"] dependent master).
 #
-# NOTE: this only keeps fields the dashboard reads. Any milestone.cam.* item
-# that extracts a field NOT in KEEP below will go blank — add the field to
-# KEEP if you template a new per-camera item.
+# KEEP is derived from "Milestone XProtect by HTTP":
+#   LLD macros: $.address $.enabled $.hardwareId $.hardwareModel
+#               $.hardwareName $.id $.mac $.displayName  (vendor is
+#               synthesised from hardwareModel by the LLD itself)
+#   cam items:  $.address $.channel $.enabled $.hardwareModel $.hardwareName
+#               $.lastModified $.mac $.recordingServerId
+#               $.relations.parent.id (milestone.cam.rs)
+# NOTE: any new milestone.cam.* item that extracts a field NOT in KEEP will
+# go blank — add the field here when you template one.
 #
 # Usage from Zabbix item key:
 #   milestone_cameras_read.sh[]
@@ -58,8 +63,9 @@ fi
 python3 - "$OUT_FILE" <<'PY' || cat "$OUT_FILE"
 import json, sys
 
-KEEP = ("id", "displayName", "name", "enabled", "address", "mac", "macRaw",
-        "hardwareId", "hardwareName", "hardwareModel")
+KEEP = ("id", "displayName", "enabled", "address", "mac", "hardwareId",
+        "hardwareName", "hardwareModel", "channel", "lastModified",
+        "recordingServerId", "relations")
 
 with open(sys.argv[1]) as f:
     data = json.load(f)
