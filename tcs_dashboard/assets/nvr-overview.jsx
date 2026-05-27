@@ -1,11 +1,10 @@
 // Surveillance NOC Overview dashboard widgets
 
-// Still-image endpoint the cameras serve, used for the static grid
-// thumbnails. Templated as {scheme}://{camera-ip}{path}?JpegSize={size}
-// per camera. JpegSize accepts S / M / L / XL or an exact "WxH" string;
-// M (352x288 CIF) keeps the grid light while staying legible.
-const CAM_SNAPSHOT_SCHEME   = "https";
-const CAM_SNAPSHOT_PATH     = "/snap.jpg";
+// Grid thumbnails are fetched through the server-side snapshot proxy
+// (zabbix.php?action=tcs.camera.snapshot), which injects the shared
+// read-only camera login so the password never reaches the browser.
+// JpegSize accepts S / M / L / XL or an exact "WxH"; M (352x288 CIF) keeps
+// the grid light while staying legible.
 const CAM_SNAPSHOT_JPEGSIZE = "M";
 
 // Defensive defaults — if surveillance-bridge.jsx hasn't published yet
@@ -303,12 +302,10 @@ const ServerMini = ({ s }) => {
 const CamThumb = ({ c }) => {
   const now = new Date();
   const ts = now.toISOString().replace("T", " ").substr(0, 19);
-  const hasIp = c.ip && c.ip !== "—" && c.ip !== "";
-  // Static snapshot for the grid (the live stream is reserved for the camera
-  // detail page). Templated per camera off its IP; swap CAM_SNAPSHOT_PATH if
-  // the cameras serve their still image on a different path.
-  const snapUrl = hasIp
-    ? `${CAM_SNAPSHOT_SCHEME}://${c.ip}${CAM_SNAPSHOT_PATH}?JpegSize=${encodeURIComponent(CAM_SNAPSHOT_JPEGSIZE)}`
+  // Static snapshot for the grid, via the auth-injecting server proxy. Keyed
+  // by the per-camera Zabbix hostid (the proxy resolves the IP server-side).
+  const snapUrl = c.hostid
+    ? `zabbix.php?action=tcs.camera.snapshot&hostid=${encodeURIComponent(c.hostid)}&size=${encodeURIComponent(CAM_SNAPSHOT_JPEGSIZE)}`
     : null;
   return (
     <a className={`cam-tile ${c.state}`} href={c.hostid ? `zabbix.php?action=tcs.camera.view&hostid=${c.hostid}` : `zabbix.php?action=tcs.camera.view&id=${encodeURIComponent(c.id)}`} style={{textDecoration:"none"}}>

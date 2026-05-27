@@ -31,17 +31,6 @@ const CameraDetailEmpty = () => (
   </div>
 );
 
-// Live stream embed. The src is assigned as a DOM property rather than a
-// JSX attribute so the camera receives a raw "&" between query params — set
-// as markup it round-trips to "&amp;", which the firmware rejects with 400.
-const LiveFrame = ({ url, title, style }) => {
-  const ref = React.useRef(null);
-  React.useEffect(() => {
-    if (ref.current && ref.current.src !== url) ref.current.src = url;
-  }, [url]);
-  return <iframe ref={ref} title={title} allow="autoplay; fullscreen" style={style} />;
-};
-
 const CameraDetail = () => {
   const cam = resolveCamera();
   const [tab, setTab] = React.useState("overview");
@@ -49,13 +38,18 @@ const CameraDetail = () => {
 
   const camName = cam.name || cam.id;
   const hasIp = cam.ip && cam.ip !== "—";
-  // Camera web UI live view — embeds the device's own fullscreen stream page.
+  // Direct camera live page — opened in a new tab (the camera login is
+  // prompted by the browser). Not embedded: it needs auth the iframe can't
+  // carry, so live stays a click-out and the page shows stills inline.
   const liveUrl = hasIp
     ? `https://${cam.ip}/fullscreen.htm?line=1&stream=1&vport=2&autoresize=false&keepaspect=true&dewarp=false`
     : null;
-  // Static still for the device card (the live stream is reserved for the
-  // Live tab). JpegSize: S / M / L / XL or an exact "WxH".
-  const snapUrl = hasIp ? `https://${cam.ip}/snap.jpg?JpegSize=M` : null;
+  // Still image via the server-side proxy (injects the shared read-only
+  // login; keeps the password off the browser). Templated by hostid; size
+  // S / M / L / XL or an exact "WxH".
+  const snapUrl = cam.hostid
+    ? `zabbix.php?action=tcs.camera.snapshot&hostid=${encodeURIComponent(cam.hostid)}&size=L`
+    : null;
 
   const H = window.CAM_HISTORY || {};
   const liveEvents = window.CAM_EVENTS || [];
@@ -255,20 +249,22 @@ const CameraDetail = () => {
               {/* Live preview note — Live */}
               {show("live") && (
               <div className="card" style={{ marginBottom: 14 }}>
-                <div className="card-h"><h3>Live View</h3><SourceBadge src="ext"/><div className="h-spacer"/>{liveUrl && <a className="cam-id-link" href={liveUrl} target="_blank" rel="noreferrer">Open in new tab</a>}</div>
-                {!isErr && liveUrl ? (
-                  <div className="live-large" style={{ width: "100%" }}>
-                    <LiveFrame
-                      url={liveUrl}
-                      title={`Live view · ${camName}`}
-                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0, background: "#000" }}
-                    />
-                  </div>
+                <div className="card-h"><h3>Live View</h3><SourceBadge src="ext"/><div className="h-spacer"/>{liveUrl && <a className="cam-id-link" href={liveUrl} target="_blank" rel="noreferrer">Open live stream <Icon name="external" size={11}/></a>}</div>
+                {!isErr && snapUrl ? (
+                  <>
+                    <div className="live-large" style={{ width: "100%" }}>
+                      <img src={snapUrl} alt={`Snapshot · ${camName}`} onError={(e)=>{e.currentTarget.style.display="none";}} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+                    </div>
+                    <div style={{ padding: 12, fontSize: 12, color: "var(--muted)" }}>
+                      Still image, refreshed on load. The live video stream opens in the camera's
+                      own player via <strong>Open live stream</strong> (you'll be prompted to log in).
+                    </div>
+                  </>
                 ) : (
                   <div style={{ padding: 14, fontSize: 13, color: "var(--muted)" }}>
                     {isErr
-                      ? "Camera is offline — no live stream available."
-                      : "No IP address discovered for this camera, so the live stream can't be embedded. Use the Milestone Smart Client to view it."}
+                      ? "Camera is offline — no snapshot available."
+                      : "No IP address discovered for this camera. Use the Milestone Smart Client to view it."}
                   </div>
                 )}
               </div>
