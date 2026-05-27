@@ -158,6 +158,7 @@ class ActionSurveillanceData extends ActionDataBase {
             'packetLoss' => [],
             'motion'     => [],
             'cpu'        => [],
+            'mem'        => [],
             'temp'       => [],
             'latency'    => []
         ];

@@ -92,7 +92,7 @@ const CameraDetail = () => {
         </div>
 
         <div className="tabs">
-          {[["overview","Overview"],["live","Live"],["recordings","Recordings"],["events","Events"],["health","Health"],["config","Configuration"]].map(([k,l]) =>
+          {[["overview","Overview"],["live","Live"],["events","Events"],["config","Configuration"]].map(([k,l]) =>
             <div key={k} className={"tab " + (tab===k?"active":"")} onClick={()=>setTab(k)}>{l}</div>
           )}
         </div>
@@ -166,18 +166,18 @@ const CameraDetail = () => {
                 </div>
               )}
 
-              {/* Health rings — Overview, Live, Health */}
-              {show("overview", "live", "health") && (
+              {/* Health rings — Overview, Live */}
+              {show("overview", "live") && (
               <div className="card" style={{ marginBottom: 14 }}>
-                <div className="card-h"><h3>Stream Health</h3><SourceBadge src="zbx"/><div className="h-spacer"/><span className="h-meta">poll · 60s · ICMP + ONVIF status</span></div>
+                <div className="card-h"><h3>Device Health</h3><SourceBadge src="zbx"/><div className="h-spacer"/><span className="h-meta">poll · 60s · SNMP + ICMP</span></div>
                 <div className="health-grid">
                   <div className="health-cell">
-                    <Ring value={isErr?0:cam.fps} max={30} label={fmt(cam.fps)} sub="FPS" color="var(--zbx)"/>
-                    <div className="h-label">Frame Rate</div>
+                    <Ring value={isErr?0:lastOf(H.cpu)} max={100} label={lastOf(H.cpu)?fmt(lastOf(H.cpu)):"—"} sub="%" color="var(--zbx)"/>
+                    <div className="h-label">CPU</div>
                   </div>
                   <div className="health-cell">
-                    <Ring value={isErr?0:cam.bitrate/100} max={120} label={cam.bitrate?(cam.bitrate/1000).toFixed(1):"—"} sub="Mbps" color="var(--info)"/>
-                    <div className="h-label">Bitrate ({cam.codec})</div>
+                    <Ring value={isErr?0:lastOf(H.mem)} max={100} label={lastOf(H.mem)?fmt(lastOf(H.mem)):"—"} sub="%" color="var(--info)"/>
+                    <div className="h-label">Memory</div>
                   </div>
                   <div className="health-cell">
                     <Ring value={lastOf(H.latency)} max={100} label={H.latency&&H.latency.length?fmt(lastOf(H.latency)):"—"} sub="ms" color="var(--zbx)"/>
@@ -191,13 +191,13 @@ const CameraDetail = () => {
               </div>
               )}
 
-              {/* Live telemetry — Overview, Health */}
-              {show("overview", "health") && (
+              {/* Live telemetry — Overview */}
+              {show("overview") && (
               <div className="card" style={{ marginBottom: 14 }}>
                 <div className="card-h"><h3>Live Telemetry · 24h</h3><SourceBadge src="zbx"/><div className="h-spacer"/><span className="h-meta">48 samples · 30m bucket</span></div>
                 <div className="spark-strip">
-                  <SparkCellM label="FPS" v={cam.fps||"—"} unit="" data={H.fps} color="var(--zbx)" />
-                  <SparkCellM label="Bitrate" v={cam.bitrate?(cam.bitrate/1000).toFixed(1):"—"} unit="Mbps" data={H.bitrate} color="var(--info)" />
+                  <SparkCellM label="CPU" v={lastOf(H.cpu)?fmt(lastOf(H.cpu)):"—"} unit="%" data={H.cpu} color="var(--zbx)" />
+                  <SparkCellM label="MEM" v={lastOf(H.mem)?fmt(lastOf(H.mem)):"—"} unit="%" data={H.mem} color="var(--info)" />
                   <SparkCellM label="Pkt Loss" v={H.packetLoss&&H.packetLoss.length?fmt(lastOf(H.packetLoss)):"—"} unit="%" data={H.packetLoss} color="var(--warn)" />
                   <SparkCellM label="ICMP Latency" v={H.latency&&H.latency.length?fmt(lastOf(H.latency)):"—"} unit="ms" data={H.latency} color="var(--zbx)" />
                 </div>
@@ -215,19 +215,6 @@ const CameraDetail = () => {
                   <div className="k">Bitrate</div><div className="v">{cam.bitrate?`${(cam.bitrate/1000).toFixed(1)} Mbps`:"—"}</div><div className="b"><SourceBadge src="ext"/></div>
                   <div className="k">Recording mode</div><div className="v">{cam.recording}</div><div className="b"><SourceBadge src="ext"/></div>
                   <div className="k">Stream URL</div><div className="v" style={{fontSize:10}}>{liveUrl?<a className="cam-id-link" href={liveUrl} target="_blank" rel="noreferrer">{liveUrl}</a>:"—"}</div><div className="b"><SourceBadge src="ext"/></div>
-                </div>
-              </div>
-              )}
-
-              {/* Recording — Recordings */}
-              {show("recordings") && (
-              <div className="card" style={{ marginBottom: 14 }}>
-                <div className="card-h"><h3>Recording</h3><SourceBadge src="ext"/></div>
-                <div className="kv tight">
-                  <div className="k">Mode</div><div className="v">{cam.recording}</div><div className="b"><SourceBadge src="ext"/></div>
-                  <div className="k">Server</div><div className="v">{cam.server&&cam.server!=="—"?<a className="cam-id-link" href={`zabbix.php?action=tcs.server.view&id=${encodeURIComponent(cam.server)}`}>{cam.server}</a>:"—"}</div><div className="b"><SourceBadge src="ext"/></div>
-                  <div className="k">Retention</div><div className="v">—</div><div className="b"><SourceBadge src="ext"/></div>
-                  <div className="k">Last frame</div><div className="v">{isErr ? "—" : "live"}</div><div className="b"><SourceBadge src="zbx"/></div>
                 </div>
               </div>
               )}

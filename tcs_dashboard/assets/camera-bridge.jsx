@@ -16,7 +16,7 @@
     const num   = (v, dflt = 0) => (isNum(v) ? v : (isNum(Number(v)) ? Number(v) : dflt));
     const str   = (v, dflt = "—") => (v === null || v === undefined || v === "" ? dflt : String(v));
 
-    const HISTORY_KEYS = ["fps", "bitrate", "packetLoss", "motion", "cpu", "temp", "latency"];
+    const HISTORY_KEYS = ["fps", "bitrate", "packetLoss", "motion", "cpu", "mem", "temp", "latency"];
 
     const zerosArray = (n) => {
         const a = new Array(n);
