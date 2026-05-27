@@ -301,6 +301,28 @@ class ActionSurveillanceData extends ActionDataBase {
     }
 
     /**
+     * Does this decoded value look like the camera-groups snapshot? Used to
+     * recognise the groups master item by content rather than key, so a
+     * renamed reader can't silently disable the Sites-tab name back-fill.
+     *
+     * Identify by groups-specific markers (not just "has __array", which the
+     * cameras / RS snapshots also have): the groups collector stamps
+     * __endpoint with the discovered endpoint name, and every group row
+     * carries a parentGroupId field that the camera / RS rows never do.
+     */
+    private function isGroupsSnapshot($blob): bool {
+        if (!is_array($blob) || !is_array($blob['__array'] ?? null)) return false;
+
+        $ep = strtolower((string) ($blob['__endpoint'] ?? ''));
+        if (in_array($ep, ['cameragroups', 'devicegroups', 'groups'], true)) return true;
+
+        foreach ($blob['__array'] as $g) {
+            return is_array($g) && array_key_exists('parentGroupId', $g);
+        }
+        return false;
+    }
+
+    /**
      * Pull every Milestone item on the given site hosts in one call. Returns
      *   [hostid => [
      *       site:    [logical => lastvalue, ...],
@@ -336,7 +358,30 @@ class ActionSurveillanceData extends ActionDataBase {
             'startSearch' => true,
             'monitored'   => true,
             'webitems'    => false
-        ]));
+        ])) ?: [];
+
+        // Fallback: if the canonical reader item isn't found (operator
+        // renamed the external check, or it's keyed differently than the
+        // bundled milestone_groups_read.sh[3600]), don't silently lose the
+        // back-fill. Scan the other 'group'-keyed items on these hosts and
+        // keep any whose value actually parses as the groups snapshot
+        // (object with a groups-shaped __array). The value shape — not the
+        // key — is the source of truth here.
+        if (!$snapshots) {
+            $candidates = $this->safeGet(fn() => API::Item()->get([
+                'output'    => ['itemid', 'hostid', 'key_', 'lastvalue'],
+                'hostids'   => $host_ids,
+                'search'    => ['key_' => 'group'],
+                'monitored' => true,
+                'webitems'  => false
+            ])) ?: [];
+            foreach ($candidates as $it) {
+                $blob = json_decode((string) ($it['lastvalue'] ?? ''), true);
+                if ($this->isGroupsSnapshot($blob)) {
+                    $snapshots[] = $it;
+                }
+            }
+        }
 
         $out = [];
         $key_to_site_logical = array_flip(self::SITE_KEYS);
