@@ -36,6 +36,8 @@ const CameraDetail = () => {
   const [tab, setTab] = React.useState("overview");
   if (!cam) return <CameraDetailEmpty />;
 
+  const camName = cam.name || cam.id;
+
   const H = window.CAM_HISTORY || {};
   const liveEvents = window.CAM_EVENTS || [];
 
@@ -55,13 +57,13 @@ const CameraDetail = () => {
     <div className="app">
       <NVRSidebar active="nvr-cameras" />
       <div className="main">
-        <NVRTopbar crumb={["Surveillance", "Cameras", cam.site, cam.id]} />
+        <NVRTopbar crumb={["Surveillance", "Cameras", cam.site, camName]} />
 
         <div className="page-header">
           <div className="icon-btn" style={{ marginTop: 4 }} onClick={() => history.back()}><Icon name="back" /></div>
           <div style={{ flex: 1 }}>
             <div className="host-title">
-              <h1>{cam.id}</h1>
+              <h1>{camName}</h1>
               <span className="ip">{cam.ip}</span>
               <span className="role-tag faculty" style={{ fontSize: 10, padding: "1px 8px" }}>{cam.model}</span>
             </div>
@@ -82,7 +84,7 @@ const CameraDetail = () => {
           )}
         </div>
 
-        <div className="body" data-screen-label={`Camera · ${cam.id}`}>
+        <div className="body" data-screen-label={`Camera · ${camName}`}>
           <DemoBanner name="Camera Detail" />
           <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 14 }}>
             {/* Sidecar */}

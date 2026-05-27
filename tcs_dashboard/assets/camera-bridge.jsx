@@ -41,6 +41,7 @@
         if (!c || typeof c !== "object") return null;
         return {
             id:        str(c.id, "—"),
+            name:      str(c.name, c.id || "—"),
             site:      str(c.site, "—"),
             loc:       str(c.loc || c.name, c.id || "—"),
             model:     str(c.model, "—"),
