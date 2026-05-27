@@ -53,6 +53,9 @@ const CameraDetail = () => {
   const liveUrl = hasIp
     ? `https://${cam.ip}/fullscreen.htm?line=1&stream=1&vport=2&autoresize=false&keepaspect=true&dewarp=false`
     : null;
+  // Static still for the device card (the live stream is reserved for the
+  // Live tab). JpegSize: S / M / L / XL or an exact "WxH".
+  const snapUrl = hasIp ? `https://${cam.ip}/snap.jpg?JpegSize=M` : null;
 
   const H = window.CAM_HISTORY || {};
   const liveEvents = window.CAM_EVENTS || [];
@@ -109,11 +112,12 @@ const CameraDetail = () => {
                 <div className="status-line"><StatusDot state={cam.state==="err"?"err":cam.state==="warn"?"warn":"ok"}/> <span style={{color:stateColor}}>{stateLabel}</span></div>
                 <div className="live-large" style={{ width: "100%", marginTop: 12 }}>
                   <div className="frame"/><div className="scan"/>
-                  {!isErr && liveUrl && (
-                    <LiveFrame
-                      url={liveUrl}
-                      title={`Live view · ${camName}`}
-                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0, background: "#000" }}
+                  {!isErr && snapUrl && (
+                    <img
+                      src={snapUrl}
+                      alt={`Snapshot · ${camName}`}
+                      onError={(e) => { e.currentTarget.style.display = "none"; }}
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
                     />
                   )}
                   {!isErr ? <>
