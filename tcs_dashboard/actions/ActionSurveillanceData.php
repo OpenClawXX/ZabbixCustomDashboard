@@ -186,6 +186,25 @@ class ActionSurveillanceData extends ActionDataBase {
             'webitems' => false
         ]));
 
+        // The Milestone XProtect by HTTP template's per-group dependent items
+        // (milestone.grp.name[<id>] etc.) extract from
+        // milestone.grp.raw[<id>] via $["<id>"], which assumes the snapshot
+        // file written by milestone_groups_refresh.sh exposes each group as a
+        // top-level GUID key. On installs where the script only emits the
+        // $.__array list, every per-group dep item stays empty and the Sites
+        // tab falls through to the bare GUID even though the canonical name
+        // is sitting in the snapshot. Pull the snapshot directly so we can
+        // back-fill name / path / cameraCount per group when the dep items
+        // are blank.
+        $snapshots = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['itemid', 'hostid', 'key_', 'lastvalue'],
+            'hostids'     => $host_ids,
+            'search'      => ['key_' => 'milestone_groups_read.sh'],
+            'startSearch' => true,
+            'monitored'   => true,
+            'webitems'    => false
+        ]));
+
         $out = [];
         $key_to_site_logical = array_flip(self::SITE_KEYS);
 
@@ -248,6 +267,33 @@ class ActionSurveillanceData extends ActionDataBase {
                     }
                 }
                 continue;
+            }
+        }
+
+        // Back-fill per-group fields from the groups snapshot's $.__array
+        // when the dep items came through empty (script only emitted the
+        // array form, not the GUID-keyed top-level entries the template's
+        // $["<id>"] JSONPath needs). Values already populated by the dep
+        // items win — we only fill blanks.
+        foreach ($snapshots as $snap) {
+            $hid = (string) $snap['hostid'];
+            $raw = (string) ($snap['lastvalue'] ?? '');
+            if ($raw === '') continue;
+            $blob = json_decode($raw, true);
+            if (!is_array($blob)) continue;
+            $arr = is_array($blob['__array'] ?? null) ? $blob['__array'] : [];
+            $out[$hid] ??= ['site' => [], 'rs' => [], 'cam' => [], 'grp' => []];
+            foreach ($arr as $g) {
+                if (!is_array($g)) continue;
+                $gid = (string) ($g['id'] ?? '');
+                if ($gid === '') continue;
+                $out[$hid]['grp'][$gid] ??= [];
+                foreach ($g as $k => $v) {
+                    $existing = $out[$hid]['grp'][$gid][$k] ?? null;
+                    if ($existing === null || $existing === '' || $existing === []) {
+                        $out[$hid]['grp'][$gid][$k] = $v;
+                    }
+                }
             }
         }
         return $out;
@@ -472,20 +518,20 @@ class ActionSurveillanceData extends ActionDataBase {
             foreach ($bundle['grp'] ?? [] as $grp_id => $grp) {
                 $key = (string) $grp_id;
                 if (!isset($sites[$key])) {
-                    // Label hierarchy:
-                    //   milestone.grp.name[<id>]           direct per-group item
-                    //   raw-blob path tail (/Root/Bryant HS → Bryant HS)
-                    //   group GUID                          (last resort)
-                    // ?? would let an empty-string "name" win over "path"
-                    // so we explicitly skip blanks.
-                    $name = '';
-                    foreach (['name', 'path'] as $field) {
-                        $v = trim((string) ($grp[$field] ?? ''));
-                        if ($v !== '') { $name = $v; break; }
-                    }
-                    if ($name !== '' && str_contains($name, '/')) {
-                        $tail = trim((string) strrchr($name, '/'), '/');
-                        if ($tail !== '') $name = $tail;
+                    // Label source: milestone.grp.name[<id>] is the canonical
+                    // Zabbix item — when present it always wins. Path tail
+                    // from the raw blob ("/Root/Bryant HS" → "Bryant HS") is
+                    // a secondary fallback in case the name item ever fails
+                    // to populate; GUID is the absolute last resort.
+                    $name = trim((string) ($grp['name'] ?? ''));
+                    if ($name === '') {
+                        $p = trim((string) ($grp['path'] ?? ''));
+                        if ($p !== '' && str_contains($p, '/')) {
+                            $tail = trim((string) strrchr($p, '/'), '/');
+                            if ($tail !== '') $name = $tail;
+                        } elseif ($p !== '') {
+                            $name = $p;
+                        }
                     }
                     if ($name === '') $name = (string) $grp_id;
                     $sites[$key] = [
@@ -566,6 +612,38 @@ class ActionSurveillanceData extends ActionDataBase {
                         $sites[$key]['server'] = ($rs_hostname_by_id[$rs_id] ?? $rs_id)
                             . " +{$extra}";
                     }
+
+                    // Roll storage up from the RSs that host this group's
+                    // cameras. Each unique RS contributes its full storage
+                    // once — over-counting can happen when one RS serves
+                    // multiple groups, but per-row that's still the right
+                    // number to show ("the storage backing this site").
+                    // Source items come from the 'Milestone XProtect RS
+                    // extras by HTTP' template; absent → leave null.
+                    $cap_b = 0; $used_b = 0; $retention = null; $have_rs_data = false;
+                    foreach (array_keys($rs_tally) as $rs_id_inner) {
+                        foreach ($site_items as $b) {
+                            $rs_row = $b['rs'][$rs_id_inner] ?? null;
+                            if (!$rs_row) continue;
+                            $have_rs_data = $have_rs_data
+                                || isset($rs_row['storage.total.bytes'])
+                                || isset($rs_row['storage.used.bytes']);
+                            $cap_b  += (int) ($rs_row['storage.total.bytes'] ?? 0);
+                            $used_b += (int) ($rs_row['storage.used.bytes']  ?? 0);
+                            $r = (int) ($rs_row['storage.retention.minutes'] ?? 0);
+                            if ($r > 0 && ($retention === null || $r < $retention)) {
+                                $retention = $r;
+                            }
+                            break;
+                        }
+                    }
+                    if ($have_rs_data) {
+                        $sites[$key]['storageGB']    = (int) ($used_b / 1e9);
+                        $sites[$key]['storageCapGB'] = (int) ($cap_b  / 1e9);
+                        if ($retention !== null) {
+                            $sites[$key]['retentionMin'] = $retention;
+                        }
+                    }
                 }
             }
         }
@@ -609,17 +687,29 @@ class ActionSurveillanceData extends ActionDataBase {
                 $agent_host  = $agent_hid !== null ? ($hosts[$agent_hid] ?? null) : null;
                 $vals        = $agent_hid !== null ? ($metrics[$agent_hid] ?? []) : [];
 
+                // Milestone-reported service state (from the RS extras
+                // template's milestone.rs.state[<id>]). Empty when the
+                // extras template isn't linked yet.
+                $svc_state_raw = strtolower(trim((string) ($rs['state'] ?? '')));
+                $svc_is_bad = ($svc_state_raw !== '' && !in_array(
+                    $svc_state_raw,
+                    ['server', 'running', 'started', 'ok'],
+                    true
+                ));
+
                 // State precedence (worst wins):
                 //   1. Milestone says RS disabled                     → err
-                //   2. iDRAC global status critical / nonRecoverable  → err
-                //   3. Milestone handshake stale (>5m)                → warn
-                //   4. iDRAC global status nonCritical                → warn
-                //   5. Agent main interface unreachable               → warn
+                //   2. Milestone service state not running            → err
+                //   3. iDRAC global status critical / nonRecoverable  → err
+                //   4. Milestone handshake stale (>5m)                → warn
+                //   5. iDRAC global status nonCritical                → warn
+                //   6. Agent main interface unreachable               → warn
                 //   default                                           → ok
                 $hwStatus = $vals['hwStatus'] ?? null;
                 $unreachable = $agent_host && (int) ($agent_host['_unreachable'] ?? 0) === 1;
                 $state = 'ok';
                 if      ($enabled !== 'true')   $state = 'err';
+                elseif  ($svc_is_bad)           $state = 'err';
                 elseif  ($hwStatus === 'err')   $state = 'err';
                 elseif  ($stale)                $state = 'warn';
                 elseif  ($hwStatus === 'warn')  $state = 'warn';
@@ -645,7 +735,22 @@ class ActionSurveillanceData extends ActionDataBase {
                     'disk'         => $vals['disk']     ?? null,
                     'raid'         => $raid,
                     'hwStatus'     => $hwStatus,
-                    'chans'        => null,
+                    'svcState'     => $svc_state_raw !== '' ? $svc_state_raw : null,
+                    'chans'        => isset($rs['cameracount'])
+                        ? (int) $rs['cameracount']
+                        : null,
+                    'hwDevices'    => isset($rs['hardwarecount'])
+                        ? (int) $rs['hardwarecount']
+                        : null,
+                    'storageTotalGB' => isset($rs['storage.total.bytes'])
+                        ? (int) (((int) $rs['storage.total.bytes']) / 1e9)
+                        : null,
+                    'storageUsedGB'  => isset($rs['storage.used.bytes'])
+                        ? (int) (((int) $rs['storage.used.bytes']) / 1e9)
+                        : null,
+                    'retentionMin'   => isset($rs['storage.retention.minutes'])
+                        ? (int) $rs['storage.retention.minutes']
+                        : null,
                     'recording'    => null,
                     'archiveLagH'  => null,
                     'agent'        => $vals['agentVer'] ?? null,

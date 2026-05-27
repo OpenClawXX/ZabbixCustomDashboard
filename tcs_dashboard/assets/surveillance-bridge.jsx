@@ -117,7 +117,11 @@
             server:       str(s.server, "—"),
             // Default capacity to 1 so percent-of math doesn't divide by zero.
             storageGB:    num(s.storageGB),
-            storageCapGB: num(s.storageCapGB, 1) || 1
+            storageCapGB: num(s.storageCapGB, 1) || 1,
+            // Shortest retention across this site's RSs, in minutes.
+            // Published by buildSitesByGroup when the RS extras template
+            // is linked; 0 when no per-RS retention is templated yet.
+            retentionMin: num(s.retentionMin)
         }));
 
         // ── SERVERS (recording servers) ───────────────────────────────
@@ -136,7 +140,14 @@
             // iDRAC-driven RAID / hardware indicator: ok | warn | err | unknown.
             raid:         s.raid || "unknown",
             hwStatus:     s.hwStatus || null,
+            // Milestone-reported service state (from the RS extras
+            // template's milestone.rs.state[<id>]). Null if not linked.
+            svcState:     s.svcState || null,
             chans:        num(s.chans),
+            hwDevices:    num(s.hwDevices),
+            storageTotalGB: num(s.storageTotalGB),
+            storageUsedGB:  num(s.storageUsedGB),
+            retentionMin:   num(s.retentionMin),
             recording:    num(s.recording),
             archiveLagH:  num(s.archiveLagH),
             agent:        str(s.agent, "—"),
