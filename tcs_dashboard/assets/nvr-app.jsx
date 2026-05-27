@@ -37,12 +37,33 @@ const NVRApp = () => {
   // without prop drilling) can read it.
   useEffectOV(() => { window.TCS_WALL_SITE = t.wallSite || ""; }, [t.wallSite]);
 
+  // surveillance-bridge.jsx fetches the fleet async after first paint and
+  // updates the window globals in place. Bump a version on each
+  // tcs:surveillance-data event so the tree re-reads them.
+  const [, setDataVersion] = useStateOV(0);
+  useEffectOV(() => {
+    const onData = () => setDataVersion(v => v + 1);
+    window.addEventListener("tcs:surveillance-data", onData);
+    return () => window.removeEventListener("tcs:surveillance-data", onData);
+  }, []);
+
   // Snapshot the live globals once per render so we never re-deref something
   // mid-tree that the bridge swapped out underneath us.
   const M = _ms();
   const SITES_RAW = Array.isArray(window.SITES) ? window.SITES : [];
   const CAMS_RAW  = Array.isArray(window.CAMERAS) ? window.CAMERAS : [];
   const SRVS_RAW  = Array.isArray(window.SERVERS) ? window.SERVERS : [];
+
+  // First load: the bridge hasn't returned the fleet yet. Hold the boot
+  // splash (instead of an empty shell) until the first fetch lands.
+  if (window.SURVEILLANCE_LOADING && SITES_RAW.length === 0 && CAMS_RAW.length === 0) {
+    return (
+      <div className="tcs-boot" role="status" aria-live="polite">
+        <div className="spinner" aria-hidden="true" />
+        <div className="label">Loading surveillance fleet…</div>
+      </div>
+    );
+  }
 
   const densityVar = t.density === "spacious" ? 1.15 : t.density === "dense" ? 0.85 : 1;
 

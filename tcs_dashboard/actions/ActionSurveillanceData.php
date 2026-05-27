@@ -61,6 +61,16 @@ class ActionSurveillanceData extends ActionDataBase {
      * Build the full surveillance boot payload.
      */
     public function collect(string $active_hostid = ''): array {
+        // Short-lived APCu cache: the fleet collection is heavy (license, RS
+        // LLD, per-camera items, problems) and the page polls every 30s, often
+        // across several NOC screens. A 15s TTL keeps data fresh-enough while
+        // collapsing concurrent/repeat loads onto one collection.
+        $cacheKey = 'tcs_dashboard:surveillance_collect:' . md5($active_hostid);
+        if (function_exists('apcu_fetch')) {
+            $hit = apcu_fetch($cacheKey, $ok);
+            if ($ok && is_array($hit)) return $hit;
+        }
+
         $site_hosts = $this->findSiteHosts();
         if (!$site_hosts) {
             return $this->emptyPayload();
@@ -95,7 +105,7 @@ class ActionSurveillanceData extends ActionDataBase {
         $alarms    = $this->buildAlarms($problems);
         $history   = $this->buildFleetHistory($all_host_ids, $cameras);
 
-        return [
+        $payload = [
             'milestone'     => $milestone,
             'sites'         => $sites,
             'servers'       => $servers,
@@ -113,6 +123,11 @@ class ActionSurveillanceData extends ActionDataBase {
             'evidenceLocks' => [],
             'ts'            => time()
         ];
+
+        if (function_exists('apcu_store')) {
+            apcu_store($cacheKey, $payload, 15);
+        }
+        return $payload;
     }
 
     /**

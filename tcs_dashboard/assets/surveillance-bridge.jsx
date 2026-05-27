@@ -213,6 +213,12 @@
         }
     };
 
+    // The page now loads with an empty/async boot (the heavy fleet collect
+    // moved to the tcs.surveillance.data endpoint to keep TTFB low). Mark the
+    // app as loading until the first fetch lands so it can show a spinner
+    // instead of an empty shell.
+    const boot = window.SURVEILLANCE_BOOT || {};
+    window.SURVEILLANCE_LOADING = !boot || boot.async === true || !boot.milestone;
     applyBoot(window.SURVEILLANCE_BOOT);
 
     const REFRESH_MS = 30_000;
@@ -228,12 +234,19 @@
             if (!resp.ok) return;
             const fresh = await resp.json();
             applyBoot(fresh);
+            window.SURVEILLANCE_LOADING = false;
             window.dispatchEvent(new CustomEvent("tcs:surveillance-data", { detail: fresh }));
         } catch (e) {
             console.warn("[tcs] surveillance refresh failed:", e);
+            // Don't strand the page on the loading splash — drop the flag and
+            // re-render into the (empty) shell; the next poll will retry.
+            window.SURVEILLANCE_LOADING = false;
+            window.dispatchEvent(new CustomEvent("tcs:surveillance-data", { detail: null }));
         }
     };
 
     window.tcsSurveillanceRefresh = tick;
+    // Kick off the first fetch immediately (after first paint), then poll.
+    tick();
     setInterval(tick, REFRESH_MS);
 })();

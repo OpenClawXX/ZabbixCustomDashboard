@@ -45,14 +45,51 @@ $ver = static fn(string $f): string =>
         .sidebar .nav-item { justify-content: center; }
         .row[style*="1fr 1fr"] { grid-template-columns: 1fr !important; }
     }
+    /* Boot splash: rendered inside #root and replaced when React mounts.
+       Covers the gap between HTML arrival and Babel + the first data fetch. */
+    .tcs-boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        background: #0d1117; color: #c9d1d9; font: 13px/1.4 "Inter", system-ui, sans-serif;
+    }
+    .tcs-boot .spinner {
+        width: 36px; height: 36px; border-radius: 50%;
+        border: 3px solid rgba(217, 41, 41, 0.15);
+        border-top-color: #d92929;
+        animation: tcs-spin 0.8s linear infinite;
+    }
+    .tcs-boot .label { color: #6e7681; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+    @keyframes tcs-spin { to { transform: rotate(360deg); } }
 </style>
 
-<div id="root"></div>
+<div id="root">
+    <div class="tcs-boot" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="label">Loading surveillance fleet…</div>
+    </div>
+</div>
 
 <script>
     window.SURVEILLANCE_BOOT         = <?= json_encode($data['boot']   ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
     window.SURVEILLANCE_HOSTID       = <?= json_encode($data['hostid'] ?? '',   JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
     window.TCS_SURVEILLANCE_DATA_URL = "zabbix.php?action=tcs.surveillance.data";
+
+    // Disable Zabbix's standard whole-page refresh on this view so its timer
+    // doesn't reload the page and clobber the React tree's tab/scroll state.
+    (function disableZabbixRefresh() {
+        const kill = () => {
+            try {
+                if (window.PageRefresh && typeof window.PageRefresh.stop === "function") {
+                    window.PageRefresh.stop();
+                }
+            } catch (e) { /* no-op */ }
+            document.querySelectorAll('meta[http-equiv="refresh" i]').forEach(m => m.remove());
+        };
+        kill();
+        document.addEventListener("DOMContentLoaded", kill);
+        setTimeout(kill, 0);
+        setTimeout(kill, 250);
+    })();
 </script>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
