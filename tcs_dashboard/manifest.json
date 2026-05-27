@@ -113,6 +113,11 @@
             "view": "camera.view",
             "layout": "layout.htmlpage"
         },
+        "tcs.camera.data": {
+            "class": "ActionCameraData",
+            "layout": "layout.json",
+            "view": null
+        },
         "tcs.server.view": {
             "class": "ActionServer",
             "view": "server.view",

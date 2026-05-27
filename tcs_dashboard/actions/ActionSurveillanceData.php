@@ -115,6 +115,139 @@ class ActionSurveillanceData extends ActionDataBase {
         ];
     }
 
+    /**
+     * Per-camera deep-dive payload for the Camera Detail page
+     * (tcs.camera.view / tcs.camera.data). Keyed by the per-camera Zabbix
+     * host id — the same id the Surveillance camera tiles/rows link with.
+     *
+     * Reuses the fleet collection path (findSiteHosts → collectSiteItems →
+     * buildCameras) and picks out the one row matching $hostid, then layers
+     * on a recent-events feed (open problems on that host) and 24h ICMP
+     * sparklines. Untemplated fields stay null / empty so the bridge renders
+     * honest "—" placeholders rather than mock values.
+     *
+     * @return array{camera: ?array, history: array, events: array, ts: int}
+     */
+    public function collectCameraDetail(string $hostid): array {
+        if ($hostid === '') {
+            return ['camera' => null, 'history' => $this->emptyCamHistory(), 'events' => [], 'ts' => time()];
+        }
+
+        $site_hosts = $this->findSiteHosts();
+        $site_items = $site_hosts ? $this->collectSiteItems(array_keys($site_hosts)) : [];
+        $cam_hosts  = $this->findCameraHosts();
+
+        $camera = null;
+        foreach ($this->buildCameras($site_hosts, $site_items, $cam_hosts) as $c) {
+            if ((string) ($c['hostid'] ?? '') === $hostid) { $camera = $c; break; }
+        }
+
+        return [
+            'camera'  => $camera,
+            'history' => $this->buildCameraHistory($hostid),
+            'events'  => $this->buildCameraEvents($hostid),
+            'ts'      => time()
+        ];
+    }
+
+    /** Empty 48-bucket sparkline set for the camera detail telemetry strip. */
+    private function emptyCamHistory(): array {
+        return [
+            'fps'        => [],
+            'bitrate'    => [],
+            'packetLoss' => [],
+            'motion'     => [],
+            'cpu'        => [],
+            'temp'       => [],
+            'latency'    => []
+        ];
+    }
+
+    /**
+     * 24h sparklines for one camera. Only the ICMP latency / loss series are
+     * templated today (the per-camera "Milestone Camera by Direct Polling"
+     * host carries the standard icmpping* items); everything else stays an
+     * empty array so the bridge zeroes the chart instead of faking a trend.
+     */
+    private function buildCameraHistory(string $hostid): array {
+        $out = $this->emptyCamHistory();
+
+        $items = $this->safeGet(fn() => API::Item()->get([
+            'output'   => ['itemid', 'key_', 'value_type'],
+            'hostids'  => [$hostid],
+            'filter'   => ['key_' => ['icmppingsec', 'icmppingloss']],
+            'webitems' => false
+        ]));
+        if (!$items) return $out;
+
+        $by_key = [];
+        foreach ($items as $it) $by_key[$it['key_']] = $it;
+
+        // icmppingsec is seconds → surface as ms for the ONVIF-latency cell.
+        if (isset($by_key['icmppingsec'])) {
+            $series = $this->bucketHistory($by_key['icmppingsec'], 48);
+            $out['latency'] = array_map(fn($v) => round($v * 1000, 1), $series);
+        }
+        if (isset($by_key['icmppingloss'])) {
+            $out['packetLoss'] = $this->bucketHistory($by_key['icmppingloss'], 48);
+        }
+        return $out;
+    }
+
+    /**
+     * Down-sample a numeric item's last 24h of history into N averaged
+     * buckets. Empty buckets carry the previous bucket's value (last-known)
+     * so the sparkline stays continuous instead of dropping to zero.
+     */
+    private function bucketHistory(array $item, int $bucket_count): array {
+        $value_type = (int) ($item['value_type'] ?? 0); // 0 float, 3 uint
+        $window     = 24 * 3600;
+        $start      = time() - $window;
+        $bucket_sec = (int) ($window / $bucket_count);
+
+        $rows = $this->safeGet(fn() => API::History()->get([
+            'output'    => ['clock', 'value'],
+            'itemids'   => [$item['itemid']],
+            'history'   => $value_type,
+            'time_from' => $start,
+            'sortfield' => 'clock',
+            'sortorder' => 'ASC',
+            'limit'     => 20000
+        ]));
+
+        $sum = array_fill(0, $bucket_count, 0.0);
+        $cnt = array_fill(0, $bucket_count, 0);
+        foreach ($rows as $r) {
+            $b = (int) (((int) $r['clock'] - $start) / $bucket_sec);
+            if ($b < 0 || $b >= $bucket_count) continue;
+            $sum[$b] += (float) $r['value'];
+            $cnt[$b]++;
+        }
+
+        $out = array_fill(0, $bucket_count, 0.0);
+        $last = 0.0;
+        for ($i = 0; $i < $bucket_count; $i++) {
+            if ($cnt[$i] > 0) { $last = $sum[$i] / $cnt[$i]; }
+            $out[$i] = round($last, 4);
+        }
+        return $out;
+    }
+
+    /** Open problems on a single camera host → Recent Events rows. */
+    private function buildCameraEvents(string $hostid): array {
+        $sev_label = [0 => 'info', 1 => 'info', 2 => 'warning', 3 => 'warning', 4 => 'high', 5 => 'disaster'];
+        $out = [];
+        foreach ($this->collectProblems([$hostid]) as $p) {
+            $out[] = [
+                'ts'  => date('H:i:s', (int) $p['clock']),
+                'src' => 'ZBX',
+                'sev' => $sev_label[(int) $p['severity']] ?? 'info',
+                'msg' => $p['name']
+            ];
+        }
+        return $out;
+    }
+
     private function emptyPayload(): array {
         return [
             'milestone'     => null,
@@ -1134,12 +1267,13 @@ class ActionSurveillanceData extends ActionDataBase {
             $h = $p['hosts'][0] ?? null;
             $host_label = $h['name'] ?? ($h['host'] ?? '—');
             $out[] = [
-                'ts'   => date('H:i:s', (int) $p['clock']),
-                'sev'  => $sev_label[(int) $p['severity']] ?? 'info',
-                'cam'  => $host_label,
-                'msg'  => $p['name'],
-                'site' => '',
-                'ack'  => (int) $p['acknowledged'] === 1
+                'ts'     => date('H:i:s', (int) $p['clock']),
+                'sev'    => $sev_label[(int) $p['severity']] ?? 'info',
+                'cam'    => $host_label,
+                'hostid' => $h['hostid'] ?? null,
+                'msg'    => $p['name'],
+                'site'   => '',
+                'ack'    => (int) $p['acknowledged'] === 1
             ];
         }
         return $out;
