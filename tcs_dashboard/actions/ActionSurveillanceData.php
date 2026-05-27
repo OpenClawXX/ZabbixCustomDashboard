@@ -654,11 +654,14 @@ class ActionSurveillanceData extends ActionDataBase {
                 $key = (string) $grp_id;
                 if (!isset($sites[$key])) {
                     // Label source: milestone.grp.name[<id>] is the canonical
-                    // Zabbix item — when present it always wins. Path tail
-                    // from the raw blob ("/Root/Bryant HS" → "Bryant HS") is
-                    // a secondary fallback in case the name item ever fails
-                    // to populate; GUID is the absolute last resort.
+                    // Zabbix item — when present it always wins. The groups
+                    // snapshot back-fill (collectSiteItems) may instead carry
+                    // the label under "displayName" (mirroring the RS
+                    // snapshot), so check that next. Path tail from the raw
+                    // blob ("/Root/Bryant HS" → "Bryant HS") is the next
+                    // fallback; GUID is the absolute last resort.
                     $name = trim((string) ($grp['name'] ?? ''));
+                    if ($name === '') $name = trim((string) ($grp['displayName'] ?? ''));
                     if ($name === '') {
                         $p = trim((string) ($grp['path'] ?? ''));
                         if ($p !== '' && str_contains($p, '/')) {
@@ -667,6 +670,15 @@ class ActionSurveillanceData extends ActionDataBase {
                         } elseif ($p !== '') {
                             $name = $p;
                         }
+                    }
+                    // Last resort before the raw GUID: the Milestone site
+                    // host's own name (siteName item, else the Zabbix host
+                    // name). Keeps the Sites list human-readable even when
+                    // the per-group label items / snapshot haven't populated.
+                    if ($name === '') {
+                        $h = $site_hosts[$hid] ?? [];
+                        $sn = trim((string) ($bundle['site']['siteName'] ?? ''));
+                        $name = $sn !== '' ? $sn : trim((string) ($h['name'] ?? $h['host'] ?? ''));
                     }
                     if ($name === '') $name = (string) $grp_id;
                     $sites[$key] = [

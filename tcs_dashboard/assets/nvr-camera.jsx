@@ -115,7 +115,7 @@ const CameraDetail = () => {
                     />
                   )}
                   {!isErr ? <>
-                    <div style={{position:"absolute",top:8,left:10,fontFamily:"var(--mono)",fontSize:10,color:"#fff"}}>{cam.id}</div>
+                    <div style={{position:"absolute",top:8,left:10,fontFamily:"var(--mono)",fontSize:10,color:"#fff"}}>{camName}</div>
                     <div style={{position:"absolute",top:8,right:10,fontFamily:"var(--mono)",fontSize:10,color:"rgba(255,255,255,0.85)"}}>{ts}</div>
                     {(cam.res!=="—"||cam.fps||cam.codec!=="—") && <div style={{position:"absolute",bottom:8,left:10,fontFamily:"var(--mono)",fontSize:10,color:"rgba(255,255,255,0.85)"}}>{[cam.res!=="—"?cam.res:null,cam.fps?`${cam.fps}fps`:null,cam.codec!=="—"?cam.codec:null].filter(Boolean).join(" · ")}</div>}
                     <div style={{position:"absolute",bottom:8,right:10,display:"flex",alignItems:"center",gap:4,fontFamily:"var(--mono)",fontSize:10,color:"#fff"}}>
