@@ -40,7 +40,7 @@ const CameraDetail = () => {
   const hasIp = cam.ip && cam.ip !== "—";
   // Camera web UI live view — embeds the device's own fullscreen stream page.
   const liveUrl = hasIp
-    ? `http://${cam.ip}/fullscreen.htm?line=1&stream=1&vport=2&autoresize=false&keepaspect=true&dewarp=false`
+    ? `https://${cam.ip}/fullscreen.htm?line=1&stream=1&vport=2&autoresize=false&keepaspect=true&dewarp=false`
     : null;
 
   const H = window.CAM_HISTORY || {};
