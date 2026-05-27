@@ -211,7 +211,7 @@ const ServerDetail = () => {
                 </thead>
                 <tbody>
                   {window.CAMERAS.filter(c => c.server === s.id).map(c => (
-                    <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>location.href=`Camera Detail.html?id=${c.id}`}>
+                    <tr key={c.id} style={{cursor:"pointer"}} onClick={()=>location.href=(c.hostid ? `zabbix.php?action=tcs.camera.view&hostid=${c.hostid}` : `zabbix.php?action=tcs.camera.view&id=${encodeURIComponent(c.id)}`)}>
                       <td><StatusDot state={c.state==="err"?"err":c.state==="warn"?"warn":"ok"}/></td>
                       <td className="fg" style={{color:"var(--accent)"}}>{c.id}</td>
                       <td>{c.loc}</td>

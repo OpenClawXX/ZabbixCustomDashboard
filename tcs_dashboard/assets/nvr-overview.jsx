@@ -175,7 +175,11 @@ const FleetWidgets = () => {
               <div className="ts">{a.ts}</div>
               <Sev level={a.sev}/>
               <div><span className={`sev-dot ${a.sev}`}/></div>
-              <div className="obj" onClick={() => { if (a.cam) location.href = `Camera Detail.html?id=${a.cam}`; if (a.srv) location.href = `Server Detail.html?id=${a.srv}`; }}>{a.cam || a.srv}</div>
+              <div className="obj" onClick={() => {
+                if (a.hostid) { location.href = `zabbix.php?action=tcs.camera.view&hostid=${a.hostid}`; return; }
+                if (a.cam) location.href = `zabbix.php?action=tcs.camera.view&id=${encodeURIComponent(a.cam)}`;
+                if (a.srv) location.href = `zabbix.php?action=tcs.server.view&id=${encodeURIComponent(a.srv)}`;
+              }}>{a.cam || a.srv}</div>
               <div className="msg">{a.msg}</div>
               <div className="site">{a.site} {a.ack && <span className="muted">· ack</span>}</div>
             </div>
@@ -292,7 +296,7 @@ const CamThumb = ({ c }) => {
   const now = new Date();
   const ts = now.toISOString().replace("T", " ").substr(0, 19);
   return (
-    <a className={`cam-tile ${c.state}`} href={`Camera Detail.html?id=${c.id}`} style={{textDecoration:"none"}}>
+    <a className={`cam-tile ${c.state}`} href={c.hostid ? `zabbix.php?action=tcs.camera.view&hostid=${c.hostid}` : `zabbix.php?action=tcs.camera.view&id=${encodeURIComponent(c.id)}`} style={{textDecoration:"none"}}>
       <div className="frame"/>
       <div className="scan"/>
       <div className="id">{c.id}</div>

@@ -195,12 +195,13 @@
 
         // ── VMS_ALARMS ────────────────────────────────────────────────
         window.VMS_ALARMS = (Array.isArray(boot.alarms) ? boot.alarms : []).map(a => ({
-            ts:   str(a.ts, ""),
-            sev:  a.sev || "info",
-            cam:  str(a.cam, "—"),
-            msg:  str(a.msg, ""),
-            site: str(a.site, ""),
-            ack:  !!a.ack
+            ts:     str(a.ts, ""),
+            sev:    a.sev || "info",
+            cam:    str(a.cam, "—"),
+            hostid: a.hostid || null,
+            msg:    str(a.msg, ""),
+            site:   str(a.site, ""),
+            ack:    !!a.ack
         }));
 
         // ── SITE_DETAILS / EVIDENCE_LOCKS (pass through if backend supplies) ──

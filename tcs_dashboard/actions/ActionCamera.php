@@ -10,16 +10,19 @@ use CControllerResponseFatal;
  *
  * Renders the Milestone XProtect camera deep-dive (live preview tile, stream
  * health rings, 24h sparklines, stream/recording config, network identity,
- * recent events). Currently powered by mock data from nvr-data.jsx. To wire
- * real data, hit Milestone XProtect's REST API for camera and stream state
- * and pass the snapshot to the view as $data['boot']; mirror the data-bridge
- * pattern from AP Detail.
+ * recent events). Server-collected boot data comes from
+ * ActionSurveillanceData::collectCameraDetail() keyed by the per-camera
+ * Zabbix host id; camera.view.php embeds it as window.CAMERA_BOOT and
+ * camera-bridge.jsx normalises it into the window.CAMERAS / CAM_HISTORY
+ * globals nvr-camera.jsx consumes. Fields the template doesn't expose yet
+ * render as honest "—" / empty placeholders.
  */
 class ActionCamera extends ActionBase {
 
     protected function checkInput(): bool {
         $fields = [
-            'id' => 'string'
+            'hostid' => 'string',
+            'id'     => 'string'
         ];
 
         $ret = $this->validateInput($fields);
@@ -32,9 +35,14 @@ class ActionCamera extends ActionBase {
     }
 
     protected function doAction(): void {
+        $hostid = $this->getInput('hostid', '');
+        $boot   = (new ActionSurveillanceData())->collectCameraDetail($hostid);
+
         $data = [
-            'title' => _('TCS Camera Detail'),
-            'id'    => $this->getInput('id', '')
+            'title'  => _('TCS Camera Detail'),
+            'hostid' => $hostid,
+            'id'     => $this->getInput('id', ''),
+            'boot'   => $boot
         ];
 
         $response = new CControllerResponseData($data);
