@@ -699,78 +699,39 @@ const TabPoe = () => {
 };
 
 // ───────────────────────────────────────────────────────────────────
-// 5. MACROS · CLI
+// 5. CLI (admin-only — server withholds window.SWITCH_SSH from non-admins)
 // ───────────────────────────────────────────────────────────────────
-const TabMacros = ({ host }) => {
-  const M   = Array.isArray(window.TAB_MACROS) ? window.TAB_MACROS : [];
+const TabCli = ({ host }) => {
   const ssh = window.SWITCH_SSH || null;
   return (
     <div className="tab-pane">
-      <div className="macro-layout">
-        <div className="card">
-          <div className="card-h">
-            <h3>User macros</h3>
-            <SourceBadge src="zbx" />
-            <div className="h-spacer" />
-            <span className="h-meta">{M.length} resolved · host + template + global</span>
-          </div>
-          {M.length ? (
-            <table className="macro-tbl">
-              <thead>
-                <tr>
-                  <th>Macro</th>
-                  <th style={{width: 100}}>Value</th>
-                  <th>Context (effective)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {M.map((m, i) => (
-                  <tr key={i} className={m.sys ? "sys" : ""}>
-                    <td className="mono mac-k">{m.k}</td>
-                    <td className="mono mac-v">{m.v}</td>
-                    <td>
-                      <span className={"ctx-pill " + (m.ctx.includes("override") ? "ovr" : "tpl")}>
-                        {m.ctx.includes("override") ? "host" : "template"}
-                      </span>
-                      {m.ctx}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="card">
+        <div className="card-h">
+          <h3>CLI · ssh {host.id}</h3>
+          <SourceBadge src="ext" />
+          <div className="h-spacer" />
+          {ssh ? (
+            <>
+              <span className="h-meta">{ssh.user ? ssh.user + "@" : ""}{ssh.host}:{ssh.port} · ssheasy</span>
+              <span className="h-link" onClick={() => window.open(ssh.url, "_blank", "noopener")}>Open in tab</span>
+            </>
           ) : (
-            <div className="macro-empty">No user macros resolved for this host yet.</div>
+            <span className="h-meta">SSH not configured</span>
           )}
         </div>
-
-        <div className="card">
-          <div className="card-h">
-            <h3>CLI · ssh {host.id}</h3>
-            <SourceBadge src="ext" />
-            <div className="h-spacer" />
-            {ssh ? (
-              <>
-                <span className="h-meta">{ssh.user ? ssh.user + "@" : ""}{ssh.host}:{ssh.port} · ssheasy</span>
-                <span className="h-link" onClick={() => window.open(ssh.url, "_blank", "noopener")}>Open in tab</span>
-              </>
-            ) : (
-              <span className="h-meta">SSH not configured</span>
-            )}
-          </div>
-          <div className="cli-pane">
-            {ssh ? (
-              <iframe
-                className="cli-frame"
-                src={ssh.url}
-                title={"ssh " + ssh.host}
-                allow="clipboard-read; clipboard-write"
-              />
-            ) : (
-              <div className="cli-empty">
-                Set <code>{"{$SSHEASY.URL}"}</code> (and a host management IP) to enable the live SSH console.
-              </div>
-            )}
-          </div>
+        <div className="cli-pane">
+          {ssh ? (
+            <iframe
+              className="cli-frame"
+              src={ssh.url}
+              title={"ssh " + ssh.host}
+              allow="clipboard-read; clipboard-write"
+            />
+          ) : (
+            <div className="cli-empty">
+              Set <code>{"{$SSHEASY.URL}"}</code> (and a host management IP) to enable the live SSH console.
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -941,7 +902,7 @@ window.SWITCH_TABS = [
   { id: "health",   label: "Stack Health",  badge: null },
   { id: "vlan",     label: "VLAN",          badge: null },
   { id: "poe",      label: "PoE Budget",    badge: null },
-  { id: "macros",   label: "Macros · CLI",  badge: null },
+  { id: "cli",      label: "CLI",           badge: null, admin: true },
   { id: "triggers", label: "Triggers",      badge: { v: 3, kind: "warn" } },
   { id: "backups",  label: "Config Backups",badge: null },
 ];
@@ -950,6 +911,6 @@ window.TabTopology    = TabTopology;
 window.TabStackHealth = TabStackHealth;
 window.TabVlan        = TabVlan;
 window.TabPoe         = TabPoe;
-window.TabMacros      = TabMacros;
+window.TabCli         = TabCli;
 window.TabTriggers    = TabTriggers;
 window.TabBackups     = TabBackups;

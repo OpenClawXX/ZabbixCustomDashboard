@@ -84,23 +84,17 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
         // macro rather than deriving from {$PF.URL}.
         $payload['pfBase'] = $this->resolvePfAdminUrl($hostid);
 
-        // User macros table (Macros · CLI tab) — every macro resolved for the
-        // host through global → template → host precedence, tagged with its
-        // effective source.
-        try {
-            $payload['macros'] = $this->collectAllMacros($hostid);
-        } catch (\Throwable $e) {
-            error_log('[tcs_dashboard] snapshot.data macros: '.$e->getMessage());
-            $payload['macros'] = [];
-        }
-
-        // ssheasy connect descriptor for the live CLI console. null when
-        // {$SSHEASY.URL} isn't set or the host has no management IP.
-        try {
-            $payload['ssh'] = $this->collectSshConnect($hostid);
-        } catch (\Throwable $e) {
-            error_log('[tcs_dashboard] snapshot.data ssh: '.$e->getMessage());
-            $payload['ssh'] = null;
+        // ssheasy connect descriptor for the live CLI console. The descriptor
+        // embeds SSH credentials, so it is ADMIN-ONLY — never emit it to
+        // regular users. null when the user isn't an admin, {$SSHEASY.URL}
+        // isn't set, or the host has no management IP.
+        $payload['ssh'] = null;
+        if ($this->getUserType() >= USER_TYPE_ZABBIX_ADMIN) {
+            try {
+                $payload['ssh'] = $this->collectSshConnect($hostid);
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] snapshot.data ssh: '.$e->getMessage());
+            }
         }
 
         $this->setResponse(new CControllerResponseData([
@@ -221,83 +215,6 @@ class ActionSwitchesSnapshotData extends ActionDataBase {
     private function resolvePfAdminUrl(string $hostid): string {
         $bag = $this->macroChain($hostid, ['{$PF.ADMIN_URL}']);
         return rtrim((string) ($bag['{$PF.ADMIN_URL}'] ?? ''), '/');
-    }
-
-    /**
-     * Every user macro resolved for the host, with the same global →
-     * template → host precedence the macroChain helper uses, but for the
-     * full macro set rather than a fixed name list. Each row carries the
-     * effective value and a `ctx` label naming where the winning definition
-     * lives; host-level definitions get a " (override)" suffix so the
-     * frontend renders the "host" pill.
-     *
-     * Secret/Vault macros (type != 0) never return a value through the API —
-     * their value is masked and the row is flagged `sys` so the table dims it.
-     *
-     * @return array<int, array{k:string, v:string, ctx:string, sys:bool}>
-     */
-    private function collectAllMacros(string $hostid): array {
-        // macro => ['v' => string, 'ctx' => string, 'sys' => bool]
-        $bag = [];
-
-        $valueOf = static function (array $r): string {
-            $type = (int) ($r['type'] ?? 0);
-            if ($type !== 0) return '********';          // secret / vault — never exposed
-            return array_key_exists('value', $r) ? (string) $r['value'] : '';
-        };
-        $isSecret = static fn (array $r): bool => ((int) ($r['type'] ?? 0)) !== 0;
-
-        // 1. Globals (lowest precedence).
-        $globals = API::UserMacro()->get([
-            'output'      => ['macro', 'value', 'type'],
-            'globalmacro' => true
-        ]) ?: [];
-        foreach ($globals as $r) {
-            $bag[$r['macro']] = ['v' => $valueOf($r), 'ctx' => 'Global macro', 'sys' => $isSecret($r)];
-        }
-
-        // 2. Template-inherited macros — full ancestry, labelled by template name.
-        $templateIds = self::collectTemplateAncestry($hostid);
-        if ($templateIds) {
-            $tpls = API::Template()->get([
-                'output'       => ['templateid', 'name'],
-                'templateids'  => $templateIds,
-                'preservekeys' => true
-            ]) ?: [];
-            $tplMacros = API::UserMacro()->get([
-                'output'  => ['macro', 'value', 'type', 'hostid'],
-                'hostids' => $templateIds
-            ]) ?: [];
-            foreach ($tplMacros as $r) {
-                $tname = (string) ($tpls[$r['hostid']]['name'] ?? 'Template');
-                $bag[$r['macro']] = ['v' => $valueOf($r), 'ctx' => $tname, 'sys' => $isSecret($r)];
-            }
-        }
-
-        // 3. Host-level (highest precedence) — flagged as an override.
-        $hosts = API::Host()->get([
-            'output'  => ['hostid', 'name'],
-            'hostids' => [$hostid]
-        ]) ?: [];
-        $hostLabel = (string) ($hosts[0]['name'] ?? 'host');
-        $hostMacros = API::UserMacro()->get([
-            'output'  => ['macro', 'value', 'type'],
-            'hostids' => [$hostid]
-        ]) ?: [];
-        foreach ($hostMacros as $r) {
-            $bag[$r['macro']] = [
-                'v'   => $valueOf($r),
-                'ctx' => $hostLabel.' (override)',
-                'sys' => $isSecret($r)
-            ];
-        }
-
-        ksort($bag, SORT_STRING);
-        $out = [];
-        foreach ($bag as $k => $info) {
-            $out[] = ['k' => $k, 'v' => $info['v'], 'ctx' => $info['ctx'], 'sys' => $info['sys']];
-        }
-        return $out;
     }
 
     /**
