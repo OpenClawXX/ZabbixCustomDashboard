@@ -1324,10 +1324,15 @@ class ActionSurveillanceData extends ActionDataBase {
                 }
                 if ($gname === '') $gname = (string) $grp_id;
                 foreach ($cam_ids as $cid) {
+                    // Normalise the key so case/brace differences between
+                    // Milestone REST endpoints (LLD-discovered cam_id vs
+                    // the cameraIds array in the groups snapshot) can't
+                    // silently break the per-camera join.
+                    $nk = $this->normCamKey((string) $cid);
                     // First group claiming a camera wins; Milestone groups
                     // are effectively exclusive at the leaf level.
-                    if (!isset($cam_group_by_id[(string) $cid])) {
-                        $cam_group_by_id[(string) $cid] = $gname;
+                    if (!isset($cam_group_by_id[$nk])) {
+                        $cam_group_by_id[$nk] = $gname;
                     }
                 }
             }
@@ -1340,8 +1345,9 @@ class ActionSurveillanceData extends ActionDataBase {
         // stale (the primary path above quietly yields nothing in that case).
         $cam_groups_from_snap = $this->findCameraGroupNamesFromSnapshot();
         foreach ($cam_groups_from_snap as $cid => $gname) {
-            if (!isset($cam_group_by_id[$cid])) {
-                $cam_group_by_id[$cid] = $gname;
+            $nk = $this->normCamKey((string) $cid);
+            if (!isset($cam_group_by_id[$nk])) {
+                $cam_group_by_id[$nk] = $gname;
             }
         }
 
@@ -1374,7 +1380,7 @@ class ActionSurveillanceData extends ActionDataBase {
                     // (same source the Sites tab attributes by). Falls back
                     // to the site host label so an ungrouped camera still
                     // shows up under a sensible header in the navigator.
-                    'group'     => $cam_group_by_id[$cam_id] ?? $site_label,
+                    'group'     => $cam_group_by_id[$this->normCamKey($cam_id)] ?? $site_label,
                     'loc'       => $cam['hwname'] ?? '',
                     'model'     => $cam['hwmodel'] ?? '—',
                     'res'       => null,
