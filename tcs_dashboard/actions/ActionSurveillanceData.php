@@ -1376,7 +1376,13 @@ class ActionSurveillanceData extends ActionDataBase {
                 $cam_host = $cam_host_by_id[$cam_id] ?? null;
                 $rsid     = trim((string) ($cam['rsid'] ?? ''));
                 $server   = $rsid !== '' ? ($rs_hostname_by_id[$rsid] ?? $rsid) : null;
-                $ip = $cam['address'] ?? '';
+                // Group attribution prefers the per-camera dependent item
+                // (milestone.cam.group[<id>] extracting $.groupName) — tiny
+                // text value that survives the MySQL TEXT cap that truncates
+                // the 2 MB raw snapshot in history. Snapshot-fallback and
+                // site_label cover installs that haven't templated the new
+                // leaf yet.
+                $direct_group = trim((string) ($cam['group'] ?? ''));
                 if (!$ip && $cam_host) {
                     foreach ($cam_host['interfaces'] ?? [] as $i) {
                         if ((int) ($i['main'] ?? 0) === 1) { $ip = $i['ip']; break; }
@@ -1386,11 +1392,15 @@ class ActionSurveillanceData extends ActionDataBase {
                     'id'        => $cam_id,
                     'name'      => $cam_host['name'] ?? ($cam['hwname'] ?? $cam_id),
                     'site'      => $site_label,
-                    // Camera-group label from the camera-groups snapshot
-                    // (same source the Sites tab attributes by). Falls back
-                    // to the site host label so an ungrouped camera still
-                    // shows up under a sensible header in the navigator.
-                    'group'     => $cam_group_by_id[$this->normCamKey($cam_id)] ?? $site_label,
+                    // Camera-group label. Priority:
+                    //   1. milestone.cam.group[<id>]  — per-camera dependent
+                    //      item (tiny string, survives history-TEXT truncation).
+                    //   2. snapshot-derived map (groupName from the cameras
+                    //      snapshot OR cameraIds from the groups snapshot).
+                    //   3. site host label as a last-resort header.
+                    'group'     => $direct_group !== ''
+                                    ? $direct_group
+                                    : ($cam_group_by_id[$this->normCamKey($cam_id)] ?? $site_label),
                     'loc'       => $cam['hwname'] ?? '',
                     'model'     => $cam['hwmodel'] ?? '—',
                     'res'       => null,
