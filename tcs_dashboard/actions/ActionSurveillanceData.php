@@ -1224,6 +1224,56 @@ class ActionSurveillanceData extends ActionDataBase {
     /* --------------------------------------------------------------------- */
 
     /**
+     * Camera GUID → group name, read from the cameras snapshot's per-camera
+     * groupName field (stamped by milestone_cameras_state.py's
+     * /cameraGroups walk). Independent of the groups snapshot, so this is
+     * what carries the navigator's bucketing when the groups reader is
+     * stripped / stale and the per-group cameraIds path delivers nothing.
+     *
+     * Empty when the cameras snapshot is unreachable, predates the
+     * groupName addition, or has no groupName values populated.
+     */
+    private function findCameraGroupNamesFromSnapshot(): array {
+        $snaps = $this->safeGet(fn() => API::Item()->get([
+            'output'      => ['itemid', 'hostid', 'lastvalue'],
+            'search'      => ['key_' => 'milestone_cameras_read.sh'],
+            'startSearch' => true,
+            'monitored'   => true,
+            'webitems'    => false
+        ])) ?: [];
+
+        $map = [];
+        foreach ($snaps as $snap) {
+            $raw = (string) ($snap['lastvalue'] ?? '');
+            if ($raw === '') continue;
+            $blob = json_decode($raw, true);
+            if (!is_array($blob)) continue;
+
+            // The cameras snapshot keeps both __array (for LLD) and per-GUID
+            // top-level entries (for the milestone.cam.raw[<id>] JSONPath).
+            // Either is fine — __array is the canonical iteration.
+            $rows = is_array($blob['__array'] ?? null) ? $blob['__array'] : [];
+            if (!$rows) {
+                // Fall back to top-level GUID-keyed entries.
+                foreach ($blob as $k => $v) {
+                    if (is_string($k) && !str_starts_with($k, '__') && is_array($v)) {
+                        $rows[] = $v;
+                    }
+                }
+            }
+            foreach ($rows as $cam) {
+                if (!is_array($cam)) continue;
+                $cid   = (string) ($cam['id'] ?? '');
+                $gname = trim((string) ($cam['groupName'] ?? ''));
+                if ($cid !== '' && $gname !== '' && !isset($map[$cid])) {
+                    $map[$cid] = $gname;
+                }
+            }
+        }
+        return $map;
+    }
+
+    /**
      * Camera list — one row per LLD-discovered camera. State derives from
      * milestone.cam.status[id] (0 OK / 1 ESS fault / 2 ping down / 3 both /
      * -1 disabled).
@@ -1280,6 +1330,18 @@ class ActionSurveillanceData extends ActionDataBase {
                         $cam_group_by_id[(string) $cid] = $gname;
                     }
                 }
+            }
+        }
+
+        // Secondary path: per-camera groupName stamped by milestone_cameras_
+        // state.py via its own /cameraGroups walk. The cameras snapshot is
+        // independent of the groups reader, so this is what makes the
+        // navigator bucket correctly when the groups reader is stripped /
+        // stale (the primary path above quietly yields nothing in that case).
+        $cam_groups_from_snap = $this->findCameraGroupNamesFromSnapshot();
+        foreach ($cam_groups_from_snap as $cid => $gname) {
+            if (!isset($cam_group_by_id[$cid])) {
+                $cam_group_by_id[$cid] = $gname;
             }
         }
 

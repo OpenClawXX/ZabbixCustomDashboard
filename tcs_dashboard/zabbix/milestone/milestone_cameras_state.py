@@ -233,6 +233,53 @@ def _http_get_json(
 
 
 # ---------------------------------------------------------------------------
+# Camera-group name map
+#
+# The dashboard's Cameras tab buckets cameras under their Milestone group
+# (the Smart-Client folder tree). The groups snapshot already covers this,
+# but a stripped/stale groups reader leaves the dashboard with no camera→
+# group mapping at all. Walking /cameraGroups here gives the cameras
+# snapshot its own copy of the membership, so the dashboard has a second
+# independent path that survives a broken groups reader.
+# ---------------------------------------------------------------------------
+def fetch_camera_groupname_map(
+    base: str, token: str, ctx: ssl.SSLContext | None,
+    timeout: float, api_base: str,
+) -> dict[str, str]:
+    """Return {camera-guid: group-display-name}. Empty on any error."""
+    out: dict[str, str] = {}
+    try:
+        gr = _http_get_json(f"{base}{api_base}/cameraGroups", token, ctx, timeout)
+    except Exception as e:  # noqa: BLE001
+        print(f"[grpmap] cameraGroups fetch failed: {e}", file=sys.stderr)
+        return out
+    groups = gr.get("array") or gr.get("data") or []
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        gid = g.get("id")
+        if not gid:
+            continue
+        gname = (g.get("displayName") or g.get("name")
+                 or g.get("description") or str(gid))
+        try:
+            ch = _http_get_json(
+                f"{base}{api_base}/cameraGroups/{gid}/cameras",
+                token, ctx, timeout)
+        except Exception as e:  # noqa: BLE001
+            print(f"[grpmap] cameras fetch failed for grp {gid}: {e}",
+                  file=sys.stderr)
+            continue
+        for c in (ch.get("array") or ch.get("data") or []):
+            cid = c.get("id") if isinstance(c, dict) else None
+            # First group claiming a camera wins (Milestone groups are
+            # effectively exclusive at the leaf folder).
+            if cid and cid not in out:
+                out[cid] = gname
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Recording-server map
 #
 # A camera's relations.parent is its hardware; the recording server is the
@@ -626,7 +673,8 @@ def enrich_hardware_with_settings(
 # ---------------------------------------------------------------------------
 # Flatten hardware -> cameras
 # ---------------------------------------------------------------------------
-def flatten_cameras(hw_list: list[dict], hw_to_rs: dict[str, str] | None = None) -> list[dict]:
+def flatten_cameras(hw_list: list[dict], hw_to_rs: dict[str, str] | None = None,
+                    cam_groups: dict[str, str] | None = None) -> list[dict]:
     """Walk hardware -> child cameras, injecting hardware fields per camera.
 
     Injected per camera:
@@ -638,8 +686,11 @@ def flatten_cameras(hw_list: list[dict], hw_to_rs: dict[str, str] | None = None)
         hardwareModel     — parent hardware model string
         recordingServerId — grandparent recording-server GUID (from
                             hw_to_rs[hardwareId]); "" when unknown
+        groupName         — Milestone camera-group label (from cam_groups);
+                            "" when the camera isn't in any group / map missing
     """
     hw_to_rs = hw_to_rs or {}
+    cam_groups = cam_groups or {}
     cameras: list[dict] = []
     for hw in hw_list or []:
         if not isinstance(hw, dict):
@@ -703,6 +754,7 @@ def flatten_cameras(hw_list: list[dict], hw_to_rs: dict[str, str] | None = None)
             )
             cam["hardwareModel"] = hw.get("model") or ""
             cam["recordingServerId"] = rs_id
+            cam["groupName"] = cam_groups.get(cam.get("id") or "", "")
             cameras.append(cam)
     return cameras
 
@@ -754,6 +806,12 @@ def main() -> int:
                          "recordingServerId will be empty on every camera, "
                          "and the dashboard's per-camera Recording server "
                          "field will show '—'.")
+    ap.add_argument("--no-group-map", action="store_true",
+                    help="Skip building the camera->group map "
+                         "(1 + N_groups extra API calls via /cameraGroups). "
+                         "groupName will be empty on every camera, and the "
+                         "dashboard's Cameras navigator will fall back to "
+                         "the site host label for grouping.")
     args = ap.parse_args()
 
     base = f"{args.scheme}://{args.host}"
@@ -842,8 +900,23 @@ def main() -> int:
                               "detail": repr(e)}),
                   file=sys.stderr)
 
+    # Step 2d: camera -> group-name map. Gives the cameras snapshot its own
+    # copy of the Smart Client group membership so the dashboard's Cameras
+    # navigator can attribute cameras even when the groups snapshot reader
+    # is stale or strips the cameraIds arrays.
+    cam_groups: dict[str, str] = {}
+    if not args.no_group_map:
+        try:
+            cam_groups = fetch_camera_groupname_map(
+                base, token, ctx, args.timeout, args.api_base,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"error": "group_map_warning",
+                              "detail": repr(e)}),
+                  file=sys.stderr)
+
     # Step 3: flatten and key by camera GUID.
-    cameras_flat = flatten_cameras(hw_list, hw_to_rs)
+    cameras_flat = flatten_cameras(hw_list, hw_to_rs, cam_groups)
     keyed: dict[str, dict[str, Any]] = {}
     for cam in cameras_flat:
         keyed[cam["id"]] = cam

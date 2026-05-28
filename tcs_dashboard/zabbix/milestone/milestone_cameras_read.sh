@@ -65,7 +65,7 @@ import json, sys
 
 KEEP = ("id", "displayName", "enabled", "address", "mac", "hardwareId",
         "hardwareName", "hardwareModel", "channel", "lastModified",
-        "recordingServerId", "relations")
+        "recordingServerId", "groupName", "relations")
 
 with open(sys.argv[1]) as f:
     data = json.load(f)
