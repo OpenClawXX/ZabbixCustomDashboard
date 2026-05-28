@@ -31,6 +31,12 @@ class ActionSurveillanceData extends ActionDataBase {
     /** Template name on each per-camera Zabbix host. */
     private const CAMERA_TEMPLATE = 'Milestone Camera by Direct Polling';
 
+    /** Set by buildCameras() so collect() can surface per-camera grouping
+     *  diagnostics on the response. Temporary debug — surfaces which
+     *  attribution path is firing for each camera and what fields the
+     *  per-camera items currently carry. */
+    private array $camGroupDiag = [];
+
     /** Optional site host-group prefix (matches ActionGlobalData). */
     private const SITE_GROUP_PREFIX = 'Site/';
 
@@ -121,6 +127,9 @@ class ActionSurveillanceData extends ActionDataBase {
             // cameras / footage range). Not yet templated — empty list
             // so the Evidence Lock tab shows a clean empty state.
             'evidenceLocks' => [],
+            // Temporary diagnostic for the Cameras-navigator grouping issue.
+            // Surfaces which attribution path fired for how many cameras.
+            '__camGroupDiag' => $this->camGroupDiag,
             'ts'            => time()
         ];
 
@@ -1361,6 +1370,35 @@ class ActionSurveillanceData extends ActionDataBase {
             }
         }
 
+        // ── Diagnostic accumulators (surfaced on the response as
+        // __camGroupDiag) — temporary, to triage why the Cameras navigator
+        // still buckets everything under "CO-MILESTONE".
+        $diag = [
+            'directGroupHits'    => 0,    // cameras with milestone.cam.group[<id>] populated
+            'snapFallbackHits'   => 0,    // cameras attributed via snapshot map
+            'siteFallbackHits'   => 0,    // cameras that fell through to site_label
+            'camGroupItemsSeen'  => 0,    // any-host count of non-empty $cam['group']
+            'snapMapSize'        => count($cam_group_by_id),
+            'camFieldsSeen'      => [],   // union of all $cam[*] keys across hosts
+            'sampleCam'          => null, // first cam encountered, with its parsed fields
+        ];
+        $fieldSet = [];
+        foreach ($site_items as $bundle) {
+            foreach ($bundle['cam'] ?? [] as $cid => $c) {
+                foreach (array_keys($c) as $k) $fieldSet[$k] = true;
+                if (trim((string) ($c['group'] ?? '')) !== '') $diag['camGroupItemsSeen']++;
+                if ($diag['sampleCam'] === null) {
+                    $diag['sampleCam'] = [
+                        'cid'    => (string) $cid,
+                        'fields' => array_keys($c),
+                        'group'  => $c['group'] ?? null,
+                        'hwname' => $c['hwname'] ?? null,
+                    ];
+                }
+            }
+        }
+        $diag['camFieldsSeen'] = array_keys($fieldSet);
+
         $out = [];
         foreach ($site_hosts as $hid => $h) {
             $bundle     = $site_items[$hid] ?? [];
@@ -1383,6 +1421,13 @@ class ActionSurveillanceData extends ActionDataBase {
                 // site_label cover installs that haven't templated the new
                 // leaf yet.
                 $direct_group = trim((string) ($cam['group'] ?? ''));
+                if ($direct_group !== '') {
+                    $diag['directGroupHits']++;
+                } elseif (isset($cam_group_by_id[$this->normCamKey($cam_id)])) {
+                    $diag['snapFallbackHits']++;
+                } else {
+                    $diag['siteFallbackHits']++;
+                }
                 if (!$ip && $cam_host) {
                     foreach ($cam_host['interfaces'] ?? [] as $i) {
                         if ((int) ($i['main'] ?? 0) === 1) { $ip = $i['ip']; break; }
@@ -1418,6 +1463,8 @@ class ActionSurveillanceData extends ActionDataBase {
                 ];
             }
         }
+        $diag['totalCamsOut'] = count($out);
+        $this->camGroupDiag = $diag;
         return $out;
     }
 
