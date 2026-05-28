@@ -297,15 +297,8 @@ const CamThumb = ({ c }) => {
         />
       )}
       <div className="scan"/>
-      <div className="id">{c.id}</div>
+      <div className="id">{c.loc || c.id}</div>
       <div className="ts">{ts}</div>
-      <div className="meta">
-        <div className="l">
-          <span className="name">{c.loc}</span>
-          <span style={{fontSize:9, color: "rgba(255,255,255,0.55)"}}>{c.res} · {c.fps}fps</span>
-        </div>
-        {c.state !== "err" && <div className="rec"><span className="red"/>REC</div>}
-      </div>
     </a>
   );
 };
