@@ -26,23 +26,17 @@
         ["problems", "VOIP_PROBLEMS"],
     ];
 
-    function isEmpty(v) {
-        if (v === null || v === undefined) return true;
-        if (Array.isArray(v)) return v.length === 0;
-        if (typeof v === "object") return Object.keys(v).length === 0;
-        return false;
-    }
-
     function apply(payload, opts) {
         if (!payload || typeof payload !== "object") return;
         const only = (opts && opts.onlyKeys) ? new Set(opts.onlyKeys) : null;
         for (const [src, dst] of KEYS) {
             if (only && !only.has(src)) continue;
             const v = payload[src];
-            // Null/empty → keep the existing (mock or last-live) data so the
-            // page never flashes blank between polls.
+            // null/undefined means the data action couldn't fetch this slot
+            // (XAPI failure, etc.) — keep whatever's currently on screen.
+            // An explicit [] / {} means "fetched, currently empty" — apply
+            // it so the page reflects reality.
             if (v === null || v === undefined) continue;
-            if (isEmpty(v) && !isEmpty(window[dst])) continue;
             window[dst] = v;
         }
         if (payload.sources)  window.VOIP_SOURCES = payload.sources;
