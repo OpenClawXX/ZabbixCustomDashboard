@@ -617,11 +617,21 @@ const TWEAK_DEFAULTS_VP = /*EDITMODE-BEGIN*/{
 
 const VoipApp = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS_VP);
+  const [, setTick] = useStateVP(0);
 
   useEffectVP(() => {
     document.documentElement.style.setProperty("--cx", t.accent);
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
   }, [t.accent, t.showSourceBadges]);
+
+  // Re-render whenever voip-bridge.jsx swaps in a fresh payload. The card
+  // components all read window.VOIP_* directly at render time, so bumping
+  // a tick is enough to pick up the new data.
+  useEffectVP(() => {
+    const onData = () => setTick(n => n + 1);
+    window.addEventListener("tcs:voip-data", onData);
+    return () => window.removeEventListener("tcs:voip-data", onData);
+  }, []);
 
   const densityVar = t.density === "spacious" ? 1.15 : t.density === "dense" ? 0.85 : 1;
   const p = window.VOIP_PBX;
