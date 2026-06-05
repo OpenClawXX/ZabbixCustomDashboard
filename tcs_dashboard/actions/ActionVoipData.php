@@ -82,7 +82,6 @@ class ActionVoipData extends ActionDataBase {
         return [
             'loading'  => true,
             'pbx'      => null,
-            'services' => null,
             'trunks'   => null,
             'sbcs'     => null,
             'calls'    => null,
@@ -155,8 +154,7 @@ class ActionVoipData extends ActionDataBase {
             $runXapi('SystemStatus', function () use ($client, &$payload, $host, $debug, &$rawSamples) {
                 $s = $client->systemStatus();
                 if ($debug) $rawSamples['SystemStatus'] = $s;
-                $payload['pbx']      = self::mapPbx($s, $host);
-                $payload['services'] = self::mapServices($s);
+                $payload['pbx'] = self::mapPbx($s, $host);
             });
             // 2b. Trunks
             $runXapi('Trunks', function () use ($client, &$payload, $debug, &$rawSamples) {
@@ -306,33 +304,7 @@ class ActionVoipData extends ActionDataBase {
         ];
     }
 
-    /** SystemStatus.ServicesStatus[] → VOIP_SERVICES rows. */
-    private static function mapServices(array $s): array {
-        $list = self::pick($s, ['ServicesStatus', 'Services', 'ServiceStatus'], []);
-        if (!is_array($list)) return [];
-
-        $rows = [];
-        foreach ($list as $svc) {
-            if (!is_array($svc)) continue;
-            $name  = (string) self::pick($svc, ['Name', 'ServiceName'], 'service');
-            $stRaw = self::pick($svc, ['Status', 'State'], '');
-            $running = false;
-            if (is_bool($stRaw))       $running = $stRaw;
-            elseif (is_numeric($stRaw))$running = ((int) $stRaw) === 1;
-            else                       $running = in_array(strtolower((string) $stRaw), ['running', 'ok', 'up', 'started'], true);
-
-            $rows[] = [
-                'name'   => $name,
-                'status' => $running ? 'running' : 'down',
-                'uptime' => '—',
-                'sub'    => (string) self::pick($svc, ['Description', 'DisplayName', 'Detail'], ''),
-                'load'   => 'ok',
-            ];
-        }
-        return $rows;
-    }
-
-    /**
+/**
      * /xapi/v1/Trunks rows → VOIP_TRUNKS shape.
      *
      * 3CX v20 shape (confirmed against tusck12 with ?debug=1):

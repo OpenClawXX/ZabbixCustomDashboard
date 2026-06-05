@@ -42,7 +42,6 @@ window.VOIP_PBX = window.VOIP_PBX || {
     outbound: new Array(96).fill(0)
   }
 };
-window.VOIP_SERVICES = window.VOIP_SERVICES || [];
 window.VOIP_TRUNKS = window.VOIP_TRUNKS || [];
 window.VOIP_SBCS = window.VOIP_SBCS || [];
 window.VOIP_CALLS = window.VOIP_CALLS || [];
@@ -207,62 +206,6 @@ const ConcurrencyChart = () => {
     }
   }), " Today's peak (", window.VOIP_PBX.peakToday, ")")));
 };
-
-// ── Services / health panel ──
-const ServicesPanel = () => /*#__PURE__*/React.createElement("div", {
-  className: "card"
-}, /*#__PURE__*/React.createElement("div", {
-  className: "card-h"
-}, /*#__PURE__*/React.createElement("h3", null, "System Services"), /*#__PURE__*/React.createElement(SourceBadge, {
-  src: "zbx"
-}), /*#__PURE__*/React.createElement(SourceBadge, {
-  src: "3cx"
-}), /*#__PURE__*/React.createElement("div", {
-  className: "h-spacer"
-}), /*#__PURE__*/React.createElement("span", {
-  className: "h-meta"
-}, window.VOIP_PBX.uptime, " up")), /*#__PURE__*/React.createElement("div", {
-  className: "svc-list"
-}, window.VOIP_SERVICES.map((s, i) => {
-  const cls = s.status === "running" ? "" : s.status === "degraded" ? "warn" : "err";
-  const lbl = s.status === "running" ? "OK" : s.status === "degraded" ? "DEGR" : "DOWN";
-  return /*#__PURE__*/React.createElement("div", {
-    key: i,
-    className: "svc-row"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "svc-led " + cls
-  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "svc-name"
-  }, s.name), /*#__PURE__*/React.createElement("div", {
-    className: "svc-sub"
-  }, s.sub)), /*#__PURE__*/React.createElement("div", {
-    className: "svc-load"
-  }, typeof s.load === "string" && s.load.endsWith("%") ? s.load : ""), /*#__PURE__*/React.createElement("span", {
-    className: "svc-pill " + cls
-  }, lbl));
-})), /*#__PURE__*/React.createElement("div", {
-  className: "svc-foot"
-}, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-  className: "k"
-}, "PBX FQDN"), /*#__PURE__*/React.createElement("div", {
-  className: "v"
-}, window.VOIP_PBX.fqdn)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-  className: "k"
-}, "License"), /*#__PURE__*/React.createElement("div", {
-  className: "v"
-}, window.VOIP_PBX.edition)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-  className: "k"
-}, "Version"), /*#__PURE__*/React.createElement("div", {
-  className: "v"
-}, window.VOIP_PBX.version)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-  className: "k"
-}, "Region"), /*#__PURE__*/React.createElement("div", {
-  className: "v",
-  style: {
-    whiteSpace: "normal",
-    lineHeight: 1.3
-  }
-}, window.VOIP_PBX.region))));
 
 // ── KPI strip across top ──
 const VoipKpis = () => {
@@ -1005,13 +948,11 @@ const VoipApp = () => {
     className: "body",
     "data-screen-label": "VoIP Dashboard"
   }, /*#__PURE__*/React.createElement(VoipKpis, null), /*#__PURE__*/React.createElement("div", {
-    className: "voip-row-2col",
+    className: "voip-row-2col-wide",
     style: {
       marginBottom: 14
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "voip-stack"
-  }, /*#__PURE__*/React.createElement(ConcurrencyChart, null), /*#__PURE__*/React.createElement(CallQualityCard, null)), /*#__PURE__*/React.createElement(ServicesPanel, null)), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(ConcurrencyChart, null), /*#__PURE__*/React.createElement(CallQualityCard, null)), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }

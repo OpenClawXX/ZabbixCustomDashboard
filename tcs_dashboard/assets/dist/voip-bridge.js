@@ -15,7 +15,7 @@
 
 (function () {
   // Payload field → window global.
-  const KEYS = [["pbx", "VOIP_PBX"], ["services", "VOIP_SERVICES"], ["trunks", "VOIP_TRUNKS"], ["sbcs", "VOIP_SBCS"], ["calls", "VOIP_CALLS"], ["top", "VOIP_TOP"], ["queues", "VOIP_QUEUES"], ["quality", "VOIP_QUALITY"], ["problems", "VOIP_PROBLEMS"]];
+  const KEYS = [["pbx", "VOIP_PBX"], ["trunks", "VOIP_TRUNKS"], ["sbcs", "VOIP_SBCS"], ["calls", "VOIP_CALLS"], ["top", "VOIP_TOP"], ["queues", "VOIP_QUEUES"], ["quality", "VOIP_QUALITY"], ["problems", "VOIP_PROBLEMS"]];
 
   // Per-endpoint loading state, exposed for the header pill.
   window.VOIP_LOADING_FLAGS = window.VOIP_LOADING_FLAGS || {

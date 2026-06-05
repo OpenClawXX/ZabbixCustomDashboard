@@ -17,7 +17,6 @@
     // Payload field → window global.
     const KEYS = [
         ["pbx",      "VOIP_PBX"],
-        ["services", "VOIP_SERVICES"],
         ["trunks",   "VOIP_TRUNKS"],
         ["sbcs",     "VOIP_SBCS"],
         ["calls",    "VOIP_CALLS"],

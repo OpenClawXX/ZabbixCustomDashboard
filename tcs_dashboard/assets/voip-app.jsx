@@ -23,7 +23,6 @@ window.VOIP_PBX = window.VOIP_PBX || {
     outbound: new Array(96).fill(0),
   },
 };
-window.VOIP_SERVICES = window.VOIP_SERVICES || [];
 window.VOIP_TRUNKS   = window.VOIP_TRUNKS   || [];
 window.VOIP_SBCS     = window.VOIP_SBCS     || [];
 window.VOIP_CALLS    = window.VOIP_CALLS    || [];
@@ -109,42 +108,6 @@ const ConcurrencyChart = () => {
     </div>
   );
 };
-
-// ── Services / health panel ──
-const ServicesPanel = () => (
-  <div className="card">
-    <div className="card-h">
-      <h3>System Services</h3>
-      <SourceBadge src="zbx" />
-      <SourceBadge src="3cx" />
-      <div className="h-spacer" />
-      <span className="h-meta">{window.VOIP_PBX.uptime} up</span>
-    </div>
-    <div className="svc-list">
-      {window.VOIP_SERVICES.map((s, i) => {
-        const cls = s.status === "running" ? "" : (s.status === "degraded" ? "warn" : "err");
-        const lbl = s.status === "running" ? "OK" : (s.status === "degraded" ? "DEGR" : "DOWN");
-        return (
-          <div key={i} className="svc-row">
-            <span className={"svc-led " + cls}></span>
-            <div>
-              <div className="svc-name">{s.name}</div>
-              <div className="svc-sub">{s.sub}</div>
-            </div>
-            <div className="svc-load">{typeof s.load === "string" && s.load.endsWith("%") ? s.load : ""}</div>
-            <span className={"svc-pill " + cls}>{lbl}</span>
-          </div>
-        );
-      })}
-    </div>
-    <div className="svc-foot">
-      <div><div className="k">PBX FQDN</div><div className="v">{window.VOIP_PBX.fqdn}</div></div>
-      <div><div className="k">License</div><div className="v">{window.VOIP_PBX.edition}</div></div>
-      <div><div className="k">Version</div><div className="v">{window.VOIP_PBX.version}</div></div>
-      <div><div className="k">Region</div><div className="v" style={{whiteSpace:"normal", lineHeight:1.3}}>{window.VOIP_PBX.region}</div></div>
-    </div>
-  </div>
-);
 
 // ── KPI strip across top ──
 const VoipKpis = () => {
@@ -566,12 +529,9 @@ const VoipApp = () => {
         <div className="body" data-screen-label="VoIP Dashboard">
           <VoipKpis />
 
-          <div className="voip-row-2col" style={{ marginBottom: 14 }}>
-            <div className="voip-stack">
-              <ConcurrencyChart />
-              <CallQualityCard />
-            </div>
-            <ServicesPanel />
+          <div className="voip-row-2col-wide" style={{ marginBottom: 14 }}>
+            <ConcurrencyChart />
+            <CallQualityCard />
           </div>
 
           <div style={{ marginBottom: 14 }}>
