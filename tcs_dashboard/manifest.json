@@ -183,11 +183,6 @@
             "layout": "layout.json",
             "view": null
         },
-        "tcs.voip.sites.data": {
-            "class": "ActionVoipSitesData",
-            "layout": "layout.json",
-            "view": null
-        },
         "tcs.voip.top.data": {
             "class": "ActionVoipTopData",
             "layout": "layout.json",

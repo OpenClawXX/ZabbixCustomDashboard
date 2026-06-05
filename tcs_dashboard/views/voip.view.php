@@ -35,7 +35,6 @@ $v = static function (string $rel) use ($asset_base, $asset_dir): string {
     window.VOIP_BOOT = <?= json_encode($data['boot'] ?? new stdClass(), JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) ?>;
     window.TCS_VOIP_DATA_URL       = "zabbix.php?action=tcs.voip.data";
     window.TCS_VOIP_CALLS_DATA_URL = "zabbix.php?action=tcs.voip.calls.data";
-    window.TCS_VOIP_SITES_DATA_URL = "zabbix.php?action=tcs.voip.sites.data";
     window.TCS_VOIP_TOP_DATA_URL   = "zabbix.php?action=tcs.voip.top.data";
 
     // Disable Zabbix's whole-page refresh on this view (same dance as

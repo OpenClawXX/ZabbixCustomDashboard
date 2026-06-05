@@ -89,7 +89,6 @@ class ActionVoipData extends ActionDataBase {
             'top'      => null,
             'queues'   => null,
             'quality'  => null,
-            'sites'    => null,
             'problems' => null,
             'sources'  => ['zbx' => 'unknown', '3cx' => 'unknown'],
         ];
@@ -182,10 +181,9 @@ class ActionVoipData extends ActionDataBase {
             $runXapi('Quality', function () use ($client, &$payload) {
                 $payload['quality'] = self::mapCallQuality($client->callQuality('30m'));
             }, false);
-            // NOTE: Users (→ sites) and TopExt are served by their own
-            // actions (tcs.voip.sites.data / tcs.voip.top.data) so the slow
-            // Users paging doesn't block this fast core rollup. The bridge
-            // fires both in parallel with this one.
+            // NOTE: TopExt is served by its own action (tcs.voip.top.data)
+            // so the report-endpoint call doesn't block this fast core
+            // rollup. The bridge fires it in parallel with this one.
         }
         if ($debug) $payload['xapi_raw'] = $rawSamples;
 

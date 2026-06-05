@@ -54,7 +54,6 @@ window.VOIP_QUALITY = window.VOIP_QUALITY || {
   loss: new Array(48).fill(0),
   rtt: new Array(48).fill(0)
 };
-window.VOIP_SITES = window.VOIP_SITES || [];
 window.VOIP_PROBLEMS = window.VOIP_PROBLEMS || [];
 
 // ═══════════════════════════════════════════════════════════════
@@ -377,7 +376,6 @@ const LoadingPill = () => {
   const flags = window.VOIP_LOADING_FLAGS || {};
   const labelOf = {
     core: "core",
-    sites: "extensions",
     top: "top talkers",
     calls: "active calls"
   };
@@ -751,121 +749,6 @@ const CallQualityCard = () => {
   }, "ms")))));
 };
 
-// ── Extension grid by site ──
-const ExtensionGrid = () => {
-  const [sites] = useStateVP(window.VOIP_SITES);
-  const totals = useMemoVP(() => {
-    const t = {
-      reg: 0,
-      unreg: 0,
-      call: 0,
-      dnd: 0,
-      alert: 0,
-      total: 0
-    };
-    sites.forEach(s => s.ext.forEach(e => {
-      t[e.state]++;
-      t.total++;
-    }));
-    return t;
-  }, [sites]);
-  return /*#__PURE__*/React.createElement("div", {
-    className: "card ext-card"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "card-h"
-  }, /*#__PURE__*/React.createElement("h3", null, "Extensions \xB7 Registration Status"), /*#__PURE__*/React.createElement(SourceBadge, {
-    src: "3cx"
-  }), /*#__PURE__*/React.createElement(SourceBadge, {
-    src: "pf"
-  }), /*#__PURE__*/React.createElement("div", {
-    className: "h-spacer"
-  }), /*#__PURE__*/React.createElement("span", {
-    className: "h-meta"
-  }, totals.total, " extensions \xB7 last poll 8s")), /*#__PURE__*/React.createElement("div", {
-    className: "ext-toolbar"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "legend"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "it"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw reg"
-  }), " Registered (", totals.reg, ")"), /*#__PURE__*/React.createElement("span", {
-    className: "it"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw call"
-  }), " On call (", totals.call, ")"), /*#__PURE__*/React.createElement("span", {
-    className: "it"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw dnd"
-  }), " DND (", totals.dnd, ")"), /*#__PURE__*/React.createElement("span", {
-    className: "it"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw alert"
-  }), " Alert (", totals.alert, ")"), /*#__PURE__*/React.createElement("span", {
-    className: "it"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw unreg"
-  }), " Unregistered (", totals.unreg, ")")), /*#__PURE__*/React.createElement("span", {
-    className: "spacer"
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: "var(--mono)",
-      fontSize: 11,
-      color: "var(--muted)"
-    }
-  }, "filter:"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: "var(--mono)",
-      fontSize: 11,
-      color: "var(--fg-2)",
-      background: "var(--bg-2)",
-      border: "1px solid var(--line)",
-      padding: "3px 8px",
-      borderRadius: 3
-    }
-  }, "all sites")), sites.map(site => {
-    const counts = site.ext.reduce((a, e) => {
-      a[e.state] = (a[e.state] || 0) + 1;
-      return a;
-    }, {});
-    return /*#__PURE__*/React.createElement("div", {
-      key: site.id,
-      className: "ext-site"
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "ext-site-head"
-    }, /*#__PURE__*/React.createElement("span", {
-      className: "name"
-    }, site.name), /*#__PURE__*/React.createElement("span", {
-      className: "stat"
-    }, /*#__PURE__*/React.createElement("b", {
-      className: "ok"
-    }, counts.reg || 0, " reg"), " \xB7 ", /*#__PURE__*/React.createElement("b", {
-      className: "ok"
-    }, counts.call || 0, " call"), counts.dnd ? /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 ", /*#__PURE__*/React.createElement("b", {
-      className: "warn"
-    }, counts.dnd, " dnd")) : null, counts.alert ? /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 ", /*#__PURE__*/React.createElement("b", {
-      className: "err"
-    }, counts.alert, " alert")) : null, counts.unreg ? /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 ", counts.unreg, " unreg") : null, /*#__PURE__*/React.createElement("span", {
-      style: {
-        marginLeft: 8,
-        color: "var(--muted-2)"
-      }
-    }, "\xB7 ", site.ext.length, " total"))), /*#__PURE__*/React.createElement("div", {
-      className: "ext-grid"
-    }, site.ext.map(e => /*#__PURE__*/React.createElement("div", {
-      key: e.ext,
-      className: "ext-cell " + e.state,
-      title: `x${e.ext} · ${e.name} · ${e.state}`
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "ec-num"
-    }, "x", e.ext), /*#__PURE__*/React.createElement("div", {
-      className: "ec-name"
-    }, e.name), /*#__PURE__*/React.createElement("span", {
-      className: "ec-led"
-    })))));
-  }));
-};
-
 // ── Top extensions / talkers ──
 const TopTalkers = () => {
   const max = window.VOIP_TOP.length ? Math.max(...window.VOIP_TOP.map(t => t.calls)) : 1;
@@ -1132,24 +1015,20 @@ const VoipApp = () => {
     style: {
       marginBottom: 14
     }
+  }, /*#__PURE__*/React.createElement(ActiveCallsCard, null)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
   }, /*#__PURE__*/React.createElement(TrunksCard, null)), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }
   }, /*#__PURE__*/React.createElement(SbcsCard, null)), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement(ActiveCallsCard, null)), /*#__PURE__*/React.createElement("div", {
     className: "voip-row-2col-wide",
     style: {
       marginBottom: 14
     }
-  }, /*#__PURE__*/React.createElement(QueuesCard, null), /*#__PURE__*/React.createElement(TopTalkers, null)), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement(ExtensionGrid, null)), /*#__PURE__*/React.createElement(VoipProblems, null))), /*#__PURE__*/React.createElement(TweaksPanel, {
+  }, /*#__PURE__*/React.createElement(QueuesCard, null), /*#__PURE__*/React.createElement(TopTalkers, null)), /*#__PURE__*/React.createElement(VoipProblems, null))), /*#__PURE__*/React.createElement(TweaksPanel, {
     title: "Tweaks"
   }, /*#__PURE__*/React.createElement(TweakSection, {
     title: "Layout"

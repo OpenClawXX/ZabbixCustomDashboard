@@ -6,8 +6,6 @@
 //
 //   tcs.voip.data        — core rollup (30s):  pbx, services, trunks,
 //                          sbcs, queues, problems, history
-//   tcs.voip.sites.data  — slow (60s):         per-extension reg grid
-//                          (paginates /xapi/v1/Users 100-at-a-time)
 //   tcs.voip.top.data    — slow (60s):         top-talker report
 //                          (function-import call, often 404/403)
 //   tcs.voip.calls.data  — fast (5s):          live active-calls list
@@ -26,14 +24,12 @@
         ["top",      "VOIP_TOP"],
         ["queues",   "VOIP_QUEUES"],
         ["quality",  "VOIP_QUALITY"],
-        ["sites",    "VOIP_SITES"],
         ["problems", "VOIP_PROBLEMS"],
     ];
 
     // Per-endpoint loading state, exposed for the header pill.
     window.VOIP_LOADING_FLAGS = window.VOIP_LOADING_FLAGS || {
         core:  true,
-        sites: true,
         top:   true,
         calls: true,
     };
@@ -70,7 +66,6 @@
 
     const URLS = {
         core:  window.TCS_VOIP_DATA_URL       || "zabbix.php?action=tcs.voip.data",
-        sites: window.TCS_VOIP_SITES_DATA_URL || "zabbix.php?action=tcs.voip.sites.data",
         top:   window.TCS_VOIP_TOP_DATA_URL   || "zabbix.php?action=tcs.voip.top.data",
         calls: window.TCS_VOIP_CALLS_DATA_URL || "zabbix.php?action=tcs.voip.calls.data",
     };
@@ -97,17 +92,15 @@
     }
 
     console.info("[tcs] fetching VoIP snapshot (parallel)…");
-    // Fire all four endpoints in parallel. Each card re-renders as its
-    // slot lands; no card waits on the slowest call.
+    // Fire all endpoints in parallel. Each card re-renders as its slot
+    // lands; no card waits on the slowest call.
     fetchOne("core");
-    fetchOne("sites", ["sites"]);
     fetchOne("top",   ["top"]);
     fetchOne("calls", ["calls"]);
 
     // Refresh cadences (skip when tab hidden).
     const visible = () => document.visibilityState === "visible";
-    setInterval(() => { if (visible()) fetchOne("core"); },           30_000);
-    setInterval(() => { if (visible()) fetchOne("sites", ["sites"]); }, 60_000);
+    setInterval(() => { if (visible()) fetchOne("core"); },             30_000);
     setInterval(() => { if (visible()) fetchOne("top",   ["top"]); },   60_000);
     setInterval(() => { if (visible()) fetchOne("calls", ["calls"]); }, 5_000);
     document.addEventListener("visibilitychange", () => {
@@ -120,7 +113,6 @@
     // Manual "Refresh now" hook (used by the Tweaks panel).
     window.tcsVoipRefresh = () => Promise.all([
         fetchOne("core"),
-        fetchOne("sites", ["sites"]),
         fetchOne("top",   ["top"]),
         fetchOne("calls", ["calls"]),
     ]);

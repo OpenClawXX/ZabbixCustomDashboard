@@ -35,7 +35,6 @@ window.VOIP_QUALITY  = window.VOIP_QUALITY  || {
   loss:   new Array(48).fill(0),
   rtt:    new Array(48).fill(0),
 };
-window.VOIP_SITES    = window.VOIP_SITES    || [];
 window.VOIP_PROBLEMS = window.VOIP_PROBLEMS || [];
 
 // ═══════════════════════════════════════════════════════════════
@@ -194,7 +193,7 @@ const VoipKpis = () => {
 // is running, then disappears once everything has responded once.
 const LoadingPill = () => {
   const flags = window.VOIP_LOADING_FLAGS || {};
-  const labelOf = { core: "core", sites: "extensions", top: "top talkers", calls: "active calls" };
+  const labelOf = { core: "core", top: "top talkers", calls: "active calls" };
   const pending = Object.keys(flags).filter(k => flags[k]);
   if (pending.length === 0) return null;
   return (
@@ -417,66 +416,6 @@ const CallQualityCard = () => {
   );
 };
 
-// ── Extension grid by site ──
-const ExtensionGrid = () => {
-  const [sites] = useStateVP(window.VOIP_SITES);
-  const totals = useMemoVP(() => {
-    const t = { reg:0, unreg:0, call:0, dnd:0, alert:0, total:0 };
-    sites.forEach(s => s.ext.forEach(e => { t[e.state]++; t.total++; }));
-    return t;
-  }, [sites]);
-
-  return (
-    <div className="card ext-card">
-      <div className="card-h">
-        <h3>Extensions · Registration Status</h3>
-        <SourceBadge src="3cx" />
-        <SourceBadge src="pf" />
-        <div className="h-spacer" />
-        <span className="h-meta">{totals.total} extensions · last poll 8s</span>
-      </div>
-      <div className="ext-toolbar">
-        <div className="legend">
-          <span className="it"><span className="sw reg"></span> Registered ({totals.reg})</span>
-          <span className="it"><span className="sw call"></span> On call ({totals.call})</span>
-          <span className="it"><span className="sw dnd"></span> DND ({totals.dnd})</span>
-          <span className="it"><span className="sw alert"></span> Alert ({totals.alert})</span>
-          <span className="it"><span className="sw unreg"></span> Unregistered ({totals.unreg})</span>
-        </div>
-        <span className="spacer" />
-        <span style={{fontFamily:"var(--mono)", fontSize:11, color:"var(--muted)"}}>filter:</span>
-        <span style={{fontFamily:"var(--mono)", fontSize:11, color:"var(--fg-2)", background:"var(--bg-2)", border:"1px solid var(--line)", padding:"3px 8px", borderRadius:3}}>all sites</span>
-      </div>
-      {sites.map(site => {
-        const counts = site.ext.reduce((a,e)=>{a[e.state]=(a[e.state]||0)+1;return a;},{});
-        return (
-          <div key={site.id} className="ext-site">
-            <div className="ext-site-head">
-              <span className="name">{site.name}</span>
-              <span className="stat">
-                <b className="ok">{counts.reg||0} reg</b> · <b className="ok">{counts.call||0} call</b>
-                {counts.dnd ? <> · <b className="warn">{counts.dnd} dnd</b></> : null}
-                {counts.alert ? <> · <b className="err">{counts.alert} alert</b></> : null}
-                {counts.unreg ? <> · {counts.unreg} unreg</> : null}
-                <span style={{marginLeft:8, color:"var(--muted-2)"}}>· {site.ext.length} total</span>
-              </span>
-            </div>
-            <div className="ext-grid">
-              {site.ext.map(e => (
-                <div key={e.ext} className={"ext-cell " + e.state} title={`x${e.ext} · ${e.name} · ${e.state}`}>
-                  <div className="ec-num">x{e.ext}</div>
-                  <div className="ec-name">{e.name}</div>
-                  <span className="ec-led" />
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
 // ── Top extensions / talkers ──
 const TopTalkers = () => {
   const max = window.VOIP_TOP.length ? Math.max(...window.VOIP_TOP.map(t => t.calls)) : 1;
@@ -636,6 +575,10 @@ const VoipApp = () => {
           </div>
 
           <div style={{ marginBottom: 14 }}>
+            <ActiveCallsCard />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
             <TrunksCard />
           </div>
 
@@ -643,17 +586,9 @@ const VoipApp = () => {
             <SbcsCard />
           </div>
 
-          <div style={{ marginBottom: 14 }}>
-            <ActiveCallsCard />
-          </div>
-
           <div className="voip-row-2col-wide" style={{ marginBottom: 14 }}>
             <QueuesCard />
             <TopTalkers />
-          </div>
-
-          <div style={{ marginBottom: 14 }}>
-            <ExtensionGrid />
           </div>
 
           <VoipProblems />

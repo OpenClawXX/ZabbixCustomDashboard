@@ -17,11 +17,10 @@ namespace Modules\TcsDashboard\Lib;
  *
  *   - systemStatus()                  → pbx + service-status rollup
  *   - trunks()                        → VOIP_TRUNKS rows
+ *   - sbcs()                          → VOIP_SBCS rows
  *   - activeCalls()                   → VOIP_CALLS rows
- *   - users(int $top = 500)           → raw extension list
- *   - extensionsBySite()              → VOIP_SITES grouped by inventory tag
  *   - queues()                        → raw queue list
- *   - queuesWithPerformance()         → VOIP_QUEUES rows (joins Performance)
+ *   - queuesWithPerformance()         → VOIP_QUEUES rows
  *   - topExtensions(int $top = 10)    → VOIP_TOP rows
  *   - callQuality(string $bucket)     → VOIP_QUALITY arrays
  *
@@ -103,29 +102,7 @@ class ThreeCXClient {
         return $r['value'] ?? [];
     }
 
-    /**
-     * GET /xapi/v1/Users with paging. 3CX v20 caps $top at 100, so we walk
-     * the collection with $skip until a page returns fewer than $page rows.
-     * Caller passes a soft upper bound — defaults to 5000, which is well
-     * above what any school-district PBX would hold.
-     */
-    public function users(int $max = 5000): array {
-        $page = 100;
-        $out  = [];
-        for ($skip = 0; $skip < $max; $skip += $page) {
-            $r = $this->get('/xapi/v1/Users', [
-                '$top'  => (string) $page,
-                '$skip' => (string) $skip,
-            ]);
-            $rows = $r['value'] ?? [];
-            if (!$rows) break;
-            foreach ($rows as $row) $out[] = $row;
-            if (count($rows) < $page) break;
-        }
-        return $out;
-    }
-
-    /**
+/**
      * Call queues. v20 builds differ on the collection name — try both.
      */
     public function queues(): array {
@@ -198,81 +175,6 @@ class ThreeCXClient {
     /* Bodies left for the implementation step; signatures locked so      */
     /* ActionVoipData wiring can be reviewed in this PR.                  */
     /* ------------------------------------------------------------------ */
-
-    /**
-     * Build the VOIP_SITES grid from /Users + /Groups.
-     *
-     * v20 PbxUser carries the registration state directly as IsRegistered
-     * (bool) — no need to fish through a RegistrarContact field. Site
-     * grouping uses the user's first non-DEFAULT entry in Groups[]
-     * (PbxUserGroup carries Name/Number/GroupId).
-     */
-    public function extensionsBySite(): array {
-        $users = $this->users(5000);
-
-        // /Groups: friendly names for the group ids that appear in PbxUser.Groups[].
-        // Best-effort — if the API client lacks read permission, fall through
-        // and use the raw group id as the site name.
-        $groupsById = [];
-        try {
-            $g = $this->get('/xapi/v1/Groups');
-            foreach (($g['value'] ?? []) as $row) {
-                if (!is_array($row)) continue;
-                $id = (string) ($row['Id'] ?? $row['Number'] ?? '');
-                if ($id !== '') $groupsById[$id] = (string) ($row['Name'] ?? $row['Number'] ?? $id);
-            }
-        } catch (\Throwable $_) { /* best-effort */ }
-
-        $bySite = [];
-        foreach ($users as $u) {
-            if (!is_array($u)) continue;
-            $ext = (string) ($u['Number'] ?? '');
-            if ($ext === '') continue;
-
-            $display = trim((string) ($u['DisplayName'] ?? ''));
-            if ($display === '') {
-                $display = trim(((string) ($u['FirstName'] ?? '')) . ' ' . ((string) ($u['LastName'] ?? '')));
-            }
-            if ($display === '') $display = $ext;
-
-            // Registration / presence
-            $enabled    = (bool) ($u['Enabled']       ?? true);
-            $registered = (bool) ($u['IsRegistered']  ?? false);
-            $profile    = strtolower((string) ($u['CurrentProfileName'] ?? ''));
-            if (!$enabled)           $state = 'unreg';
-            elseif (!$registered)    $state = 'unreg';
-            elseif (str_contains($profile, 'do not disturb') || str_contains($profile, 'dnd')) $state = 'dnd';
-            else                     $state = 'reg';
-
-            // Site = first non-DEFAULT group. PbxUserGroup has GroupId,
-            // Name, Number — prefer Name.
-            $siteId   = 'DIST';
-            $siteName = 'District';
-            foreach (($u['Groups'] ?? []) as $g) {
-                if (!is_array($g)) continue;
-                $gid    = (string) ($g['GroupId'] ?? $g['Id'] ?? '');
-                $gname  = (string) ($g['Name']    ?? '');
-                if (strtoupper($gname) === 'DEFAULT' || $gname === '') continue;
-                $siteId   = $gid !== '' ? $gid : $gname;
-                $siteName = $groupsById[$gid] ?? $gname;
-                break;
-            }
-
-            $bySite[$siteId] ??= ['id' => $siteId, 'name' => $siteName, 'expanded' => true, 'ext' => []];
-            $bySite[$siteId]['ext'][] = [
-                'ext'   => $ext,
-                'name'  => $display,
-                'site'  => $siteId,
-                'state' => $state,
-            ];
-        }
-        $out = array_values($bySite);
-        usort($out, fn($a, $b) => strcmp($a['name'], $b['name']));
-        foreach ($out as &$site) {
-            usort($site['ext'], fn($a, $b) => strcmp($a['ext'], $b['ext']));
-        }
-        return $out;
-    }
 
     /**
      * Queue summary rows for the VOIP_QUEUES card.
