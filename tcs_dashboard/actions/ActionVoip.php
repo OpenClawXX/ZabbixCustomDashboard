@@ -8,9 +8,13 @@ use CControllerResponseFatal;
 /**
  * GET zabbix.php?action=tcs.voip.view
  *
- * Renders the 3CX VoIP NOC page from the mock data in voip-app.jsx. To wire
- * to live data, hit the 3CX Management Console API (/xapi/v1/Trunks, /Calls,
- * /Extensions) and pass the payload as $data['boot'].
+ * Renders the 3CX VoIP NOC shell. ActionVoipData drives the real rollup —
+ * this action emits an empty-shape boot envelope so voip-bridge.jsx can
+ * paint loading state immediately, then swap in live data after fetching
+ * tcs.voip.data.
+ *
+ * Wiring details + the Zabbix-vs-XAPI data split live in
+ * notes/voip-integration-plan.md.
  */
 class ActionVoip extends ActionBase {
 
@@ -23,8 +27,10 @@ class ActionVoip extends ActionBase {
     }
 
     protected function doAction(): void {
+        $boot = ActionVoipData::emptyPayload() + ['async' => true];
         $response = new CControllerResponseData([
-            'title' => _('TCS VoIP · 3CX')
+            'title' => _('TCS VoIP · 3CX'),
+            'boot'  => $boot,
         ]);
         $response->setTitle(_('TCS VoIP · 3CX'));
         $this->setResponse($response);

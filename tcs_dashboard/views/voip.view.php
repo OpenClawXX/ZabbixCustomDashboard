@@ -28,6 +28,32 @@ $v = static function (string $rel) use ($asset_base, $asset_dir): string {
 <link rel="stylesheet" href="<?= $v('switches.css') ?>">
 <link rel="stylesheet" href="<?= $v('voip.css') ?>">
 
+<script>
+    // SSR snapshot from ActionVoip; voip-bridge.jsx unpacks this into the
+    // window.VOIP_* globals voip-app.jsx reads, then refreshes via
+    // tcs.voip.data (30s) and tcs.voip.calls.data (5s).
+    window.VOIP_BOOT = <?= json_encode($data['boot'] ?? new stdClass(), JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) ?>;
+    window.TCS_VOIP_DATA_URL       = "zabbix.php?action=tcs.voip.data";
+    window.TCS_VOIP_CALLS_DATA_URL = "zabbix.php?action=tcs.voip.calls.data";
+
+    // Disable Zabbix's whole-page refresh on this view (same dance as
+    // fortigate.view.php / switches.view.php).
+    (function disableZabbixRefresh() {
+        const kill = () => {
+            try {
+                if (window.PageRefresh && typeof window.PageRefresh.stop === "function") {
+                    window.PageRefresh.stop();
+                }
+            } catch (e) { /* no-op */ }
+            document.querySelectorAll('meta[http-equiv="refresh" i]').forEach(m => m.remove());
+        };
+        kill();
+        document.addEventListener("DOMContentLoaded", kill);
+        setTimeout(kill, 0);
+        setTimeout(kill, 250);
+    })();
+</script>
+
 <style>
     html.hide-src-badges .src-badge { display: none !important; }
     .app[data-density="dense"] .card-b { padding: 10px; }
@@ -49,4 +75,5 @@ $v = static function (string $rel) use ($asset_base, $asset_dir): string {
 <script type="text/babel" src="<?= $v('tweaks-panel.jsx') ?>"></script>
 <script type="text/babel" src="<?= $v('primitives.jsx') ?>"></script>
 <script type="text/babel" src="<?= $v('global-nav.jsx') ?>"></script>
+<script type="text/babel" src="<?= $v('voip-bridge.jsx') ?>"></script>
 <script type="text/babel" src="<?= $v('voip-app.jsx') ?>"></script>

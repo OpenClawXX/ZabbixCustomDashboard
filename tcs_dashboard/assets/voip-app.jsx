@@ -30,7 +30,11 @@ const _concur24h = (() => {
 const _inbound24h  = _concur24h.map((v, i) => Math.round(v * (0.55 + Math.sin(i * 0.3) * 0.05)));
 const _outbound24h = _concur24h.map((v, i) => v - _inbound24h[i]);
 
-window.VOIP_PBX = {
+// Mock fallback. voip-bridge.jsx applies the SSR boot before this script
+// runs and seeds window.VOIP_* with live data when available; the ||=
+// guards below leave that live data in place and only mock-fill the slots
+// the bridge couldn't populate.
+window.VOIP_PBX = window.VOIP_PBX || {
   fqdn: "pbx.tcs.local",
   ip: "10.10.5.20",
   version: "20.0 U4 (Build 4.2.0.1)",
@@ -53,7 +57,7 @@ window.VOIP_PBX = {
 };
 
 // Services (3CX components + supporting infra)
-window.VOIP_SERVICES = [
+window.VOIP_SERVICES = window.VOIP_SERVICES || [
   { name: "3CX Phone System",     status: "running", uptime: "47d", sub: "core call manager · v20 U4",        load: "42%"  },
   { name: "3CX Media Server",     status: "running", uptime: "47d", sub: "G.711, G.722, OPUS · 28 active",   load: "31%"  },
   { name: "3CX Web Server (Nginx)", status: "running", uptime: "47d", sub: "TLS 1.3 · sbc.tcs.org",          load: "9%"   },
@@ -67,7 +71,7 @@ window.VOIP_SERVICES = [
 ];
 
 // SIP Trunks
-window.VOIP_TRUNKS = [
+window.VOIP_TRUNKS = window.VOIP_TRUNKS || [
   { name: "Bandwidth.com SIP — Main DID Block",   provider: "bandwidth.com", host: "siptrunk.bandwidth.com:5060", status: "reg", chTotal: 64, chIn: 14, chOut: 9, asr: 97.2, mos: 4.41, errors: 0, did: "+1 205-759-3500" },
   { name: "Bandwidth.com SIP — E911",             provider: "bandwidth.com", host: "e911.bandwidth.com:5060",     status: "reg", chTotal: 8,  chIn: 0,  chOut: 0, asr: 100,  mos: 4.50, errors: 0, did: "E911 only" },
   { name: "AT&T BVoIP — Failover PRI",            provider: "att.com",       host: "10.10.5.40 (Audiocodes)",     status: "reg", chTotal: 23, chIn: 2,  chOut: 1, asr: 95.8, mos: 4.28, errors: 0, did: "+1 205-507-2200" },
@@ -77,7 +81,7 @@ window.VOIP_TRUNKS = [
 ];
 
 // Live active calls (a snapshot — these are happening right now)
-window.VOIP_CALLS = [
+window.VOIP_CALLS = window.VOIP_CALLS || [
   { dir: "in",  from: "+1 205-759-3500",          fromSub: "Bandwidth · DID 3500",     to: "1042 — Auto-attendant",   toSub: "→ x1042 Reception",       dur: "0:14",  codec: "OPUS",   trunk: "BW-Main",  mos: 4.42, q: "good" },
   { dir: "in",  from: "+1 334-887-1102",          fromSub: "Parent · Montgomery, AL",  to: "1108 — J. Hartwell",      toSub: "Counseling · BHS",        dur: "2:41",  codec: "G.722",  trunk: "BW-Main",  mos: 4.38, q: "good" },
   { dir: "out", from: "1213 — A. Whitley",        fromSub: "Principal · CHS",          to: "+1 205-561-8893",         toSub: "Tuscaloosa City Hall",    dur: "11:08", codec: "G.711u", trunk: "Twilio",   mos: 4.21, q: "good" },
@@ -91,7 +95,7 @@ window.VOIP_CALLS = [
 ];
 
 // Top extensions by call count today
-window.VOIP_TOP = [
+window.VOIP_TOP = window.VOIP_TOP || [
   { ext: "1042", name: "Reception · Arc Admin",       site: "ARC", calls: 187, mins: 412, role: "front-desk" },
   { ext: "1300", name: "Facilities Help Queue",       site: "DIST", calls: 142, mins: 287, role: "queue" },
   { ext: "1019", name: "IT Help Desk Queue",          site: "DIST", calls: 118, mins: 614, role: "queue" },
@@ -101,7 +105,7 @@ window.VOIP_TOP = [
 ];
 
 // Queues (snapshot)
-window.VOIP_QUEUES = [
+window.VOIP_QUEUES = window.VOIP_QUEUES || [
   { name: "IT Help Desk",        ext: "1019", agents: 4, agentsOn: 3, waiting: 2, sla: 88, abandon: 4, ans: 116, slaSec: 30 },
   { name: "Facilities",          ext: "1300", agents: 3, agentsOn: 3, waiting: 1, sla: 94, abandon: 2, ans: 139, slaSec: 30 },
   { name: "Transportation",      ext: "1320", agents: 5, agentsOn: 4, waiting: 0, sla: 97, abandon: 1, ans: 71,  slaSec: 30 },
@@ -109,7 +113,7 @@ window.VOIP_QUEUES = [
 ];
 
 // Call quality 24h history (sample every 30min, 48 samples)
-window.VOIP_QUALITY = {
+window.VOIP_QUALITY = window.VOIP_QUALITY || {
   mos:    Array.from({length:48}, (_,i) => 4.3 + Math.sin(i*0.4)*0.08 + (i===24?-0.4:0) + (i===25?-0.3:0)),
   jitter: Array.from({length:48}, (_,i) => 6 + Math.abs(Math.sin(i*0.3))*4 + (i===24?22:0) + (i===25?14:0)),
   loss:   Array.from({length:48}, (_,i) => 0.05 + Math.abs(Math.sin(i*0.5))*0.3 + (i===24?1.4:0) + (i===25?0.8:0)),
@@ -136,7 +140,7 @@ function _genExt(site, base, count, opts={}) {
   return out;
 }
 
-window.VOIP_SITES = [
+window.VOIP_SITES = window.VOIP_SITES || [
   { id: "ARC",  name: "Arcadia Elementary",       expanded: true,  ext: _genExt("ARC", 1200, 36, {alertAt: 11}) },
   { id: "BHS",  name: "Bryant High School",       expanded: true,  ext: _genExt("BHS", 1300, 56) },
   { id: "CHS",  name: "Central High School",      expanded: true,  ext: _genExt("CHS", 1400, 48, {alertAt: 22}) },
@@ -146,7 +150,7 @@ window.VOIP_SITES = [
 ];
 
 // Problems
-window.VOIP_PROBLEMS = [
+window.VOIP_PROBLEMS = window.VOIP_PROBLEMS || [
   { ts: "09:14:22", sev: "warning", host: "chs-sbc-01",   trig: "Upstream jitter > 25ms (Flowroute trunk)",      age: "00:24", ack: false },
   { ts: "08:42:08", sev: "high",    host: "TCTA-Avaya",   trig: "Internal SIP trunk x6000-6099 NOT REGISTERED",  age: "00:56", ack: false },
   { ts: "08:11:55", sev: "warning", host: "Flowroute",    trig: "12 SIP 503 errors in 5m on conf-bridge trunk",  age: "01:27", ack: false },

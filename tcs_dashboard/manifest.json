@@ -173,6 +173,16 @@
             "view": "voip.view",
             "layout": "layout.htmlpage"
         },
+        "tcs.voip.data": {
+            "class": "ActionVoipData",
+            "layout": "layout.json",
+            "view": null
+        },
+        "tcs.voip.calls.data": {
+            "class": "ActionVoipCallsData",
+            "layout": "layout.json",
+            "view": null
+        },
         "tcs.fortigate.view": {
             "class": "ActionFortigate",
             "view": "fortigate.view",
