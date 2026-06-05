@@ -238,12 +238,19 @@ class ActionVoipData extends ActionDataBase {
     private static function mapPbx(array $s, ?array $host): array {
         $fqdn    = self::pick($s, ['FQDN', 'Fqdn', 'fqdn'], '—');
         $version = self::pick($s, ['Version', 'version'], '—');
-        $edition = self::pick($s, ['LicenseEdition', 'Edition', 'License'], '—');
+        // 3CX v20 doesn't ship a license-edition string; ProductCode is the
+        // closest analogue (e.g. "3CXPSPROFENTSPLA" → "PROFENT SPLA").
+        $edition = self::pick($s, ['LicenseEdition', 'Edition', 'License', 'ProductCode'], '—');
         $maxSim  = (int) self::pick($s, ['MaxSimCalls', 'MaximumSimultaneousCalls', 'SimultaneousCalls'], 0);
         $active  = (int) self::pick($s, ['CallsActive', 'ActiveCalls', 'CurrentCalls'], 0);
         $extReg  = (int) self::pick($s, ['ExtensionsRegistered', 'RegisteredExtensions'], 0);
         $extTot  = (int) self::pick($s, ['ExtensionsTotal', 'TotalExtensions', 'Extensions'], 0);
         $uptimeS = (int) self::pick($s, ['Uptime', 'UptimeSeconds', 'SystemUptime'], 0);
+        $trunksReg   = (int) self::pick($s, ['TrunksRegistered'], 0);
+        $trunksTotal = (int) self::pick($s, ['TrunksTotal'], 0);
+
+        // Prefer 3CX-reported IP, fall back to the Zabbix host interface.
+        $pbxIp = (string) self::pick($s, ['CurrentLocalIp', 'IpV4', 'Ip'], '');
 
         // Calls today: SystemStatus rarely carries this on every build; the
         // template item is more reliable but we don't have it here. Default
@@ -253,8 +260,8 @@ class ActionVoipData extends ActionDataBase {
         $callsOutbound = (int) self::pick($s, ['CallsOutbound', 'OutboundCallsToday'], 0);
         $callsInternal = max(0, $callsToday - $callsInbound - $callsOutbound);
 
-        $ip = '—';
-        if ($host) {
+        $ip = $pbxIp !== '' ? $pbxIp : '—';
+        if ($ip === '—' && $host) {
             foreach (($host['interfaces'] ?? []) as $iface) {
                 if ((int) ($iface['main'] ?? 0) === 1) { $ip = (string) ($iface['ip'] ?? '—'); break; }
             }
@@ -279,6 +286,8 @@ class ActionVoipData extends ActionDataBase {
             'callsInternal' => $callsInternal,
             'registeredExt' => $extReg,
             'totalExt'      => $extTot,
+            'trunksReg'     => $trunksReg,
+            'trunksTotal'   => $trunksTotal,
             'avgMos'        => (float) self::pick($s, ['AverageMos', 'AvgMos', 'Mos'], 0),
             'asr'           => (float) self::pick($s, ['Asr', 'AnswerSeizureRatio'], 0),
             'acd'           => (string) self::pick($s, ['Acd', 'AverageCallDuration'], '—'),
@@ -318,52 +327,88 @@ class ActionVoipData extends ActionDataBase {
         return $rows;
     }
 
-    /** /xapi/v1/Trunks rows → VOIP_TRUNKS shape. */
+    /**
+     * /xapi/v1/Trunks rows → VOIP_TRUNKS shape.
+     *
+     * 3CX v20 shape (confirmed against tusck12 with ?debug=1):
+     *   {
+     *     Number, AuthID, IsOnline (bool), Direction,
+     *     SimultaneousCalls, DidNumbers: [..],
+     *     Tags: [..],
+     *     Gateway: {
+     *       Name, Host, ProxyHost, Port, Type ("Provider" / "BridgeMaster" /
+     *       "Gateway"), TemplateFilename ("asterisk.pv.xml" → carrier hint),
+     *       Codecs: [..], ...
+     *     },
+     *     TrunkRegTimes: [{Name:"sent_time"|"ok_time"|"failed_time"|"fail_code", Value}],
+     *   }
+     *
+     * Display name preference: Gateway.Name → AuthID → "Trunk <Number>".
+     * Registration: IsOnline true === "reg", false === "unreg". 3CX
+     * surfaces "degraded" via TrunkRegTimes.fail_code being set while
+     * IsOnline is still true.
+     */
     private static function mapTrunks(array $rows): array {
         $out = [];
         foreach ($rows as $t) {
             if (!is_array($t)) continue;
 
-            // Number is the most reliable field. Use it as the fallback for
-            // both display name and DID when the build doesn't carry Name.
-            $number = (string) self::pick($t, ['Number', 'MainTrunkNumber', 'AuthID'], '');
-            $name   = (string) self::pick($t, ['Name', 'TrunkName', 'DisplayName', 'OutboundCallerID', 'AuthID'], '');
-            if ($name === '') $name = $number !== '' ? 'Trunk ' . $number : 'trunk';
+            $gw     = is_array($t['Gateway'] ?? null) ? $t['Gateway'] : [];
+            $number = (string) ($t['Number'] ?? '');
+            $authId = (string) ($t['AuthID'] ?? '');
 
-            // Registration: v20 sometimes exposes Status (string), sometimes
-            // IsRegistered (bool). Accept either; treat string "Registered" /
-            // "OK" / "Active" as up.
-            $regRaw = self::pick($t, ['IsRegistered', 'Registered', 'RegistrationStatus', 'Status', 'State'], null);
-            if (is_bool($regRaw))         $isReg = $regRaw;
-            elseif (is_numeric($regRaw))  $isReg = ((int) $regRaw) === 1;
-            elseif (is_string($regRaw))   $isReg = in_array(strtolower($regRaw), ['true', '1', 'registered', 'reg', 'ok', 'up', 'active'], true);
-            else                          $isReg = false;
-            $errCount = (int) self::pick($t, ['ErrorCount', 'Errors', 'FailureCount', 'FailedCalls'], 0);
-            $status   = $isReg ? ($errCount > 0 ? 'dgr' : 'reg') : 'unreg';
+            $name = (string) ($gw['Name'] ?? '');
+            if ($name === '') $name = $authId !== '' ? $authId : ($number !== '' ? 'Trunk ' . $number : 'trunk');
 
-            $chTotal = (int) self::pick($t, ['SimultaneousCalls', 'MaxSimCalls', 'ChannelsCount', 'Channels'], 0);
-            $chIn    = (int) self::pick($t, ['ActiveInboundCalls',  'ActiveCallsIn',  'CallsIn',  'CurrentIncomingCalls'], 0);
-            $chOut   = (int) self::pick($t, ['ActiveOutboundCalls', 'ActiveCallsOut', 'CallsOut', 'CurrentOutgoingCalls'], 0);
+            $isOnline = (bool) ($t['IsOnline'] ?? false);
 
-            // Provider: 3CX v20 nests provider info in a few different
-            // places. Walk common shapes.
-            $provider = (string) self::pick($t, ['ProviderName', 'Provider', 'ProviderType', 'GatewayName', 'Carrier'], '');
-            if ($provider === '' && isset($t['Provider']) && is_array($t['Provider'])) {
-                $provider = (string) ($t['Provider']['Name'] ?? $t['Provider']['DisplayName'] ?? '');
+            // TrunkRegTimes carries the most recent failure reason; if
+            // fail_code is set and the trunk is still considered online,
+            // mark it degraded so the operator sees it.
+            $failCode = '';
+            foreach (($t['TrunkRegTimes'] ?? []) as $rt) {
+                if (is_array($rt) && ($rt['Name'] ?? '') === 'fail_code') {
+                    $failCode = (string) ($rt['Value'] ?? '');
+                    break;
+                }
             }
+            $status = $isOnline ? ($failCode !== '' ? 'dgr' : 'reg') : 'unreg';
+
+            $host = (string) ($gw['Host'] ?? '');
+            $port = (int)    ($gw['Port'] ?? 0);
+            if ($host !== '' && $port > 0) $host .= ':' . $port;
+            elseif ($host === '') $host = (string) ($gw['ProxyHost'] ?? '');
+
+            // Provider: 3CX doesn't carry a carrier name directly. Best we
+            // can do is the Gateway.Type ("Provider" / "BridgeMaster" /
+            // "Gateway") + the TemplateFilename when set (e.g. "twilio.xml",
+            // "asterisk.pv.xml" → strip the .xml).
+            $provider = (string) ($gw['Type'] ?? '');
+            $tmpl     = (string) ($gw['TemplateFilename'] ?? '');
+            if ($tmpl !== '') {
+                $provider = preg_replace('/\.xml$/i', '', $tmpl) ?: $provider;
+            }
+
+            // DID: prefer DidNumbers[0] (the public-facing number), fall
+            // back to Number (the extension/peer id).
+            $did = '';
+            if (!empty($t['DidNumbers']) && is_array($t['DidNumbers'])) {
+                $did = (string) ($t['DidNumbers'][0] ?? '');
+            }
+            if ($did === '') $did = $number;
 
             $out[] = [
                 'name'     => $name,
                 'provider' => $provider,
-                'host'     => (string) self::pick($t, ['Host', 'GatewayHost', 'OutboundProxy', 'ProxyHost', 'Address', 'SipServer'], ''),
+                'host'     => $host,
                 'status'   => $status,
-                'chTotal'  => $chTotal,
-                'chIn'     => $chIn,
-                'chOut'    => $chOut,
-                'asr'      => (float) self::pick($t, ['AnswerSeizureRatio', 'Asr'], 0),
-                'mos'      => (float) self::pick($t, ['AverageMos', 'Mos'], 0),
-                'errors'   => $errCount,
-                'did'      => $number,
+                'chTotal'  => (int) ($t['SimultaneousCalls'] ?? 0),
+                'chIn'     => 0,    // not in /Trunks; would need /ActiveCalls aggregation
+                'chOut'    => 0,
+                'asr'      => 0.0,  // not in /Trunks; comes from CallHistoryView reports
+                'mos'      => 0.0,
+                'errors'   => $failCode !== '' ? 1 : 0,
+                'did'      => $did,
             ];
         }
         return $out;

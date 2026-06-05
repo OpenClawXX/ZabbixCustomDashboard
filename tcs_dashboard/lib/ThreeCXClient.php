@@ -102,9 +102,8 @@ class ThreeCXClient {
         $out  = [];
         for ($skip = 0; $skip < $max; $skip += $page) {
             $r = $this->get('/xapi/v1/Users', [
-                '$top'    => (string) $page,
-                '$skip'   => (string) $skip,
-                '$select' => 'Number,FirstName,LastName,CurrentProfileName,Forwarding,Registrar,Groups',
+                '$top'  => (string) $page,
+                '$skip' => (string) $skip,
             ]);
             $rows = $r['value'] ?? [];
             if (!$rows) break;
@@ -114,10 +113,20 @@ class ThreeCXClient {
         return $out;
     }
 
-    /** GET /xapi/v1/Queues. */
+    /**
+     * Call queues. v20 builds differ on the collection name — try both.
+     */
     public function queues(): array {
-        $r = $this->get('/xapi/v1/Queues');
-        return $r['value'] ?? [];
+        foreach (['/xapi/v1/CallQueues', '/xapi/v1/Queues'] as $path) {
+            try {
+                $r = $this->get($path);
+                $rows = $r['value'] ?? [];
+                if ($rows) return $rows;
+            } catch (\RuntimeException $e) {
+                if (!self::isNotFound($e)) throw $e;
+            }
+        }
+        return [];
     }
 
     /** GET /xapi/v1/Queues({Id})/Performance?date=today. */
