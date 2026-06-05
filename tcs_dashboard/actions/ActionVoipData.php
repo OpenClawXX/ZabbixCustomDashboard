@@ -47,7 +47,13 @@ class ActionVoipData extends ActionDataBase {
                 $payload = $cached;
             } else {
                 $payload = self::buildPayload();
-                self::cacheSet($payload);
+                // Don't pin a broken rollup in APCu for 30 s — operators
+                // re-poll-to-debug will just hit the same stale failure.
+                $cxOk  = ($payload['sources']['3cx'] ?? '') === 'live' || ($payload['sources']['3cx'] ?? '') === 'partial';
+                $zbxOk = ($payload['sources']['zbx'] ?? '') === 'live';
+                if ($cxOk || $zbxOk) {
+                    self::cacheSet($payload);
+                }
             }
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] voip.data: ' . $e->getMessage());
@@ -117,80 +123,50 @@ class ActionVoipData extends ActionDataBase {
 
         $xapiOk = 0;
         $xapiFail = 0;
+        $errors   = [];   // first-failure-wins, per-endpoint, surfaced to UI
+
+        $runXapi = static function (string $label, callable $fn) use (&$xapiOk, &$xapiFail, &$errors) {
+            try { $fn(); $xapiOk++; }
+            catch (\Throwable $e) {
+                $xapiFail++;
+                $msg = sprintf('%s: %s', $label, $e->getMessage());
+                error_log('[tcs_dashboard] voip ' . $msg);
+                $errors[$label] = $e->getMessage();
+            }
+        };
 
         // 2a. SystemStatus → pbx header + services
-        $sysStatus = null;
         if ($client) {
-            try {
-                $sysStatus           = $client->systemStatus();
-                $payload['pbx']      = self::mapPbx($sysStatus, $host);
-                $payload['services'] = self::mapServices($sysStatus);
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip systemStatus: ' . $e->getMessage());
-                $xapiFail++;
-            }
-        }
-
-        // 2b. Trunks
-        if ($client) {
-            try {
-                $payload['trunks'] = self::mapTrunks($client->trunks());
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip trunks: ' . $e->getMessage());
-                $xapiFail++;
-            }
-        }
-
-        // 2c. Queues + per-queue performance
-        if ($client) {
-            try {
-                $payload['queues'] = $client->queuesWithPerformance();
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip queues: ' . $e->getMessage());
-                $xapiFail++;
-            }
-        }
-
-        // 2d. Per-extension grid grouped by site
-        if ($client) {
-            try {
-                $payload['sites'] = $client->extensionsBySite();
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip users: ' . $e->getMessage());
-                $xapiFail++;
-            }
-        }
-
-        // 2e. Top extensions
-        if ($client) {
-            try {
-                $payload['top'] = self::mapTopExtensions($client->topExtensions(10));
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip top: ' . $e->getMessage());
-                $xapiFail++;
-            }
-        }
-
-        // 2f. Call quality (24h, 30m buckets)
-        if ($client) {
-            try {
-                $payload['quality'] = self::mapCallQuality($client->callQuality('30m'));
-                $xapiOk++;
-            } catch (\Throwable $e) {
-                error_log('[tcs_dashboard] voip quality: ' . $e->getMessage());
-                $xapiFail++;
-            }
+            $runXapi('SystemStatus', function () use ($client, &$payload, $host) {
+                $s = $client->systemStatus();
+                $payload['pbx']      = self::mapPbx($s, $host);
+                $payload['services'] = self::mapServices($s);
+            });
+            // 2b. Trunks
+            $runXapi('Trunks',   function () use ($client, &$payload) { $payload['trunks']  = self::mapTrunks($client->trunks()); });
+            // 2c. Queues + per-queue performance
+            $runXapi('Queues',   function () use ($client, &$payload) { $payload['queues']  = $client->queuesWithPerformance(); });
+            // 2d. Per-extension grid grouped by site
+            $runXapi('Users',    function () use ($client, &$payload) { $payload['sites']   = $client->extensionsBySite(); });
+            // 2e. Top extensions
+            $runXapi('TopExt',   function () use ($client, &$payload) { $payload['top']     = self::mapTopExtensions($client->topExtensions(10)); });
+            // 2f. Call quality (24h, 30m buckets)
+            $runXapi('Quality',  function () use ($client, &$payload) { $payload['quality'] = self::mapCallQuality($client->callQuality('30m')); });
         }
 
         if ($client) {
             if ($xapiOk > 0 && $xapiFail === 0)      $payload['sources']['3cx'] = 'live';
             elseif ($xapiOk > 0)                     $payload['sources']['3cx'] = 'partial';
             else                                     $payload['sources']['3cx'] = 'error';
+            if ($errors) {
+                // Surface the first failure verbatim so it's visible in the
+                // network response without having to grep PHP error logs.
+                $first = array_key_first($errors);
+                $payload['warning'] = sprintf('3CX %s call failed: %s', $first, $errors[$first]);
+                $payload['xapi_errors'] = $errors;
+                $payload['xapi_url']    = $cfg['url'];
+                $payload['xapi_verify'] = $cfg['verify_ssl'];
+            }
         }
 
         // 3. Zabbix-side: 24h calls-active history → pbx.history.concur
