@@ -138,17 +138,107 @@ class ThreeCXClient {
     /* ------------------------------------------------------------------ */
 
     public function extensionsBySite(): array {
-        // TODO step 3: group users() by Groups[] entry whose name matches a
-        // VOIP_SITES site id, fold registration state from RegistrarContact
-        // ('' = unreg) and CurrentProfileName ('Available'/'OutOfOffice'/DND).
-        return [];
+        $users = $this->users(500);
+
+        // Group definitions: try /Groups for friendly names. Failure here
+        // just means we fall back to "DIST" as the catch-all site id.
+        $groupsById = [];
+        try {
+            $g = $this->get('/xapi/v1/Groups', ['$select' => 'Id,Name,Number']);
+            foreach (($g['value'] ?? []) as $row) {
+                if (!is_array($row)) continue;
+                $id = (string) ($row['Id'] ?? $row['Number'] ?? '');
+                if ($id !== '') $groupsById[$id] = (string) ($row['Name'] ?? $id);
+            }
+        } catch (\Throwable $_) { /* best-effort */ }
+
+        $bySite = [];
+        foreach ($users as $u) {
+            if (!is_array($u)) continue;
+            $ext   = (string) ($u['Number'] ?? '');
+            if ($ext === '') continue;
+            $first = (string) ($u['FirstName'] ?? '');
+            $last  = (string) ($u['LastName']  ?? '');
+            $name  = trim($first . ' ' . $last) ?: $ext;
+
+            // Registration state. RegistrarContact present → registered.
+            // CurrentProfileName "Do Not Disturb"/"OutOfOffice" → dnd.
+            $reg = $u['Registrar'] ?? $u['RegistrarContact'] ?? null;
+            $profile = strtolower((string) ($u['CurrentProfileName'] ?? ''));
+            $state = $reg ? 'reg' : 'unreg';
+            if ($state === 'reg' && (str_contains($profile, 'do not disturb') || str_contains($profile, 'dnd'))) {
+                $state = 'dnd';
+            }
+
+            // Site = first group the user belongs to (skipping the implicit
+            // "DEFAULT" or empty groups). If groups are absent the user
+            // lands in DIST.
+            $siteId = 'DIST';
+            $siteName = 'District Office';
+            $userGroups = $u['Groups'] ?? [];
+            if (is_array($userGroups)) {
+                foreach ($userGroups as $g) {
+                    $gid = (string) (is_array($g) ? ($g['Id'] ?? $g['GroupId'] ?? '') : $g);
+                    if ($gid === '' || strtoupper($gid) === 'DEFAULT') continue;
+                    $siteId   = $gid;
+                    $siteName = $groupsById[$gid] ?? $gid;
+                    break;
+                }
+            }
+
+            $bySite[$siteId] ??= ['id' => $siteId, 'name' => $siteName, 'expanded' => true, 'ext' => []];
+            $bySite[$siteId]['ext'][] = [
+                'ext'   => $ext,
+                'name'  => $name,
+                'site'  => $siteId,
+                'state' => $state,
+            ];
+        }
+        // Stable order: by site name, extensions by number within each.
+        $out = array_values($bySite);
+        usort($out, fn($a, $b) => strcmp($a['name'], $b['name']));
+        foreach ($out as &$site) {
+            usort($site['ext'], fn($a, $b) => strcmp($a['ext'], $b['ext']));
+        }
+        return $out;
     }
 
     public function queuesWithPerformance(): array {
-        // TODO step 3: zip queues() with queuePerformance(id) per row;
-        // return rows shaped like the VOIP_QUEUES sample in voip-app.jsx
-        // ({ name, ext, agents, agentsOn, waiting, sla, abandon, ans, slaSec }).
-        return [];
+        $queues = $this->queues();
+        $out = [];
+        foreach ($queues as $q) {
+            if (!is_array($q)) continue;
+            $id   = (string) ($q['Id']     ?? '');
+            $name = (string) ($q['Name']   ?? 'Queue');
+            $num  = (string) ($q['Number'] ?? '');
+
+            $perf = [];
+            if ($id !== '') {
+                try { $perf = $this->queuePerformance($id); }
+                catch (\Throwable $_) { /* leave perf empty for this queue */ }
+            }
+
+            $agents   = (int)   ($perf['AgentsTotal']         ?? $perf['TotalAgents']    ?? 0);
+            $agentsOn = (int)   ($perf['AgentsLoggedIn']      ?? $perf['LoggedInAgents'] ?? $agents);
+            $waiting  = (int)   ($perf['CallsWaiting']        ?? $perf['Waiting']        ?? 0);
+            $ans      = (int)   ($perf['AnsweredCalls']       ?? $perf['Answered']       ?? 0);
+            $abandon  = (int)   ($perf['AbandonedCalls']      ?? $perf['Abandoned']      ?? 0);
+            $sla      = (float) ($perf['ServiceLevel']        ?? $perf['SlaPercent']     ?? 0);
+            $slaSec   = (int)   ($perf['ServiceLevelSeconds'] ?? $perf['SlaSeconds']     ?? 30);
+
+            $out[] = [
+                'name'     => $name,
+                'ext'      => $num,
+                'agents'   => $agents,
+                'agentsOn' => $agentsOn,
+                'waiting'  => $waiting,
+                'sla'      => (int) round($sla),
+                'abandon'  => $abandon,
+                'ans'      => $ans,
+                'slaSec'   => $slaSec,
+            ];
+        }
+        return $out;
     }
 
     /* ------------------------------------------------------------------ */
