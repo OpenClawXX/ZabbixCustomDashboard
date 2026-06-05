@@ -25,6 +25,7 @@ window.VOIP_PBX = window.VOIP_PBX || {
 };
 window.VOIP_SERVICES = window.VOIP_SERVICES || [];
 window.VOIP_TRUNKS   = window.VOIP_TRUNKS   || [];
+window.VOIP_SBCS     = window.VOIP_SBCS     || [];
 window.VOIP_CALLS    = window.VOIP_CALLS    || [];
 window.VOIP_TOP      = window.VOIP_TOP      || [];
 window.VOIP_QUEUES   = window.VOIP_QUEUES   || [];
@@ -183,6 +184,61 @@ const VoipKpis = () => {
           <div style={{fontSize:10,color:"var(--err)",fontFamily:"var(--mono)"}}>● 1 unreg · 1 degraded</div>
         </div>
       </div>
+    </div>
+  );
+};
+
+// ── SBC fleet ──
+// Each row in window.VOIP_SBCS represents one remote 3CX SBC (Session Border
+// Controller) reporting back to this PBX. We render up/down + live CPU /
+// memory / disk / latency / call & phone counts.
+const SbcsCard = () => {
+  const sbcs = window.VOIP_SBCS;
+  const upCount = sbcs.filter(s => s.up).length;
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h3>Session Border Controllers</h3>
+        <SourceBadge src="3cx" />
+        <div className="h-spacer" />
+        <span className="h-meta">{sbcs.length === 0 ? "no SBCs registered" : `${upCount} / ${sbcs.length} up`}</span>
+      </div>
+      {sbcs.length === 0 ? (
+        <div style={{padding:"18px 14px",fontSize:12,color:"var(--muted)"}}>No SBCs configured on this PBX.</div>
+      ) : (
+        <div className="svc-list">
+          {sbcs.map(s => {
+            const cls = s.up ? "" : "err";
+            const lbl = s.up ? "UP" : (s.hasConn ? "DEGR" : "DOWN");
+            const sub = [
+              s.group,
+              s.localIp && `local ${s.localIp}`,
+              s.publicIp && `pub ${s.publicIp}`,
+              s.version,
+            ].filter(Boolean).join(" · ");
+            const stats = [
+              `${s.phones} phones`,
+              `${s.calls} calls`,
+              s.latency > 0 && `${s.latency}ms`,
+              s.cpu && `cpu ${s.cpu}`,
+              s.memory && `mem ${s.memory}`,
+              s.disk && `disk ${s.disk}`,
+            ].filter(Boolean).join(" · ");
+            return (
+              <div key={s.id || s.name} className="svc-row">
+                <span className={"svc-led " + cls}></span>
+                <div>
+                  <div className="svc-name">{s.name}</div>
+                  <div className="svc-sub">{sub || "—"}</div>
+                  {stats && <div className="svc-sub" style={{marginTop:2}}>{stats}</div>}
+                </div>
+                <div className="svc-load">{s.uptime || ""}</div>
+                <span className={"svc-pill " + cls}>{lbl}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };
@@ -557,6 +613,10 @@ const VoipApp = () => {
 
           <div style={{ marginBottom: 14 }}>
             <TrunksCard />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <SbcsCard />
           </div>
 
           <div style={{ marginBottom: 14 }}>

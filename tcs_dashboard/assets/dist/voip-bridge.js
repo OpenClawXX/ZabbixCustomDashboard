@@ -14,7 +14,7 @@
 
 (function () {
   // Payload field → window global.
-  const KEYS = [["pbx", "VOIP_PBX"], ["services", "VOIP_SERVICES"], ["trunks", "VOIP_TRUNKS"], ["calls", "VOIP_CALLS"], ["top", "VOIP_TOP"], ["queues", "VOIP_QUEUES"], ["quality", "VOIP_QUALITY"], ["sites", "VOIP_SITES"], ["problems", "VOIP_PROBLEMS"]];
+  const KEYS = [["pbx", "VOIP_PBX"], ["services", "VOIP_SERVICES"], ["trunks", "VOIP_TRUNKS"], ["sbcs", "VOIP_SBCS"], ["calls", "VOIP_CALLS"], ["top", "VOIP_TOP"], ["queues", "VOIP_QUEUES"], ["quality", "VOIP_QUALITY"], ["sites", "VOIP_SITES"], ["problems", "VOIP_PROBLEMS"]];
   function apply(payload, opts) {
     if (!payload || typeof payload !== "object") return;
     const only = opts && opts.onlyKeys ? new Set(opts.onlyKeys) : null;

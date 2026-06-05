@@ -44,6 +44,7 @@ window.VOIP_PBX = window.VOIP_PBX || {
 };
 window.VOIP_SERVICES = window.VOIP_SERVICES || [];
 window.VOIP_TRUNKS = window.VOIP_TRUNKS || [];
+window.VOIP_SBCS = window.VOIP_SBCS || [];
 window.VOIP_CALLS = window.VOIP_CALLS || [];
 window.VOIP_TOP = window.VOIP_TOP || [];
 window.VOIP_QUEUES = window.VOIP_QUEUES || [];
@@ -366,6 +367,58 @@ const VoipKpis = () => {
       fontFamily: "var(--mono)"
     }
   }, "\u25CF 1 unreg \xB7 1 degraded"))));
+};
+
+// ── SBC fleet ──
+// Each row in window.VOIP_SBCS represents one remote 3CX SBC (Session Border
+// Controller) reporting back to this PBX. We render up/down + live CPU /
+// memory / disk / latency / call & phone counts.
+const SbcsCard = () => {
+  const sbcs = window.VOIP_SBCS;
+  const upCount = sbcs.filter(s => s.up).length;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "Session Border Controllers"), /*#__PURE__*/React.createElement(SourceBadge, {
+    src: "3cx"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "h-spacer"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "h-meta"
+  }, sbcs.length === 0 ? "no SBCs registered" : `${upCount} / ${sbcs.length} up`)), sbcs.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "18px 14px",
+      fontSize: 12,
+      color: "var(--muted)"
+    }
+  }, "No SBCs configured on this PBX.") : /*#__PURE__*/React.createElement("div", {
+    className: "svc-list"
+  }, sbcs.map(s => {
+    const cls = s.up ? "" : "err";
+    const lbl = s.up ? "UP" : s.hasConn ? "DEGR" : "DOWN";
+    const sub = [s.group, s.localIp && `local ${s.localIp}`, s.publicIp && `pub ${s.publicIp}`, s.version].filter(Boolean).join(" · ");
+    const stats = [`${s.phones} phones`, `${s.calls} calls`, s.latency > 0 && `${s.latency}ms`, s.cpu && `cpu ${s.cpu}`, s.memory && `mem ${s.memory}`, s.disk && `disk ${s.disk}`].filter(Boolean).join(" · ");
+    return /*#__PURE__*/React.createElement("div", {
+      key: s.id || s.name,
+      className: "svc-row"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "svc-led " + cls
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      className: "svc-name"
+    }, s.name), /*#__PURE__*/React.createElement("div", {
+      className: "svc-sub"
+    }, sub || "—"), stats && /*#__PURE__*/React.createElement("div", {
+      className: "svc-sub",
+      style: {
+        marginTop: 2
+      }
+    }, stats)), /*#__PURE__*/React.createElement("div", {
+      className: "svc-load"
+    }, s.uptime || ""), /*#__PURE__*/React.createElement("span", {
+      className: "svc-pill " + cls
+    }, lbl));
+  })));
 };
 
 // ── Trunks table ──
@@ -1043,6 +1096,10 @@ const VoipApp = () => {
       marginBottom: 14
     }
   }, /*#__PURE__*/React.createElement(TrunksCard, null)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(SbcsCard, null)), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }

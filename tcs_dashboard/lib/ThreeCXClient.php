@@ -92,6 +92,18 @@ class ThreeCXClient {
     }
 
     /**
+     * GET /xapi/v1/Sbcs.
+     *
+     * Each PbxSbc row carries an inline Connection object with the live
+     * KPIs the dashboard cares about (Up, Calls, RegisteredPhones, Latency,
+     * Cpu, Memory, Disk, ElapsedTime, UdpActive).
+     */
+    public function sbcs(): array {
+        $r = $this->get('/xapi/v1/Sbcs');
+        return $r['value'] ?? [];
+    }
+
+    /**
      * GET /xapi/v1/Users with paging. 3CX v20 caps $top at 100, so we walk
      * the collection with $skip until a page returns fewer than $page rows.
      * Caller passes a soft upper bound — defaults to 5000, which is well

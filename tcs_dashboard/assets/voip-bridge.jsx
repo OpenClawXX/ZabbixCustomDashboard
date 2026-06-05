@@ -18,6 +18,7 @@
         ["pbx",      "VOIP_PBX"],
         ["services", "VOIP_SERVICES"],
         ["trunks",   "VOIP_TRUNKS"],
+        ["sbcs",     "VOIP_SBCS"],
         ["calls",    "VOIP_CALLS"],
         ["top",      "VOIP_TOP"],
         ["queues",   "VOIP_QUEUES"],

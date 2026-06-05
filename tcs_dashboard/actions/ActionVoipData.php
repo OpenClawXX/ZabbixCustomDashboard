@@ -77,6 +77,7 @@ class ActionVoipData extends ActionDataBase {
             'pbx'      => null,
             'services' => null,
             'trunks'   => null,
+            'sbcs'     => null,
             'calls'    => null,
             'top'      => null,
             'queues'   => null,
@@ -156,6 +157,12 @@ class ActionVoipData extends ActionDataBase {
                 $rows = $client->trunks();
                 if ($debug) $rawSamples['Trunks'] = array_slice($rows, 0, 2);
                 $payload['trunks'] = self::mapTrunks($rows);
+            });
+            // 2b'. SBCs — remote session border controllers w/ live link metrics.
+            $runXapi('Sbcs', function () use ($client, &$payload, $debug, &$rawSamples) {
+                $rows = $client->sbcs();
+                if ($debug) $rawSamples['Sbcs'] = array_slice($rows, 0, 2);
+                $payload['sbcs'] = self::mapSbcs($rows);
             });
             // 2c. Queues + per-queue performance
             $runXapi('Queues', function () use ($client, &$payload, $debug, &$rawSamples) {
@@ -411,6 +418,53 @@ class ActionVoipData extends ActionDataBase {
                 'did'      => $did,
             ];
         }
+        return $out;
+    }
+
+    /**
+     * /xapi/v1/Sbcs rows → VOIP_SBCS shape.
+     *
+     * PbxSbc:
+     *   { Name, DisplayName, Group, Version, LocalIPv4, PublicIP,
+     *     HasConnection, Connection: { Up, Calls, RegisteredPhones,
+     *     Latency, Cpu, Memory, Disk, ElapsedTime, UdpActive } }
+     *
+     * Cpu / Memory / Disk come back as strings — usually a percentage
+     * ("17%") or "n/a" when the SBC isn't reporting. We pass them through
+     * verbatim and let the JSX render them as-is.
+     */
+    private static function mapSbcs(array $rows): array {
+        $out = [];
+        foreach ($rows as $s) {
+            if (!is_array($s)) continue;
+            $conn = is_array($s['Connection'] ?? null) ? $s['Connection'] : [];
+            $hasConn = (bool) ($s['HasConnection'] ?? false);
+            $up      = (bool) ($conn['Up'] ?? false);
+
+            $out[] = [
+                'name'       => (string) ($s['DisplayName'] ?? $s['Name'] ?? 'SBC'),
+                'id'         => (string) ($s['Name'] ?? ''),
+                'group'      => (string) ($s['Group']     ?? ''),
+                'version'    => (string) ($s['Version']   ?? ''),
+                'localIp'    => (string) ($s['LocalIPv4'] ?? ''),
+                'publicIp'   => (string) ($s['PublicIP']  ?? ''),
+                'up'         => $up && $hasConn,
+                'hasConn'    => $hasConn,
+                'calls'      => (int)    ($conn['Calls']             ?? 0),
+                'phones'     => (int)    ($conn['RegisteredPhones']  ?? 0),
+                'latency'    => (int)    ($conn['Latency']           ?? 0),
+                'cpu'        => (string) ($conn['Cpu']               ?? ''),
+                'memory'     => (string) ($conn['Memory']            ?? ''),
+                'disk'       => (string) ($conn['Disk']              ?? ''),
+                'uptime'     => (string) ($conn['ElapsedTime']       ?? ''),
+                'udpActive'  => (bool)   ($conn['UdpActive']         ?? false),
+            ];
+        }
+        // Down SBCs first so the operator sees outages without scrolling.
+        usort($out, function ($a, $b) {
+            if ($a['up'] !== $b['up']) return $a['up'] ? 1 : -1;
+            return strcmp($a['name'], $b['name']);
+        });
         return $out;
     }
 
