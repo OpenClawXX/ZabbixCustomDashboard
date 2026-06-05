@@ -189,6 +189,13 @@ class ActionVoipData extends ActionDataBase {
 
         $payload['sources']['zbx'] = $host ? 'live' : 'empty';
         $payload['loading']        = false;
+        if ($host) {
+            $payload['zbx_host'] = [
+                'hostid' => (string) $host['hostid'],
+                'host'   => (string) ($host['host'] ?? ''),
+                'name'   => (string) ($host['name'] ?? ''),
+            ];
+        }
 
         if (!$host && !$client) {
             $payload['warning'] = $payload['warning']
@@ -462,7 +469,62 @@ class ActionVoipData extends ActionDataBase {
 
     // ── Host discovery ─────────────────────────────────────────────────────
 
+    /**
+     * Resolve which Zabbix host backs the VoIP dashboard.
+     *
+     * Resolution order:
+     *   1. {$TCS.VOIP.HOST} global macro — authoritative when set. Matches by
+     *      technical name ("host"), visible name, or hostid. No template
+     *      requirement, so operators can point the page at any monitored
+     *      host (a custom 3CX template, the OS host the PBX runs on, etc.)
+     *      and still get history + problems out of Zabbix.
+     *   2. First host using the community "3CX Phone System by HTTP" template,
+     *      ordered by name. Convenient default when the template is in use.
+     *
+     * Returns null only when both paths come up empty. The page then runs
+     * XAPI-only (no Zabbix history / problems, but the rest still works).
+     */
     private static function findVoipHost(): ?array {
+        $select = [
+            'output'           => ['hostid', 'host', 'name', 'status'],
+            'selectInterfaces' => ['interfaceid', 'ip', 'main', 'type'],
+            'selectInventory'  => ['model', 'os_full', 'location'],
+        ];
+
+        // 1. Operator-pinned host wins, regardless of template.
+        $override = self::globalMacro(self::HOST_MACRO);
+        if ($override !== '') {
+            // Try hostid first (purely numeric value), then host / visible name.
+            if (ctype_digit($override)) {
+                $rows = API::Host()->get($select + ['hostids' => [$override]]) ?: [];
+                if ($rows) return $rows[0];
+            }
+            $rows = API::Host()->get($select + [
+                'filter'      => ['host' => [$override], 'name' => [$override]],
+                'searchByAny' => true,
+            ]) ?: [];
+            if ($rows) {
+                // Prefer an exact name match if multiple came back.
+                foreach ($rows as $h) {
+                    if (strcasecmp((string) $h['host'], $override) === 0 ||
+                        strcasecmp((string) $h['name'], $override) === 0) {
+                        return $h;
+                    }
+                }
+                return $rows[0];
+            }
+            // Last resort: substring search.
+            $rows = API::Host()->get($select + [
+                'search'      => ['host' => $override, 'name' => $override],
+                'searchByAny' => true,
+                'limit'       => 1,
+            ]) ?: [];
+            if ($rows) return $rows[0];
+
+            error_log('[tcs_dashboard] voip: {$TCS.VOIP.HOST}="' . $override . '" did not match any Zabbix host');
+        }
+
+        // 2. Fall back to template lookup.
         $templates = API::Template()->get([
             'output'      => ['templateid', 'host', 'name'],
             'search'      => ['name' => self::TEMPLATE_NAME],
@@ -470,23 +532,11 @@ class ActionVoipData extends ActionDataBase {
         ]) ?: [];
         if (!$templates) return null;
 
-        $hosts = API::Host()->get([
-            'output'           => ['hostid', 'host', 'name', 'status'],
-            'selectInterfaces' => ['interfaceid', 'ip', 'main', 'type'],
-            'selectInventory'  => ['model', 'os_full', 'location'],
-            'templateids'      => array_column($templates, 'templateid'),
+        $hosts = API::Host()->get($select + [
+            'templateids' => array_column($templates, 'templateid'),
         ]) ?: [];
         if (!$hosts) return null;
 
-        $override = self::globalMacro(self::HOST_MACRO);
-        if ($override !== '') {
-            foreach ($hosts as $h) {
-                if (strcasecmp((string) $h['name'], $override) === 0 ||
-                    strcasecmp((string) $h['host'], $override) === 0) {
-                    return $h;
-                }
-            }
-        }
         usort($hosts, fn($a, $b) => strcmp((string) $a['name'], (string) $b['name']));
         return $hosts[0];
     }

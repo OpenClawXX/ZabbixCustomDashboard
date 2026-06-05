@@ -165,7 +165,7 @@ Created in **Administration → General → Macros** or on the 3CX host:
 
 | Macro | Example | Notes |
 |---|---|---|
-| `{$TCS.VOIP.HOST}` | `pbx.tcs.local` | optional override; otherwise first host with the template |
+| `{$TCS.VOIP.HOST}` | `pbx.tcs.local` | authoritative when set — matches host technical name, visible name, or numeric hostid. Template not required. If unset, falls back to first host using the "3CX Phone System by HTTP" template. |
 | `{$TCS.3CX.URL}` | `https://pbx.tcs.local:5001` | XAPI base URL |
 | `{$TCS.3CX.CLIENT_ID}` | `tcs-dashboard` | OAuth2 client id from 3CX → Integrations |
 | `{$TCS.3CX.CLIENT_SECRET}` | (secret) | mark **Secret text** in Zabbix |
