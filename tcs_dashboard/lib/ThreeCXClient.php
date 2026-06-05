@@ -133,10 +133,15 @@ class ThreeCXClient {
      * Top extensions today via the OData function import:
      *   GET /xapi/v1/ReportExtensionStatistics/Pbx.GetExtensionStatisticsData(
      *       periodFrom='2024-…',periodTo='2024-…',extensionFilter=null,callArea=0
-     *   )?$top=N&$orderby=…
+     *   )?$top=N
      *
      * Returns PbxExtensionStatistics rows {DisplayName, Dn, Inbound*, Outbound*}.
      * Sorting/aggregation to "top by total calls" happens in the mapper.
+     *
+     * Not every v20 build exposes this endpoint — depending on the license
+     * tier and the API client's role, it can 404 (path missing) or 403
+     * (permission denied). Both are treated as "no data" so the top-talkers
+     * card just renders empty instead of blowing up the rollup status.
      */
     public function topExtensions(int $top = 10): array {
         $now  = gmdate('Y-m-d\TH:i:s\Z');
@@ -145,8 +150,21 @@ class ThreeCXClient {
             "/xapi/v1/ReportExtensionStatistics/Pbx.GetExtensionStatisticsData(periodFrom='%s',periodTo='%s',extensionFilter=null,callArea=0)",
             $from, $now
         );
-        $r = $this->get($path, ['$top' => (string) max(1, $top)]);
-        return $r['value'] ?? [];
+        try {
+            $r = $this->get($path, ['$top' => (string) max(1, $top)]);
+            return $r['value'] ?? [];
+        } catch (\RuntimeException $e) {
+            if (self::isNotFound($e) || self::isForbidden($e)) return [];
+            throw $e;
+        }
+    }
+
+    private static function isNotFound(\RuntimeException $e): bool {
+        return str_contains($e->getMessage(), 'HTTP 404') || str_contains($e->getMessage(), 'HTTP 405');
+    }
+
+    private static function isForbidden(\RuntimeException $e): bool {
+        return str_contains($e->getMessage(), 'HTTP 403');
     }
 
     /**
