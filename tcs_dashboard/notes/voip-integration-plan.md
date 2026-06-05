@@ -48,34 +48,48 @@ per-site extension grid, call-quality history) needs the 3CX XAPI.
 
 ## 2. 3CX XAPI surface we need
 
-3CX v18+ exposes the **Configuration / Management API** (a.k.a. XAPI)
-at `https://<pbx-fqdn>:5001/xapi/v1/…`. Auth is OAuth2 client
-credentials against `/connect/token` — the dashboard creates a
-dedicated client ("Integrations" tab in the 3CX admin) and stores the
-client id/secret in Zabbix global macros.
+3CX v20 exposes the **Configuration / Management API** (a.k.a. XAPI)
+at `https://<pbx-fqdn>/xapi/v1/…`. Auth is OAuth2 client credentials
+against `/connect/token` — the dashboard creates a dedicated client
+("Integrations" tab in the 3CX admin) and stores the client id/secret
+in Zabbix global macros. Endpoint paths below are confirmed against
+the v20 OpenAPI spec shipped in
+[3cx/xapi-tutorial](https://github.com/3cx/xapi-tutorial).
 
 Endpoints the bridge calls (all GET, all OData-shaped):
 
 | Endpoint | What we read | Cadence |
 |---|---|---|
-| `POST /connect/token` (form `grant_type=client_credentials`) | bearer token, 1 h TTL — cache in APCu | on demand + refresh on 401 |
-| `GET /xapi/v1/SystemStatus` | version, uptime, FQDN, max-SC, active-calls, ext-counts, services array | every poll |
-| `GET /xapi/v1/Trunks` | name, provider, host, isRegistered, errorMessage | every poll |
-| `GET /xapi/v1/ActiveCalls` | live call list: from/to/codec/trunkId/duration/quality | 5 s (separate sub-fetch, not on 30 s rollup) |
-| `GET /xapi/v1/Users?$select=Number,FirstName,LastName,CurrentProfileName,Forwarding,Registrar&$top=500` | per-extension registration grid | every poll |
-| `GET /xapi/v1/Queues` | call-queue list (Id, Name, Number) | every poll |
-| `GET /xapi/v1/Queues({Id})/Performance?date=today` | agents, SLA, abandoned, answered | every poll |
-| `GET /xapi/v1/Defs/ExtensionStatistics?type=ByExtension&period=today&top=10` | top-talker table | every poll |
-| `GET /xapi/v1/Defs/CallQualityStatistics?period=last24h&bucket=30m` | MOS / jitter / loss / RTT history | every 5 min |
+| `POST /connect/token` (form `grant_type=client_credentials`) | bearer token — cache in APCu | on demand + refresh on 401 |
+| `GET /xapi/v1/SystemStatus` | FQDN, Version, MaxSimCalls, CallsActive, ExtensionsRegistered/Total, TrunksRegistered/Total, ProductCode, CurrentLocalIp | every poll |
+| `GET /xapi/v1/Trunks` | rows shaped `{Number, AuthID, IsOnline, SimultaneousCalls, DidNumbers[], Gateway:{Name,Host,Port,Type,TemplateFilename}, TrunkRegTimes:[...]}` | every poll |
+| `GET /xapi/v1/ActiveCalls` | minimal `{Id, Caller, Callee, Status, EstablishedAt, ServerNow, LastChangeStatus}` — no codec/MOS/trunk per row in v20 | 5 s (separate sub-fetch) |
+| `GET /xapi/v1/Users` (paged 100 rows at a time, `$top` capped at 100) | `{Number, DisplayName, FirstName, LastName, IsRegistered (bool), Enabled, CurrentProfileName, Groups[]}` | every poll |
+| `GET /xapi/v1/Groups` | friendly names for the group ids in `User.Groups[]` | every poll |
+| `GET /xapi/v1/Queues` | rows shaped `{Id, Number, Name, SLATime, Agents[], MaxCallersInQueue}` | every poll |
+| `GET /xapi/v1/ReportExtensionStatistics/Pbx.GetExtensionStatisticsData(periodFrom='…',periodTo='…',extensionFilter=null,callArea=0)?$top=10` | top-talker table (PbxExtensionStatistics rows) | every poll |
 
-Notes:
-- 3CX v20 deprecated the legacy `/api/SystemStatus` endpoint —
-  template-side, confirm we're on the XAPI build (`HTTP-3CX` agent
-  module v3+ in zbx-3cx) so item names align.
-- For the live active-calls list, **don't** poll on the same 30 s
-  cadence as the rollup — split into a `tcs.voip.calls.data` action
-  the bridge can hit every 5 s while leaving rollup at 30 s. (Same
-  split we used for the camera snapshot endpoint.)
+Not exposed by the v20 XAPI as a simple read — the dashboard ships
+zeros for these slots until follow-up wiring lands:
+
+- **Per-trunk channel utilization** (`chIn`/`chOut`/`asr`/`mos`):
+  not on `PbxTrunk`. Would need to aggregate `/ActiveCalls` by trunk
+  ID + pull `ReportCallLogData` for ASR/MOS averages.
+- **Per-queue live SLA / waiting / abandoned**: not on `PbxQueue`.
+  Would need `ReportDetailedQueueStatistics/Pbx.GetDetailedQueueStatisticsData(queueDnStr,startDt,endDt,waitInterval)`
+  per queue — too expensive for a 30s rollup; needs its own slower
+  pipeline.
+- **Per-call MOS / codec** in the active-calls list: 3CX v20 only
+  surfaces these on closed CDR rows via
+  `ReportCallLogData/Pbx.GetCallQualityReport(cdrId=…)` after the
+  call ends.
+- **24h call-quality history**: no pre-bucketed endpoint. Would have
+  to walk the day's CDR and aggregate — defer to a slower pipeline.
+- **Services panel**: `SystemStatus` doesn't carry a services array
+  in v20 (services are managed by the host OS, not the PBX).
+
+Live active-calls is split into its own `tcs.voip.calls.data` action
+the bridge hits every 5 s; the heavy rollup stays at 30 s.
 
 ---
 

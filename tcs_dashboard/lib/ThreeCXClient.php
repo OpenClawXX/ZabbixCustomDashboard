@@ -129,63 +129,38 @@ class ThreeCXClient {
         return [];
     }
 
-    /** GET /xapi/v1/Queues({Id})/Performance?date=today. */
-    public function queuePerformance(string $queueId): array {
-        return $this->get(sprintf('/xapi/v1/Queues(%s)/Performance', rawurlencode($queueId)), [
-            'date' => 'today',
-        ]);
-    }
-
     /**
-     * Top extensions by call volume today. 3CX v20 dropped the `/Defs/`
-     * prefix and exposes report data as OData function imports on the
-     * service root. Path / param names still drift between minor builds,
-     * so we walk a small candidate list and return on the first 2xx.
+     * Top extensions today via the OData function import:
+     *   GET /xapi/v1/ReportExtensionStatistics/Pbx.GetExtensionStatisticsData(
+     *       periodFrom='2024-…',periodTo='2024-…',extensionFilter=null,callArea=0
+     *   )?$top=N&$orderby=…
+     *
+     * Returns PbxExtensionStatistics rows {DisplayName, Dn, Inbound*, Outbound*}.
+     * Sorting/aggregation to "top by total calls" happens in the mapper.
      */
     public function topExtensions(int $top = 10): array {
-        $candidates = [
-            // v20+: function import
-            ['/xapi/v1/ReportExtensionStatisticsByExtensionsListData', ['top' => (string) $top]],
-            // v20 alt: direct collection if exposed
-            ['/xapi/v1/ReportExtensionStatistics',                     ['top' => (string) $top]],
-            // v18 legacy
-            ['/xapi/v1/Defs/ExtensionStatistics', ['type' => 'ByExtension', 'period' => 'today', 'top' => (string) $top]],
-        ];
-        foreach ($candidates as [$path, $q]) {
-            try {
-                $r = $this->get($path, $q);
-                return $r['value'] ?? (is_array($r) ? $r : []);
-            } catch (\RuntimeException $e) {
-                if (self::isNotFound($e)) continue;
-                throw $e;
-            }
-        }
-        return [];
+        $now  = gmdate('Y-m-d\TH:i:s\Z');
+        $from = gmdate('Y-m-d\T00:00:00\Z');
+        $path = sprintf(
+            "/xapi/v1/ReportExtensionStatistics/Pbx.GetExtensionStatisticsData(periodFrom='%s',periodTo='%s',extensionFilter=null,callArea=0)",
+            $from, $now
+        );
+        $r = $this->get($path, ['$top' => (string) max(1, $top)]);
+        return $r['value'] ?? [];
     }
 
     /**
-     * Call-quality 24h history. Same 3CX-build drift as topExtensions()
-     * — walk a candidate list and accept the first 2xx.
+     * Call-quality history. The v20 XAPI doesn't expose a pre-bucketed
+     * quality timeline — quality lives on individual CDR rows
+     * (ReportCallLogData / Pbx.GetCallQualityReport per cdrId). Building
+     * a 48-bucket 24h chart would require pulling the full day's CDR
+     * and aggregating, which is too expensive for a 30s rollup.
+     *
+     * Until we add a separate caching pipeline for it, return an empty
+     * result and let the page render zeros.
      */
     public function callQuality(string $bucket = '30m'): array {
-        $candidates = [
-            ['/xapi/v1/ReportCallQualityData',          ['bucket' => $bucket]],
-            ['/xapi/v1/ReportCallQuality',              ['bucket' => $bucket]],
-            ['/xapi/v1/Defs/CallQualityStatistics',     ['period' => 'last24h', 'bucket' => $bucket]],
-        ];
-        foreach ($candidates as [$path, $q]) {
-            try {
-                return $this->get($path, $q);
-            } catch (\RuntimeException $e) {
-                if (self::isNotFound($e)) continue;
-                throw $e;
-            }
-        }
         return [];
-    }
-
-    private static function isNotFound(\RuntimeException $e): bool {
-        return str_contains($e->getMessage(), 'HTTP 404') || str_contains($e->getMessage(), 'HTTP 405');
     }
 
     /* ------------------------------------------------------------------ */
@@ -194,64 +169,73 @@ class ThreeCXClient {
     /* ActionVoipData wiring can be reviewed in this PR.                  */
     /* ------------------------------------------------------------------ */
 
+    /**
+     * Build the VOIP_SITES grid from /Users + /Groups.
+     *
+     * v20 PbxUser carries the registration state directly as IsRegistered
+     * (bool) — no need to fish through a RegistrarContact field. Site
+     * grouping uses the user's first non-DEFAULT entry in Groups[]
+     * (PbxUserGroup carries Name/Number/GroupId).
+     */
     public function extensionsBySite(): array {
-        $users = $this->users(500);
+        $users = $this->users(5000);
 
-        // Group definitions: try /Groups for friendly names. Failure here
-        // just means we fall back to "DIST" as the catch-all site id.
+        // /Groups: friendly names for the group ids that appear in PbxUser.Groups[].
+        // Best-effort — if the API client lacks read permission, fall through
+        // and use the raw group id as the site name.
         $groupsById = [];
         try {
-            $g = $this->get('/xapi/v1/Groups', ['$select' => 'Id,Name,Number']);
+            $g = $this->get('/xapi/v1/Groups');
             foreach (($g['value'] ?? []) as $row) {
                 if (!is_array($row)) continue;
                 $id = (string) ($row['Id'] ?? $row['Number'] ?? '');
-                if ($id !== '') $groupsById[$id] = (string) ($row['Name'] ?? $id);
+                if ($id !== '') $groupsById[$id] = (string) ($row['Name'] ?? $row['Number'] ?? $id);
             }
         } catch (\Throwable $_) { /* best-effort */ }
 
         $bySite = [];
         foreach ($users as $u) {
             if (!is_array($u)) continue;
-            $ext   = (string) ($u['Number'] ?? '');
+            $ext = (string) ($u['Number'] ?? '');
             if ($ext === '') continue;
-            $first = (string) ($u['FirstName'] ?? '');
-            $last  = (string) ($u['LastName']  ?? '');
-            $name  = trim($first . ' ' . $last) ?: $ext;
 
-            // Registration state. RegistrarContact present → registered.
-            // CurrentProfileName "Do Not Disturb"/"OutOfOffice" → dnd.
-            $reg = $u['Registrar'] ?? $u['RegistrarContact'] ?? null;
-            $profile = strtolower((string) ($u['CurrentProfileName'] ?? ''));
-            $state = $reg ? 'reg' : 'unreg';
-            if ($state === 'reg' && (str_contains($profile, 'do not disturb') || str_contains($profile, 'dnd'))) {
-                $state = 'dnd';
+            $display = trim((string) ($u['DisplayName'] ?? ''));
+            if ($display === '') {
+                $display = trim(((string) ($u['FirstName'] ?? '')) . ' ' . ((string) ($u['LastName'] ?? '')));
             }
+            if ($display === '') $display = $ext;
 
-            // Site = first group the user belongs to (skipping the implicit
-            // "DEFAULT" or empty groups). If groups are absent the user
-            // lands in DIST.
-            $siteId = 'DIST';
-            $siteName = 'District Office';
-            $userGroups = $u['Groups'] ?? [];
-            if (is_array($userGroups)) {
-                foreach ($userGroups as $g) {
-                    $gid = (string) (is_array($g) ? ($g['Id'] ?? $g['GroupId'] ?? '') : $g);
-                    if ($gid === '' || strtoupper($gid) === 'DEFAULT') continue;
-                    $siteId   = $gid;
-                    $siteName = $groupsById[$gid] ?? $gid;
-                    break;
-                }
+            // Registration / presence
+            $enabled    = (bool) ($u['Enabled']       ?? true);
+            $registered = (bool) ($u['IsRegistered']  ?? false);
+            $profile    = strtolower((string) ($u['CurrentProfileName'] ?? ''));
+            if (!$enabled)           $state = 'unreg';
+            elseif (!$registered)    $state = 'unreg';
+            elseif (str_contains($profile, 'do not disturb') || str_contains($profile, 'dnd')) $state = 'dnd';
+            else                     $state = 'reg';
+
+            // Site = first non-DEFAULT group. PbxUserGroup has GroupId,
+            // Name, Number — prefer Name.
+            $siteId   = 'DIST';
+            $siteName = 'District';
+            foreach (($u['Groups'] ?? []) as $g) {
+                if (!is_array($g)) continue;
+                $gid    = (string) ($g['GroupId'] ?? $g['Id'] ?? '');
+                $gname  = (string) ($g['Name']    ?? '');
+                if (strtoupper($gname) === 'DEFAULT' || $gname === '') continue;
+                $siteId   = $gid !== '' ? $gid : $gname;
+                $siteName = $groupsById[$gid] ?? $gname;
+                break;
             }
 
             $bySite[$siteId] ??= ['id' => $siteId, 'name' => $siteName, 'expanded' => true, 'ext' => []];
             $bySite[$siteId]['ext'][] = [
                 'ext'   => $ext,
-                'name'  => $name,
+                'name'  => $display,
                 'site'  => $siteId,
                 'state' => $state,
             ];
         }
-        // Stable order: by site name, extensions by number within each.
         $out = array_values($bySite);
         usort($out, fn($a, $b) => strcmp($a['name'], $b['name']));
         foreach ($out as &$site) {
@@ -260,39 +244,35 @@ class ThreeCXClient {
         return $out;
     }
 
+    /**
+     * Queue summary rows for the VOIP_QUEUES card.
+     *
+     * v20 doesn't expose live performance counters on the PbxQueue entity
+     * itself — agent counts come from the embedded Agents[] array, and SLA
+     * threshold lives in SLATime (seconds). "Currently waiting" / "answered
+     * today" / "abandoned today" / "SLA%" need a separate
+     * ReportDetailedQueueStatistics call per queue, which is too expensive
+     * for the 30s rollup and is gated behind admin-level permissions on
+     * many builds. For now we ship the static shape (agents, slaSec) and
+     * leave the dynamic metrics zeroed; future work can wire the detailed
+     * report on a slower cadence.
+     */
     public function queuesWithPerformance(): array {
         $queues = $this->queues();
         $out = [];
         foreach ($queues as $q) {
             if (!is_array($q)) continue;
-            $id   = (string) ($q['Id']     ?? '');
-            $name = (string) ($q['Name']   ?? 'Queue');
-            $num  = (string) ($q['Number'] ?? '');
-
-            $perf = [];
-            if ($id !== '') {
-                try { $perf = $this->queuePerformance($id); }
-                catch (\Throwable $_) { /* leave perf empty for this queue */ }
-            }
-
-            $agents   = (int)   ($perf['AgentsTotal']         ?? $perf['TotalAgents']    ?? 0);
-            $agentsOn = (int)   ($perf['AgentsLoggedIn']      ?? $perf['LoggedInAgents'] ?? $agents);
-            $waiting  = (int)   ($perf['CallsWaiting']        ?? $perf['Waiting']        ?? 0);
-            $ans      = (int)   ($perf['AnsweredCalls']       ?? $perf['Answered']       ?? 0);
-            $abandon  = (int)   ($perf['AbandonedCalls']      ?? $perf['Abandoned']      ?? 0);
-            $sla      = (float) ($perf['ServiceLevel']        ?? $perf['SlaPercent']     ?? 0);
-            $slaSec   = (int)   ($perf['ServiceLevelSeconds'] ?? $perf['SlaSeconds']     ?? 30);
-
+            $agents = is_array($q['Agents'] ?? null) ? $q['Agents'] : [];
             $out[] = [
-                'name'     => $name,
-                'ext'      => $num,
-                'agents'   => $agents,
-                'agentsOn' => $agentsOn,
-                'waiting'  => $waiting,
-                'sla'      => (int) round($sla),
-                'abandon'  => $abandon,
-                'ans'      => $ans,
-                'slaSec'   => $slaSec,
+                'name'     => (string) ($q['Name']   ?? 'Queue'),
+                'ext'      => (string) ($q['Number'] ?? ''),
+                'agents'   => count($agents),
+                'agentsOn' => count($agents),  // live "logged in" needs ReportDetailedQueueStatistics
+                'waiting'  => 0,
+                'sla'      => 0,
+                'abandon'  => 0,
+                'ans'      => 0,
+                'slaSec'   => (int) ($q['SLATime'] ?? 30),
             ];
         }
         return $out;

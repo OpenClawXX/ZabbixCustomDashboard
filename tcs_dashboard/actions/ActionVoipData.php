@@ -414,24 +414,39 @@ class ActionVoipData extends ActionDataBase {
         return $out;
     }
 
-    /** /xapi/v1/Defs/ExtensionStatistics rows → VOIP_TOP shape. */
+    /**
+     * /ReportExtensionStatistics/Pbx.GetExtensionStatisticsData rows → VOIP_TOP.
+     *
+     * Real PbxExtensionStatistics shape (v20):
+     *   { DisplayName, Dn, InboundAnsweredCount, InboundUnansweredCount,
+     *     OutboundAnsweredCount, OutboundUnansweredCount,
+     *     InboundAnsweredTalkingDur, OutboundAnsweredTalkingDur }
+     * Talk-durations are ISO 8601 "HH:MM:SS" strings.
+     *
+     * "Top by calls" = sum of all four count fields. We re-sort because
+     * 3CX's $top happens before our derived total.
+     */
     private static function mapTopExtensions(array $rows): array {
         $out = [];
         foreach ($rows as $r) {
             if (!is_array($r)) continue;
-            $calls = (int) self::pick($r, ['TotalCalls', 'Calls', 'CallCount'], 0);
-            // Talk-time can be ISO 8601 ("00:12:34") or seconds — accept either.
-            $mins  = self::durationToMinutes(self::pick($r, ['TalkingTime', 'TotalTalkTime', 'TalkTime'], 0));
+            $calls = (int) ($r['InboundAnsweredCount']   ?? 0)
+                   + (int) ($r['InboundUnansweredCount'] ?? 0)
+                   + (int) ($r['OutboundAnsweredCount']  ?? 0)
+                   + (int) ($r['OutboundUnansweredCount']?? 0);
+            $mins  = self::durationToMinutes($r['InboundAnsweredTalkingDur']  ?? 0)
+                   + self::durationToMinutes($r['OutboundAnsweredTalkingDur'] ?? 0);
 
             $out[] = [
-                'ext'   => (string) self::pick($r, ['Number', 'Extension', 'Dn'], ''),
-                'name'  => trim((string) self::pick($r, ['FirstName', 'DisplayName'], '') . ' ' . (string) self::pick($r, ['LastName'], '')) ?: '—',
-                'site'  => (string) self::pick($r, ['Group', 'Department'], 'DIST'),
+                'ext'   => (string) ($r['Dn'] ?? ''),
+                'name'  => (string) ($r['DisplayName'] ?? '—'),
+                'site'  => '',
                 'calls' => $calls,
                 'mins'  => $mins,
                 'role'  => '',
             ];
         }
+        usort($out, fn($a, $b) => $b['calls'] <=> $a['calls']);
         return $out;
     }
 
