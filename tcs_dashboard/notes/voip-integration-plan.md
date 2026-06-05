@@ -159,6 +159,37 @@ And register `voip-bridge.jsx` between `global-nav` and `voip-app`.
 
 ---
 
+## 3.6 3CX API client permissions
+
+Creating the OAuth2 client in **3CX Admin Console → Integrations → API**
+is only half the job. The client must be granted **role-based access**
+to the XAPI resources the dashboard reads — otherwise the
+`/connect/token` call succeeds (so the URL/secret are clearly right)
+but every collection endpoint returns **HTTP 403 Forbidden**.
+
+Provisioning checklist:
+
+1. *Admin Console → Integrations → API → Add*.
+2. **Client Name**: `tcs-dashboard` (or similar; matches `{$TCS.3CX.CLIENT_ID}`).
+3. **Department**: pick a department that has **visibility into all
+   extensions** the dashboard needs to render — typically the root
+   "DEFAULT" department, or one with the "Can see members of all groups"
+   flag set. A department restricted to a single group will 403 on
+   `/xapi/v1/Users` for everyone outside it.
+4. **Role**: assign **"System Owner"** (full read) or a custom role
+   that grants read on each of: `SystemStatus`, `Trunks`, `Users`,
+   `Groups`, `Queues`, `ActiveCalls`. Operator/Receptionist roles do
+   **not** grant XAPI access.
+5. Save, then copy the **Client ID** + **Client Secret** into the
+   Zabbix global macros (`{$TCS.3CX.CLIENT_ID}` / `{$TCS.3CX.CLIENT_SECRET}`).
+6. If 3CX is on a self-signed cert, set `{$TCS.3CX.VERIFY.SSL}=0`.
+
+If `tcs.voip.data` returns `sources.3cx="error"` with `HTTP 403` in
+`xapi_errors`, this checklist is the fix — it's a 3CX-side permission
+issue, not a dashboard bug.
+
+---
+
 ## 4. Required macros (global)
 
 Created in **Administration → General → Macros** or on the 3CX host:

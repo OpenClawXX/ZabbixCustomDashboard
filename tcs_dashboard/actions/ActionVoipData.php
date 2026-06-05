@@ -125,10 +125,10 @@ class ActionVoipData extends ActionDataBase {
         $xapiFail = 0;
         $errors   = [];   // first-failure-wins, per-endpoint, surfaced to UI
 
-        $runXapi = static function (string $label, callable $fn) use (&$xapiOk, &$xapiFail, &$errors) {
+        $runXapi = static function (string $label, callable $fn, bool $critical = true) use (&$xapiOk, &$xapiFail, &$errors) {
             try { $fn(); $xapiOk++; }
             catch (\Throwable $e) {
-                $xapiFail++;
+                if ($critical) $xapiFail++;
                 $msg = sprintf('%s: %s', $label, $e->getMessage());
                 error_log('[tcs_dashboard] voip ' . $msg);
                 $errors[$label] = $e->getMessage();
@@ -148,10 +148,10 @@ class ActionVoipData extends ActionDataBase {
             $runXapi('Queues',   function () use ($client, &$payload) { $payload['queues']  = $client->queuesWithPerformance(); });
             // 2d. Per-extension grid grouped by site
             $runXapi('Users',    function () use ($client, &$payload) { $payload['sites']   = $client->extensionsBySite(); });
-            // 2e. Top extensions
-            $runXapi('TopExt',   function () use ($client, &$payload) { $payload['top']     = self::mapTopExtensions($client->topExtensions(10)); });
-            // 2f. Call quality (24h, 30m buckets)
-            $runXapi('Quality',  function () use ($client, &$payload) { $payload['quality'] = self::mapCallQuality($client->callQuality('30m')); });
+            // 2e. Top extensions — non-critical (path varies wildly across 3CX builds; mock fallback covers absence).
+            $runXapi('TopExt',   function () use ($client, &$payload) { $payload['top']     = self::mapTopExtensions($client->topExtensions(10)); }, false);
+            // 2f. Call quality — also non-critical for the same reason.
+            $runXapi('Quality',  function () use ($client, &$payload) { $payload['quality'] = self::mapCallQuality($client->callQuality('30m')); }, false);
         }
 
         if ($client) {

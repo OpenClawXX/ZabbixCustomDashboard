@@ -113,22 +113,56 @@ class ThreeCXClient {
         ]);
     }
 
-    /** GET /xapi/v1/Defs/ExtensionStatistics?period=today&top=N. */
+    /**
+     * Top extensions by call volume today. 3CX v20 dropped the `/Defs/`
+     * prefix and exposes report data as OData function imports on the
+     * service root. Path / param names still drift between minor builds,
+     * so we walk a small candidate list and return on the first 2xx.
+     */
     public function topExtensions(int $top = 10): array {
-        $r = $this->get('/xapi/v1/Defs/ExtensionStatistics', [
-            'type'   => 'ByExtension',
-            'period' => 'today',
-            'top'    => (string) $top,
-        ]);
-        return $r['value'] ?? [];
+        $candidates = [
+            // v20+: function import
+            ['/xapi/v1/ReportExtensionStatisticsByExtensionsListData', ['top' => (string) $top]],
+            // v20 alt: direct collection if exposed
+            ['/xapi/v1/ReportExtensionStatistics',                     ['top' => (string) $top]],
+            // v18 legacy
+            ['/xapi/v1/Defs/ExtensionStatistics', ['type' => 'ByExtension', 'period' => 'today', 'top' => (string) $top]],
+        ];
+        foreach ($candidates as [$path, $q]) {
+            try {
+                $r = $this->get($path, $q);
+                return $r['value'] ?? (is_array($r) ? $r : []);
+            } catch (\RuntimeException $e) {
+                if (self::isNotFound($e)) continue;
+                throw $e;
+            }
+        }
+        return [];
     }
 
-    /** GET /xapi/v1/Defs/CallQualityStatistics?period=last24h&bucket=30m. */
+    /**
+     * Call-quality 24h history. Same 3CX-build drift as topExtensions()
+     * — walk a candidate list and accept the first 2xx.
+     */
     public function callQuality(string $bucket = '30m'): array {
-        return $this->get('/xapi/v1/Defs/CallQualityStatistics', [
-            'period' => 'last24h',
-            'bucket' => $bucket,
-        ]);
+        $candidates = [
+            ['/xapi/v1/ReportCallQualityData',          ['bucket' => $bucket]],
+            ['/xapi/v1/ReportCallQuality',              ['bucket' => $bucket]],
+            ['/xapi/v1/Defs/CallQualityStatistics',     ['period' => 'last24h', 'bucket' => $bucket]],
+        ];
+        foreach ($candidates as [$path, $q]) {
+            try {
+                return $this->get($path, $q);
+            } catch (\RuntimeException $e) {
+                if (self::isNotFound($e)) continue;
+                throw $e;
+            }
+        }
+        return [];
+    }
+
+    private static function isNotFound(\RuntimeException $e): bool {
+        return str_contains($e->getMessage(), 'HTTP 404') || str_contains($e->getMessage(), 'HTTP 405');
     }
 
     /* ------------------------------------------------------------------ */
