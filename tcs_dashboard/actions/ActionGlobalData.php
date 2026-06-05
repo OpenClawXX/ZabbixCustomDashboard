@@ -94,6 +94,17 @@ class ActionGlobalData extends ActionDataBase {
      */
     public function collect(string $range = '24h'): array {
         $window_secs = self::RANGES[$range] ?? self::RANGES['24h'];
+
+        // Short-lived snapshot cache. The global dashboard polls this
+        // controller every few seconds across many open tabs; replaying
+        // 6+ API.get calls each time burns measurable backend CPU. A
+        // 5-second TTL is short enough that operators don't perceive
+        // staleness but long enough to coalesce a thundering herd.
+        $cached = $this->loadCachedPayload($range);
+        if ($cached !== null) {
+            return $cached;
+        }
+
         $hosts = $this->safeGet(fn() => API::Host()->get([
             'output'                => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
             'selectInterfaces'      => ['available', 'main'],
@@ -186,7 +197,7 @@ class ActionGlobalData extends ActionDataBase {
         foreach ($recent_events as &$e) { $e['hosts'] = $trigger_hosts[$e['objectid']] ?? []; }
         unset($p, $e);
 
-        return [
+        $payload = [
             'totals'   => $this->buildTotals($hosts, $problems, $proxies),
             'sites'    => $this->buildSites($hosts, $problems),
             'domains'  => $this->buildDomains($hosts, $problems),
@@ -196,6 +207,29 @@ class ActionGlobalData extends ActionDataBase {
             'range'    => $range,
             'ts'       => time()
         ];
+        $this->storeCachedPayload($range, $payload);
+        return $payload;
+    }
+
+    /** Snapshot cache TTL in seconds — see collect(). */
+    private const CACHE_TTL_SECS = 5;
+
+    private function cachePath(string $range): string {
+        return sys_get_temp_dir().'/tcs_global_'.preg_replace('/[^a-z0-9]/i', '', $range).'.json';
+    }
+
+    private function loadCachedPayload(string $range): ?array {
+        $path = $this->cachePath($range);
+        if (!is_file($path)) return null;
+        if ((time() - (int) filemtime($path)) > self::CACHE_TTL_SECS) return null;
+        $raw = @file_get_contents($path);
+        if ($raw === false) return null;
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    private function storeCachedPayload(string $range, array $payload): void {
+        @file_put_contents($this->cachePath($range), json_encode($payload), LOCK_EX);
     }
 
     /** triggerid → [{hostid, host, name}, ...] using one trigger.get call. */
@@ -435,6 +469,20 @@ class ActionGlobalData extends ActionDataBase {
                 'spark'    => array_fill(0, 24, 0)
             ];
         }
+        // Single pass over $problems builds hostid → worst-severity. The
+        // previous implementation called hostWorstSev() per host, rescanning
+        // every problem each time — O(hosts × problems × trigger_hosts).
+        $worst_by_host = [];
+        foreach ($problems as $p) {
+            $sev = (int) $p['severity'];
+            foreach ($p['hosts'] ?? [] as $h) {
+                $hid = (string) $h['hostid'];
+                if (!isset($worst_by_host[$hid]) || $sev > $worst_by_host[$hid]) {
+                    $worst_by_host[$hid] = $sev;
+                }
+            }
+        }
+
         foreach ($hosts as $hid => $h) {
             $d = $host_domain[$hid] ?? null;
             if (!$d) continue;
@@ -444,7 +492,7 @@ class ActionGlobalData extends ActionDataBase {
             elseif  ($avail === 2) $by_domain[$d]['down']++;
             else                   $by_domain[$d]['unknown']++;
 
-            $sev = $this->hostWorstSev($hid, $problems);
+            $sev = $worst_by_host[(string) $hid] ?? -1;
             if      ($sev >= 4) $by_domain[$d]['err']++;
             elseif  ($sev >= 2) $by_domain[$d]['warn']++;
             else                $by_domain[$d]['ok']++;
@@ -637,8 +685,19 @@ class ActionGlobalData extends ActionDataBase {
      * @return array{online: ?int, total: ?int, offline: ?int, clients_total: ?int, rf_health: ?int}
      */
     private function collectWirelessFleetKpis(): array {
+        // Scope to the XIQ aggregator host(s) — the xiq.ap.* items only live
+        // there. Without this filter Zabbix scans every item in the system
+        // before applying the key prefix match.
+        $xiq_hosts = $this->safeGet(fn() => API::Host()->get([
+            'output'  => ['hostid'],
+            'filter'  => ['host' => self::HEATMAP_EXCLUDE_HOSTS],
+        ]));
+        if (!$xiq_hosts) {
+            return ['online' => null, 'total' => null, 'offline' => null, 'clients_total' => null, 'rf_health' => null];
+        }
         $items = $this->safeGet(fn() => API::Item()->get([
             'output'      => ['key_', 'lastvalue', 'lastclock'],
+            'hostids'     => array_column($xiq_hosts, 'hostid'),
             'search'      => ['key_' => 'xiq.ap.'],
             'startSearch' => true,
             'monitored'   => true,
@@ -690,13 +749,24 @@ class ActionGlobalData extends ActionDataBase {
      * @return array{online: ?int, total: ?int, faulted: ?int, disabled: ?int}
      */
     private function collectSurveillanceFleetKpis(): array {
-        $items = $this->safeGet(fn() => API::Item()->get([
+        // Scope to whichever monitored host carries the milestone.cam.status[*]
+        // items (the Milestone Site host). Without this hostids filter the
+        // API does a full instance-wide item search by key prefix.
+        $site_groups = $this->safeGet(fn() => API::HostGroup()->get([
+            'output' => ['groupid'],
+            'search' => ['name' => 'Milestone'],
+        ]));
+        $args = [
             'output'      => ['key_', 'lastvalue', 'lastclock'],
             'search'      => ['key_' => 'milestone.cam.status['],
             'startSearch' => true,
             'monitored'   => true,
             'limit'       => 50000
-        ]));
+        ];
+        if ($site_groups) {
+            $args['groupids'] = array_column($site_groups, 'groupid');
+        }
+        $items = $this->safeGet(fn() => API::Item()->get($args));
         if (!$items) {
             return ['online' => null, 'total' => null, 'faulted' => null, 'disabled' => null];
         }
