@@ -150,57 +150,101 @@ class PFClient {
     public function nodesByMac(array $macs): array {
         $clean = [];
         foreach ($macs as $m) {
-            $norm = strtolower(trim((string) $m));
+            $norm = self::canonMac((string) $m);
             if ($norm === '') continue;
             $clean[$norm] = true;
         }
         if (!$clean) return [];
         $list = array_keys($clean);
 
-        $clauses = array_map(fn($m) => [
-            'op'    => 'equals',
-            'field' => 'mac',
-            'value' => $m
-        ], $list);
-
-        $body = [
-            'cursor' => 0,
-            'limit'  => max(25, count($list) + 10),
-            'sort'   => ['mac ASC'],
-            'fields' => [
-                'mac', 'pid', 'computername', 'status', 'category_id',
-                'device_class', 'device_type', 'device_manufacturer', 'device_version',
-                'dhcp_fingerprint', 'dhcp_vendor',
-                'last_seen', 'last_arp', 'last_dhcp',
-                'ip4log.ip'
-            ],
-            'query'  => count($clauses) === 1
-                ? $clauses[0]
-                : ['op' => 'or', 'values' => $clauses]
-        ];
-
-        $rows = $this->call('POST', '/api/v1/nodes/search', [], $body);
-
+        // PF's nodes/search builds one SQL clause per OR value. Some PF
+        // deployments 400 (or silently truncate) when the OR clause list
+        // gets huge — a 600-port switch with a packed FDB would happily
+        // push the request past whatever ceiling each version enforces.
+        // Chunk into batches so each request stays well under the limit
+        // and one oversized switch can't blank the whole port-detail
+        // pane. Per-batch failures degrade gracefully: log and keep
+        // whatever the surviving batches returned.
         $out = [];
-        foreach (($rows['items'] ?? []) as $r) {
-            $mac = strtolower((string) ($r['mac'] ?? ''));
-            if ($mac === '') continue;
-            $out[$mac] = [
-                'mac'      => $mac,
-                'host'     => (string) ($r['computername'] ?? ''),
-                'ip'       => (string) ($r['ip4log.ip'] ?? ''),
-                'reg'      => strtolower((string) ($r['status'] ?? '')) === 'reg' ? 'REG' : 'UNREG',
-                'role'     => (string) ($r['category_id'] ?? ''),
-                'vendor'   => (string) ($r['device_manufacturer'] ?? $r['device_class'] ?? ''),
-                'os'       => (string) ($r['device_type'] ?? ($r['device_class'] ?? '')),
-                'owner'    => (string) ($r['pid'] ?? ''),
-                'dhcpFp'   => (string) ($r['dhcp_fingerprint'] ?? $r['dhcp_vendor'] ?? ''),
-                'lastSeen' => (string) ($r['last_seen'] ?? ''),
-                'lastArp'  => (string) ($r['last_arp'] ?? ''),
-                'lastDhcp' => (string) ($r['last_dhcp'] ?? '')
+        foreach (array_chunk($list, 100) as $batch) {
+            $clauses = array_map(fn($m) => [
+                'op'    => 'equals',
+                'field' => 'mac',
+                'value' => $m
+            ], $batch);
+
+            $body = [
+                'cursor' => 0,
+                'limit'  => max(25, count($batch) + 10),
+                'sort'   => ['mac ASC'],
+                'fields' => [
+                    'mac', 'pid', 'computername', 'status', 'category_id',
+                    'device_class', 'device_type', 'device_manufacturer', 'device_version',
+                    'dhcp_fingerprint', 'dhcp_vendor',
+                    'last_seen', 'last_arp', 'last_dhcp',
+                    'ip4log.ip'
+                ],
+                'query'  => count($clauses) === 1
+                    ? $clauses[0]
+                    : ['op' => 'or', 'values' => $clauses]
             ];
+
+            try {
+                $rows = $this->call('POST', '/api/v1/nodes/search', [], $body);
+            } catch (\RuntimeException $e) {
+                // PF answers 404 instead of 200+empty when nothing matches.
+                if (str_contains($e->getMessage(), 'HTTP 404')) {
+                    error_log('[tcs_dashboard] PFClient::nodesByMac: batch of '.count($batch).' MACs returned 404 (no matches)');
+                    continue;
+                }
+                error_log('[tcs_dashboard] PFClient::nodesByMac: batch of '.count($batch).' MACs failed: '.$e->getMessage());
+                continue;
+            }
+
+            $items = $rows['items'] ?? [];
+            foreach ($items as $r) {
+                // Re-canonicalize the response MAC to the same colon-lower
+                // form the FDB uses. PF normally returns aa:bb:cc:dd:ee:ff,
+                // but a misconfigured Inverse install or a v8/v9 carry-over
+                // can return AABBCCDDEEFF or aabbccddeeff — that would
+                // make $out[$mac] miss the FDB-side lookup key entirely.
+                $mac = self::canonMac((string) ($r['mac'] ?? ''));
+                if ($mac === '') continue;
+                $out[$mac] = [
+                    'mac'      => $mac,
+                    'host'     => (string) ($r['computername'] ?? ''),
+                    'ip'       => (string) ($r['ip4log.ip'] ?? ''),
+                    'reg'      => strtolower((string) ($r['status'] ?? '')) === 'reg' ? 'REG' : 'UNREG',
+                    'role'     => (string) ($r['category_id'] ?? ''),
+                    'vendor'   => (string) ($r['device_manufacturer'] ?? $r['device_class'] ?? ''),
+                    'os'       => (string) ($r['device_type'] ?? ($r['device_class'] ?? '')),
+                    'owner'    => (string) ($r['pid'] ?? ''),
+                    'dhcpFp'   => (string) ($r['dhcp_fingerprint'] ?? $r['dhcp_vendor'] ?? ''),
+                    'lastSeen' => (string) ($r['last_seen'] ?? ''),
+                    'lastArp'  => (string) ($r['last_arp'] ?? ''),
+                    'lastDhcp' => (string) ($r['last_dhcp'] ?? '')
+                ];
+            }
         }
+
+        error_log(sprintf(
+            '[tcs_dashboard] PFClient::nodesByMac: requested %d unique MAC(s), matched %d',
+            count($list), count($out)
+        ));
         return $out;
+    }
+
+    /**
+     * Strip any non-hex character and re-emit aa:bb:cc:dd:ee:ff. Mirrors
+     * SwitchClient::normalizeMac() so both sides of the FDB ↔ PF join
+     * land on the same canonical key regardless of how either upstream
+     * formats the MAC. Returns '' when the input doesn't contain exactly
+     * 12 hex digits.
+     */
+    private static function canonMac(string $mac): string {
+        $hex = strtolower(preg_replace('/[^0-9a-fA-F]/', '', $mac) ?? '');
+        if (strlen($hex) !== 12) return '';
+        return implode(':', str_split($hex, 2));
     }
 
     /**
@@ -362,41 +406,49 @@ class PFClient {
     public function locationsByMac(array $macs): array {
         $clean = [];
         foreach ($macs as $m) {
-            $norm = strtolower(trim((string) $m));
+            $norm = self::canonMac((string) $m);
             if ($norm !== '') $clean[$norm] = true;
         }
         if (!$clean) return [];
         $list = array_keys($clean);
 
-        $clauses = array_map(fn($m) => [
-            'op'    => 'equals',
-            'field' => 'mac',
-            'value' => $m
-        ], $list);
-
-        $body = [
-            'cursor' => 0,
-            // Buffer for stale entries; one MAC can have many locationlog rows.
-            'limit'  => max(100, count($list) * 4),
-            'sort'   => ['start_time DESC'],
-            'fields' => [
-                'mac', 'switch', 'switch_ip', 'port', 'vlan', 'role',
-                'ssid', 'connection_type', 'connection_sub_type',
-                'dot1x_username', 'realm', 'ifDesc', 'start_time', 'end_time'
-            ],
-            'query' => count($clauses) === 1
-                ? $clauses[0]
-                : ['op' => 'or', 'values' => $clauses]
-        ];
-
-        $rows = $this->call('POST', '/api/v1/locationlogs/search', [], $body);
-
-        // Pre-sorted DESC by start_time — first hit per MAC wins.
         $out = [];
-        foreach (($rows['items'] ?? []) as $r) {
-            $mac = strtolower((string) ($r['mac'] ?? ''));
-            if ($mac === '' || isset($out[$mac])) continue;
-            $out[$mac] = $r;
+        foreach (array_chunk($list, 100) as $batch) {
+            $clauses = array_map(fn($m) => [
+                'op'    => 'equals',
+                'field' => 'mac',
+                'value' => $m
+            ], $batch);
+
+            $body = [
+                'cursor' => 0,
+                // Buffer for stale entries; one MAC can have many locationlog rows.
+                'limit'  => max(100, count($batch) * 4),
+                'sort'   => ['start_time DESC'],
+                'fields' => [
+                    'mac', 'switch', 'switch_ip', 'port', 'vlan', 'role',
+                    'ssid', 'connection_type', 'connection_sub_type',
+                    'dot1x_username', 'realm', 'ifDesc', 'start_time', 'end_time'
+                ],
+                'query' => count($clauses) === 1
+                    ? $clauses[0]
+                    : ['op' => 'or', 'values' => $clauses]
+            ];
+
+            try {
+                $rows = $this->call('POST', '/api/v1/locationlogs/search', [], $body);
+            } catch (\RuntimeException $e) {
+                if (str_contains($e->getMessage(), 'HTTP 404')) continue;
+                error_log('[tcs_dashboard] PFClient::locationsByMac: batch of '.count($batch).' MACs failed: '.$e->getMessage());
+                continue;
+            }
+
+            // Sorted DESC by start_time — first hit per MAC wins across batches.
+            foreach (($rows['items'] ?? []) as $r) {
+                $mac = self::canonMac((string) ($r['mac'] ?? ''));
+                if ($mac === '' || isset($out[$mac])) continue;
+                $out[$mac] = $r;
+            }
         }
         return $out;
     }
