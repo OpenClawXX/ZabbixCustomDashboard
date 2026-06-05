@@ -91,13 +91,27 @@ class ThreeCXClient {
         return $r['value'] ?? [];
     }
 
-    /** GET /xapi/v1/Users (paged via $top / $skip if needed). */
-    public function users(int $top = 500): array {
-        $r = $this->get('/xapi/v1/Users', [
-            '$top'    => (string) $top,
-            '$select' => 'Number,FirstName,LastName,CurrentProfileName,Forwarding,Registrar,Groups',
-        ]);
-        return $r['value'] ?? [];
+    /**
+     * GET /xapi/v1/Users with paging. 3CX v20 caps $top at 100, so we walk
+     * the collection with $skip until a page returns fewer than $page rows.
+     * Caller passes a soft upper bound — defaults to 5000, which is well
+     * above what any school-district PBX would hold.
+     */
+    public function users(int $max = 5000): array {
+        $page = 100;
+        $out  = [];
+        for ($skip = 0; $skip < $max; $skip += $page) {
+            $r = $this->get('/xapi/v1/Users', [
+                '$top'    => (string) $page,
+                '$skip'   => (string) $skip,
+                '$select' => 'Number,FirstName,LastName,CurrentProfileName,Forwarding,Registrar,Groups',
+            ]);
+            $rows = $r['value'] ?? [];
+            if (!$rows) break;
+            foreach ($rows as $row) $out[] = $row;
+            if (count($rows) < $page) break;
+        }
+        return $out;
     }
 
     /** GET /xapi/v1/Queues. */

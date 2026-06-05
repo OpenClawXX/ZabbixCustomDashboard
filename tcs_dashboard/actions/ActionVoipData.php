@@ -35,23 +35,25 @@ class ActionVoipData extends ActionDataBase {
     private const ACTIVE_CALLS_KEY_HINTS = ['active.calls', 'activecalls', 'calls.active', 'callsactive'];
 
     protected function checkInput(): bool {
-        return $this->validateInput([]);
+        return $this->validateInput(['debug' => 'in 0,1']);
     }
 
     protected function doAction(): void {
         $payload = self::emptyPayload();
+        $debug   = (int) $this->getInput('debug', 0) === 1;
 
         try {
-            $cached = self::cacheGet();
+            // Debug bypasses the cache so the operator always sees fresh raw rows.
+            $cached = $debug ? null : self::cacheGet();
             if ($cached !== null) {
                 $payload = $cached;
             } else {
-                $payload = self::buildPayload();
+                $payload = self::buildPayload($debug);
                 // Don't pin a broken rollup in APCu for 30 s — operators
                 // re-poll-to-debug will just hit the same stale failure.
                 $cxOk  = ($payload['sources']['3cx'] ?? '') === 'live' || ($payload['sources']['3cx'] ?? '') === 'partial';
                 $zbxOk = ($payload['sources']['zbx'] ?? '') === 'live';
-                if ($cxOk || $zbxOk) {
+                if (!$debug && ($cxOk || $zbxOk)) {
                     self::cacheSet($payload);
                 }
             }
@@ -101,8 +103,9 @@ class ActionVoipData extends ActionDataBase {
 
     // ── Build ──────────────────────────────────────────────────────────────
 
-    private static function buildPayload(): array {
+    private static function buildPayload(bool $debug = false): array {
         $payload = self::emptyPayload();
+        $rawSamples = [];
 
         // 1. Resolve the 3CX host (template match + optional macro override).
         //    Used for the problems list and history.get even when XAPI is the
@@ -125,34 +128,59 @@ class ActionVoipData extends ActionDataBase {
         $xapiFail = 0;
         $errors   = [];   // first-failure-wins, per-endpoint, surfaced to UI
 
-        $runXapi = static function (string $label, callable $fn, bool $critical = true) use (&$xapiOk, &$xapiFail, &$errors) {
+        $runXapi = static function (string $label, callable $fn, bool $critical = true) use (&$xapiOk, &$xapiFail, &$errors, $debug) {
             try { $fn(); $xapiOk++; }
             catch (\Throwable $e) {
                 if ($critical) $xapiFail++;
                 $msg = sprintf('%s: %s', $label, $e->getMessage());
                 error_log('[tcs_dashboard] voip ' . $msg);
-                $errors[$label] = $e->getMessage();
+                // Non-critical endpoints (the report-style ones) walk a
+                // candidate path list; on full failure they 404 — that's
+                // expected on 3CX builds without those reports, so don't
+                // pollute the operator-visible warning unless we're in
+                // explicit debug mode.
+                if ($critical || $debug) $errors[$label] = $e->getMessage();
             }
         };
 
         // 2a. SystemStatus → pbx header + services
         if ($client) {
-            $runXapi('SystemStatus', function () use ($client, &$payload, $host) {
+            $runXapi('SystemStatus', function () use ($client, &$payload, $host, $debug, &$rawSamples) {
                 $s = $client->systemStatus();
+                if ($debug) $rawSamples['SystemStatus'] = $s;
                 $payload['pbx']      = self::mapPbx($s, $host);
                 $payload['services'] = self::mapServices($s);
             });
             // 2b. Trunks
-            $runXapi('Trunks',   function () use ($client, &$payload) { $payload['trunks']  = self::mapTrunks($client->trunks()); });
+            $runXapi('Trunks', function () use ($client, &$payload, $debug, &$rawSamples) {
+                $rows = $client->trunks();
+                if ($debug) $rawSamples['Trunks'] = array_slice($rows, 0, 2);
+                $payload['trunks'] = self::mapTrunks($rows);
+            });
             // 2c. Queues + per-queue performance
-            $runXapi('Queues',   function () use ($client, &$payload) { $payload['queues']  = $client->queuesWithPerformance(); });
+            $runXapi('Queues', function () use ($client, &$payload, $debug, &$rawSamples) {
+                if ($debug) {
+                    try { $rawSamples['Queues'] = array_slice($client->queues(), 0, 2); } catch (\Throwable $_) {}
+                }
+                $payload['queues'] = $client->queuesWithPerformance();
+            });
             // 2d. Per-extension grid grouped by site
-            $runXapi('Users',    function () use ($client, &$payload) { $payload['sites']   = $client->extensionsBySite(); });
-            // 2e. Top extensions — non-critical (path varies wildly across 3CX builds; mock fallback covers absence).
-            $runXapi('TopExt',   function () use ($client, &$payload) { $payload['top']     = self::mapTopExtensions($client->topExtensions(10)); }, false);
-            // 2f. Call quality — also non-critical for the same reason.
-            $runXapi('Quality',  function () use ($client, &$payload) { $payload['quality'] = self::mapCallQuality($client->callQuality('30m')); }, false);
+            $runXapi('Users', function () use ($client, &$payload, $debug, &$rawSamples) {
+                if ($debug) {
+                    try { $rawSamples['Users'] = array_slice($client->users(100), 0, 2); } catch (\Throwable $_) {}
+                }
+                $payload['sites'] = $client->extensionsBySite();
+            });
+            // 2e. Top extensions — non-critical (path varies across 3CX builds).
+            $runXapi('TopExt', function () use ($client, &$payload) {
+                $payload['top'] = self::mapTopExtensions($client->topExtensions(10));
+            }, false);
+            // 2f. Call quality — also non-critical.
+            $runXapi('Quality', function () use ($client, &$payload) {
+                $payload['quality'] = self::mapCallQuality($client->callQuality('30m'));
+            }, false);
         }
+        if ($debug) $payload['xapi_raw'] = $rawSamples;
 
         if ($client) {
             if ($xapiOk > 0 && $xapiFail === 0)      $payload['sources']['3cx'] = 'live';
@@ -295,19 +323,39 @@ class ActionVoipData extends ActionDataBase {
         $out = [];
         foreach ($rows as $t) {
             if (!is_array($t)) continue;
-            $isReg = self::pick($t, ['IsRegistered', 'Registered'], false);
-            $isReg = is_bool($isReg) ? $isReg : in_array(strtolower((string) $isReg), ['true', '1', 'registered', 'reg'], true);
-            $errCount = (int) self::pick($t, ['ErrorCount', 'Errors', 'FailureCount'], 0);
-            $status = $isReg ? ($errCount > 0 ? 'dgr' : 'reg') : 'unreg';
+
+            // Number is the most reliable field. Use it as the fallback for
+            // both display name and DID when the build doesn't carry Name.
+            $number = (string) self::pick($t, ['Number', 'MainTrunkNumber', 'AuthID'], '');
+            $name   = (string) self::pick($t, ['Name', 'TrunkName', 'DisplayName', 'OutboundCallerID', 'AuthID'], '');
+            if ($name === '') $name = $number !== '' ? 'Trunk ' . $number : 'trunk';
+
+            // Registration: v20 sometimes exposes Status (string), sometimes
+            // IsRegistered (bool). Accept either; treat string "Registered" /
+            // "OK" / "Active" as up.
+            $regRaw = self::pick($t, ['IsRegistered', 'Registered', 'RegistrationStatus', 'Status', 'State'], null);
+            if (is_bool($regRaw))         $isReg = $regRaw;
+            elseif (is_numeric($regRaw))  $isReg = ((int) $regRaw) === 1;
+            elseif (is_string($regRaw))   $isReg = in_array(strtolower($regRaw), ['true', '1', 'registered', 'reg', 'ok', 'up', 'active'], true);
+            else                          $isReg = false;
+            $errCount = (int) self::pick($t, ['ErrorCount', 'Errors', 'FailureCount', 'FailedCalls'], 0);
+            $status   = $isReg ? ($errCount > 0 ? 'dgr' : 'reg') : 'unreg';
 
             $chTotal = (int) self::pick($t, ['SimultaneousCalls', 'MaxSimCalls', 'ChannelsCount', 'Channels'], 0);
-            $chIn    = (int) self::pick($t, ['ActiveInboundCalls',  'ActiveCallsIn',  'CallsIn'],  0);
-            $chOut   = (int) self::pick($t, ['ActiveOutboundCalls', 'ActiveCallsOut', 'CallsOut'], 0);
+            $chIn    = (int) self::pick($t, ['ActiveInboundCalls',  'ActiveCallsIn',  'CallsIn',  'CurrentIncomingCalls'], 0);
+            $chOut   = (int) self::pick($t, ['ActiveOutboundCalls', 'ActiveCallsOut', 'CallsOut', 'CurrentOutgoingCalls'], 0);
+
+            // Provider: 3CX v20 nests provider info in a few different
+            // places. Walk common shapes.
+            $provider = (string) self::pick($t, ['ProviderName', 'Provider', 'ProviderType', 'GatewayName', 'Carrier'], '');
+            if ($provider === '' && isset($t['Provider']) && is_array($t['Provider'])) {
+                $provider = (string) ($t['Provider']['Name'] ?? $t['Provider']['DisplayName'] ?? '');
+            }
 
             $out[] = [
-                'name'     => (string) self::pick($t, ['Name', 'TrunkName'], 'trunk'),
-                'provider' => (string) self::pick($t, ['ProviderName', 'Provider'], ''),
-                'host'     => (string) self::pick($t, ['Host', 'GatewayHost', 'OutboundProxy', 'Address'], ''),
+                'name'     => $name,
+                'provider' => $provider,
+                'host'     => (string) self::pick($t, ['Host', 'GatewayHost', 'OutboundProxy', 'ProxyHost', 'Address', 'SipServer'], ''),
                 'status'   => $status,
                 'chTotal'  => $chTotal,
                 'chIn'     => $chIn,
@@ -315,7 +363,7 @@ class ActionVoipData extends ActionDataBase {
                 'asr'      => (float) self::pick($t, ['AnswerSeizureRatio', 'Asr'], 0),
                 'mos'      => (float) self::pick($t, ['AverageMos', 'Mos'], 0),
                 'errors'   => $errCount,
-                'did'      => (string) self::pick($t, ['Number', 'MainTrunkNumber', 'AuthID'], ''),
+                'did'      => $number,
             ];
         }
         return $out;
