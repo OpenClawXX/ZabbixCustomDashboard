@@ -43,13 +43,12 @@ $asset_base = 'modules/tcs_dashboard/assets';
     window.TCS_GLOBAL_DATA_URL = "zabbix.php?action=tcs.global.data";
 </script>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+<script defer src="<?= $asset_base ?>/vendor/react.production.min.js"></script>
+<script defer src="<?= $asset_base ?>/vendor/react-dom.production.min.js"></script>
 
 <!-- Order: tweaks → primitives → unified sidebar → live-data bridge → global app -->
-<script type="text/babel" src="<?= $asset_base ?>/tweaks-panel.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/primitives.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/global-nav.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/global-bridge.jsx"></script>
-<script type="text/babel" src="<?= $asset_base ?>/global-app.jsx"></script>
+<script defer src="<?= $asset_base ?>/dist/tweaks-panel.js"></script>
+<script defer src="<?= $asset_base ?>/dist/primitives.js"></script>
+<script defer src="<?= $asset_base ?>/dist/global-nav.js"></script>
+<script defer src="<?= $asset_base ?>/dist/global-bridge.js"></script>
+<script defer src="<?= $asset_base ?>/dist/global-app.js"></script>
