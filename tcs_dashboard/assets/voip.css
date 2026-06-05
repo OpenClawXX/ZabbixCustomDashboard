@@ -1,5 +1,12 @@
 /* VoIP / 3CX dashboard add-ons (extends styles.css + switches.css) */
 
+/* Header loading pill — pulses while bridge fetches are in flight. */
+@keyframes voipLoadingPulse {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.7); }
+}
+
+
 /* ───────── Layout ───────── */
 .voip-row-2col {
   display: grid;

@@ -188,6 +188,29 @@ const VoipKpis = () => {
   );
 };
 
+// ── Loading-status pill ──
+// Reads window.VOIP_LOADING_FLAGS (set by voip-bridge.jsx). Shows a spinner
+// + which endpoint(s) are still in flight while the first parallel fetch
+// is running, then disappears once everything has responded once.
+const LoadingPill = () => {
+  const flags = window.VOIP_LOADING_FLAGS || {};
+  const labelOf = { core: "core", sites: "extensions", top: "top talkers", calls: "active calls" };
+  const pending = Object.keys(flags).filter(k => flags[k]);
+  if (pending.length === 0) return null;
+  return (
+    <span className="pill" style={{ background:"var(--bg-2)", borderColor:"var(--cx)" }}>
+      <span className="dot" style={{
+        background:"var(--cx)",
+        animation:"voipLoadingPulse 1.4s ease-in-out infinite",
+      }} />
+      <span className="lbl">Loading</span>
+      <span className="v" style={{ fontSize:10, opacity:0.8 }}>
+        {pending.map(k => labelOf[k] || k).join(" · ")}
+      </span>
+    </span>
+  );
+};
+
 // ── SBC fleet ──
 // Each row in window.VOIP_SBCS represents one remote 3CX SBC (Session Border
 // Controller) reporting back to this PBX. We render up/down + live CPU /
@@ -585,6 +608,7 @@ const VoipApp = () => {
               <span className="role-tag voip" style={{ fontSize: 10, padding: "1px 8px" }}>3CX · {p.version}</span>
             </div>
             <div className="host-meta voip-meta-bar">
+              <LoadingPill />
               <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> Phone System online</span>
               <span className="pill"><span className="lbl">IP</span> <span className="v">{p.ip}</span></span>
               <span className="pill"><span className="lbl">License</span> <span className="v">{p.edition}</span></span>

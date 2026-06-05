@@ -369,6 +369,43 @@ const VoipKpis = () => {
   }, "\u25CF 1 unreg \xB7 1 degraded"))));
 };
 
+// ── Loading-status pill ──
+// Reads window.VOIP_LOADING_FLAGS (set by voip-bridge.jsx). Shows a spinner
+// + which endpoint(s) are still in flight while the first parallel fetch
+// is running, then disappears once everything has responded once.
+const LoadingPill = () => {
+  const flags = window.VOIP_LOADING_FLAGS || {};
+  const labelOf = {
+    core: "core",
+    sites: "extensions",
+    top: "top talkers",
+    calls: "active calls"
+  };
+  const pending = Object.keys(flags).filter(k => flags[k]);
+  if (pending.length === 0) return null;
+  return /*#__PURE__*/React.createElement("span", {
+    className: "pill",
+    style: {
+      background: "var(--bg-2)",
+      borderColor: "var(--cx)"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "dot",
+    style: {
+      background: "var(--cx)",
+      animation: "voipLoadingPulse 1.4s ease-in-out infinite"
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "lbl"
+  }, "Loading"), /*#__PURE__*/React.createElement("span", {
+    className: "v",
+    style: {
+      fontSize: 10,
+      opacity: 0.8
+    }
+  }, pending.map(k => labelOf[k] || k).join(" · ")));
+};
+
 // ── SBC fleet ──
 // Each row in window.VOIP_SBCS represents one remote 3CX SBC (Session Border
 // Controller) reporting back to this PBX. We render up/down + live CPU /
@@ -1035,7 +1072,7 @@ const VoipApp = () => {
     }
   }, "3CX \xB7 ", p.version)), /*#__PURE__*/React.createElement("div", {
     className: "host-meta voip-meta-bar"
-  }, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(LoadingPill, null), /*#__PURE__*/React.createElement("span", {
     className: "pill"
   }, /*#__PURE__*/React.createElement("span", {
     className: "dot",

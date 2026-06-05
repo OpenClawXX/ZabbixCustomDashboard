@@ -39,6 +39,13 @@ class ActionVoipData extends ActionDataBase {
     }
 
     protected function doAction(): void {
+        // Release the session lock early — the page now fires four parallel
+        // tcs.voip.* fetches and PHP would otherwise serialise them all
+        // behind the per-session file lock. Same trick the camera snapshot
+        // action uses.
+        if (function_exists('session_write_close')) {
+            session_write_close();
+        }
         $payload = self::emptyPayload();
         $debug   = (int) $this->getInput('debug', 0) === 1;
 
@@ -171,21 +178,14 @@ class ActionVoipData extends ActionDataBase {
                 }
                 $payload['queues'] = $client->queuesWithPerformance();
             });
-            // 2d. Per-extension grid grouped by site
-            $runXapi('Users', function () use ($client, &$payload, $debug, &$rawSamples) {
-                if ($debug) {
-                    try { $rawSamples['Users'] = array_slice($client->users(100), 0, 2); } catch (\Throwable $_) {}
-                }
-                $payload['sites'] = $client->extensionsBySite();
-            });
-            // 2e. Top extensions — non-critical (path varies across 3CX builds).
-            $runXapi('TopExt', function () use ($client, &$payload) {
-                $payload['top'] = self::mapTopExtensions($client->topExtensions(10));
-            }, false);
-            // 2f. Call quality — also non-critical.
+            // 2f. Call quality — non-critical; v20 has no pre-bucketed endpoint.
             $runXapi('Quality', function () use ($client, &$payload) {
                 $payload['quality'] = self::mapCallQuality($client->callQuality('30m'));
             }, false);
+            // NOTE: Users (→ sites) and TopExt are served by their own
+            // actions (tcs.voip.sites.data / tcs.voip.top.data) so the slow
+            // Users paging doesn't block this fast core rollup. The bridge
+            // fires both in parallel with this one.
         }
         if ($debug) $payload['xapi_raw'] = $rawSamples;
 
@@ -480,6 +480,9 @@ class ActionVoipData extends ActionDataBase {
      * "Top by calls" = sum of all four count fields. We re-sort because
      * 3CX's $top happens before our derived total.
      */
+    /** Re-export for ActionVoipTopData, which lives in a sibling file. */
+    public static function mapTopExtensionsPublic(array $rows): array { return self::mapTopExtensions($rows); }
+
     private static function mapTopExtensions(array $rows): array {
         $out = [];
         foreach ($rows as $r) {

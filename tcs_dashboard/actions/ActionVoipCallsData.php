@@ -27,6 +27,9 @@ class ActionVoipCallsData extends ActionDataBase {
     }
 
     protected function doAction(): void {
+        if (function_exists('session_write_close')) {
+            session_write_close();
+        }
         $payload = ['calls' => null, 'sources' => ['3cx' => 'unknown'], 'ts' => time()];
 
         try {

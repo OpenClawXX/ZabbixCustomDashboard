@@ -1,34 +1,49 @@
 // voip-bridge.jsx
 //
-// Data layer for the VoIP / 3CX page. ActionVoip embeds an SSR boot snapshot
-// in window.VOIP_BOOT — this bridge unpacks it into the window.VOIP_* globals
-// voip-app.jsx reads (VOIP_PBX / VOIP_SERVICES / VOIP_TRUNKS / VOIP_CALLS /
-// VOIP_TOP / VOIP_QUEUES / VOIP_QUALITY / VOIP_SITES / VOIP_PROBLEMS), then
-// polls tcs.voip.data every 30s. The live-active-calls table refreshes on a
-// tighter 5s cadence via tcs.voip.calls.data so we don't re-do the full
-// rollup that often.
+// Data layer for the VoIP / 3CX page. Fires four endpoints in parallel on
+// page load so individual cards light up as soon as their slot's data
+// arrives, instead of all waiting on the slowest call:
 //
-// Mirrors the fortigate-bridge pattern. While the data action is still a
-// stub, every payload slot comes back as null and the JSX-side mock-data
-// fallback takes over — the page never goes blank.
+//   tcs.voip.data        — core rollup (30s):  pbx, services, trunks,
+//                          sbcs, queues, problems, history
+//   tcs.voip.sites.data  — slow (60s):         per-extension reg grid
+//                          (paginates /xapi/v1/Users 100-at-a-time)
+//   tcs.voip.top.data    — slow (60s):         top-talker report
+//                          (function-import call, often 404/403)
+//   tcs.voip.calls.data  — fast (5s):          live active-calls list
+//
+// Each fetch updates window.VOIP_LOADING_FLAGS[<key>] = false on completion
+// (success or error); voip-app.jsx's loading pill watches that map.
 
 (function () {
   // Payload field → window global.
   const KEYS = [["pbx", "VOIP_PBX"], ["services", "VOIP_SERVICES"], ["trunks", "VOIP_TRUNKS"], ["sbcs", "VOIP_SBCS"], ["calls", "VOIP_CALLS"], ["top", "VOIP_TOP"], ["queues", "VOIP_QUEUES"], ["quality", "VOIP_QUALITY"], ["sites", "VOIP_SITES"], ["problems", "VOIP_PROBLEMS"]];
+
+  // Per-endpoint loading state, exposed for the header pill.
+  window.VOIP_LOADING_FLAGS = window.VOIP_LOADING_FLAGS || {
+    core: true,
+    sites: true,
+    top: true,
+    calls: true
+  };
+  function setFlag(key, value) {
+    window.VOIP_LOADING_FLAGS[key] = value;
+  }
   function apply(payload, opts) {
     if (!payload || typeof payload !== "object") return;
     const only = opts && opts.onlyKeys ? new Set(opts.onlyKeys) : null;
     for (const [src, dst] of KEYS) {
       if (only && !only.has(src)) continue;
       const v = payload[src];
-      // null/undefined means the data action couldn't fetch this slot
-      // (XAPI failure, etc.) — keep whatever's currently on screen.
-      // An explicit [] / {} means "fetched, currently empty" — apply
-      // it so the page reflects reality.
+      // null/undefined = "couldn't fetch this slot" → keep prior data.
+      // Explicit [] / {} = "fetched, currently empty" → apply.
       if (v === null || v === undefined) continue;
       window[dst] = v;
     }
-    if (payload.sources) window.VOIP_SOURCES = payload.sources;
+    if (payload.sources) window.VOIP_SOURCES = {
+      ...(window.VOIP_SOURCES || {}),
+      ...payload.sources
+    };
     if (payload.loading !== undefined) window.VOIP_LOADING = !!payload.loading;
     window.VOIP_BANNER = payload.error ? {
       kind: "error",
@@ -36,7 +51,7 @@
     } : payload.warning ? {
       kind: "warning",
       msg: payload.warning
-    } : null;
+    } : window.VOIP_BANNER || null;
     window.dispatchEvent(new CustomEvent("tcs:voip-data", {
       detail: {
         ts: payload.ts || Date.now(),
@@ -45,15 +60,17 @@
     }));
   }
 
-  // First paint: unpack SSR boot synchronously. With the data action still
-  // a stub this is mostly nulls — the JSX file's `window.VOIP_X = ... || mock`
-  // guards then seed the mock fallback.
+  // First paint: unpack SSR boot synchronously.
   apply(window.VOIP_BOOT || {});
-  const URL_DATA = window.TCS_VOIP_DATA_URL || "zabbix.php?action=tcs.voip.data";
-  const URL_CALLS = window.TCS_VOIP_CALLS_DATA_URL || "zabbix.php?action=tcs.voip.calls.data";
-  async function fetchData() {
+  const URLS = {
+    core: window.TCS_VOIP_DATA_URL || "zabbix.php?action=tcs.voip.data",
+    sites: window.TCS_VOIP_SITES_DATA_URL || "zabbix.php?action=tcs.voip.sites.data",
+    top: window.TCS_VOIP_TOP_DATA_URL || "zabbix.php?action=tcs.voip.top.data",
+    calls: window.TCS_VOIP_CALLS_DATA_URL || "zabbix.php?action=tcs.voip.calls.data"
+  };
+  async function fetchOne(key, onlyKeys) {
     try {
-      const resp = await fetch(URL_DATA, {
+      const resp = await fetch(URLS[key], {
         credentials: "same-origin",
         headers: {
           "Accept": "application/json"
@@ -61,51 +78,52 @@
       });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const j = await resp.json();
-      apply(j || {});
+      apply(j || {}, onlyKeys ? {
+        onlyKeys
+      } : undefined);
       return j;
     } catch (e) {
-      console.error("[tcs] voip fetch failed:", e, "url:", URL_DATA);
+      console.error("[tcs] voip " + key + " fetch failed:", e, "url:", URLS[key]);
       return null;
-    }
-  }
-  async function fetchCalls() {
-    try {
-      const resp = await fetch(URL_CALLS, {
-        credentials: "same-origin",
-        headers: {
-          "Accept": "application/json"
+    } finally {
+      setFlag(key, false);
+      window.dispatchEvent(new CustomEvent("tcs:voip-data", {
+        detail: {
+          ts: Date.now(),
+          flag: key
         }
-      });
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const j = await resp.json();
-      apply(j || {}, {
-        onlyKeys: ["calls"]
-      });
-      return j;
-    } catch (e) {
-      console.error("[tcs] voip calls fetch failed:", e, "url:", URL_CALLS);
-      return null;
+      }));
     }
   }
-  console.info("[tcs] fetching VoIP snapshot…");
-  fetchData();
+  console.info("[tcs] fetching VoIP snapshot (parallel)…");
+  // Fire all four endpoints in parallel. Each card re-renders as its
+  // slot lands; no card waits on the slowest call.
+  fetchOne("core");
+  fetchOne("sites", ["sites"]);
+  fetchOne("top", ["top"]);
+  fetchOne("calls", ["calls"]);
 
-  // Rollup: 30 s. Active calls: 5 s. Skip when the tab is hidden.
-  const REFRESH_MS = 30_000;
-  const CALLS_REFRESH_MS = 5_000;
+  // Refresh cadences (skip when tab hidden).
+  const visible = () => document.visibilityState === "visible";
   setInterval(() => {
-    if (document.visibilityState === "visible") fetchData();
-  }, REFRESH_MS);
+    if (visible()) fetchOne("core");
+  }, 30_000);
   setInterval(() => {
-    if (document.visibilityState === "visible") fetchCalls();
-  }, CALLS_REFRESH_MS);
+    if (visible()) fetchOne("sites", ["sites"]);
+  }, 60_000);
+  setInterval(() => {
+    if (visible()) fetchOne("top", ["top"]);
+  }, 60_000);
+  setInterval(() => {
+    if (visible()) fetchOne("calls", ["calls"]);
+  }, 5_000);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      fetchData();
-      fetchCalls();
+    if (visible()) {
+      fetchOne("core");
+      fetchOne("calls", ["calls"]);
     }
   });
 
-  // Manual refresh hook for the Tweaks "Refresh now" button.
-  window.tcsVoipRefresh = () => Promise.all([fetchData(), fetchCalls()]);
+  // Manual "Refresh now" hook (used by the Tweaks panel).
+  window.tcsVoipRefresh = () => Promise.all([fetchOne("core"), fetchOne("sites", ["sites"]), fetchOne("top", ["top"]), fetchOne("calls", ["calls"])]);
 })();
