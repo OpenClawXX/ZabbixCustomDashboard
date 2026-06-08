@@ -3,6 +3,7 @@
 namespace Modules\TcsDashboard\Actions;
 
 use API;
+use Modules\TcsDashboard\Lib\ThreeCXClient;
 use CControllerResponseData;
 use CControllerResponseFatal;
 
@@ -805,12 +806,15 @@ class ActionGlobalData extends ActionDataBase {
     /**
      * 3CX-side fleet KPIs for the System Snapshot's VoIP tile.
      *
-     * Reuses the APCu snapshot ActionVoipData populates ('tcs_dashboard:voip:v1')
-     * so we don't fire a second SystemStatus call against 3CX on every global
-     * poll. When the cache is cold (operator hasn't visited the VoIP page yet
-     * this poll cycle) the fields come back null and the tile prints dashes —
-     * the next global refresh in 30s will pick up live data once the VoIP page
-     * runs at least once.
+     * Strategy:
+     *   1. Try the APCu snapshot ActionVoipData populates
+     *      ('tcs_dashboard:voip:v1') — when the VoIP page has been visited
+     *      recently this hit is free.
+     *   2. Fall back to a direct ThreeCXClient call (SystemStatus + Trunks),
+     *      cached under our own key ('tcs_dashboard:global:voip:v1', 30s TTL)
+     *      so global polls don't hammer 3CX. This makes the tile self-
+     *      sufficient — it lights up whether or not the operator has
+     *      visited the VoIP page yet.
      *
      * @return array{
      *   version: ?string, ext_reg: ?int, ext_total: ?int, calls_active: ?int,
@@ -819,7 +823,103 @@ class ActionGlobalData extends ActionDataBase {
      * }
      */
     private function collectVoipFleetKpis(): array {
-        $empty = [
+        // 1. Try VoIP-page cache first (richest payload).
+        $hit = function_exists('apcu_fetch')
+            ? apcu_fetch('tcs_dashboard:voip:v1', $ok)
+            : null;
+        if (($ok ?? false) && is_array($hit)) {
+            $pbx    = is_array($hit['pbx']    ?? null) ? $hit['pbx']    : [];
+            $trunks = is_array($hit['trunks'] ?? null) ? $hit['trunks'] : [];
+            if (!empty($pbx)) {
+                return self::shapeVoipKpis($pbx, $trunks);
+            }
+        }
+
+        // 2. Our own cache layer for direct fallback calls.
+        $selfKey = 'tcs_dashboard:global:voip:v1';
+        if (function_exists('apcu_fetch')) {
+            $self = apcu_fetch($selfKey, $ok2);
+            if (($ok2 ?? false) && is_array($self)) return $self;
+        }
+
+        // 3. Direct fallback. Mirrors what ActionVoipData does for the
+        //    same two endpoints, but skips the heavier Queues/Sbcs/etc.
+        $kpis = self::voipEmptyKpis();
+        try {
+            $cfg = [
+                'url'           => self::globalMacroStatic('{$TCS.3CX.URL}'),
+                'client_id'     => self::globalMacroStatic('{$TCS.3CX.CLIENT_ID}'),
+                'client_secret' => self::globalMacroStatic('{$TCS.3CX.CLIENT_SECRET}'),
+                'verify_ssl'    => self::globalMacroStatic('{$TCS.3CX.VERIFY.SSL}') !== '0',
+            ];
+            if ($cfg['url'] === '' || $cfg['client_id'] === '') return $kpis;
+
+            $client = ThreeCXClient::fromMacros($cfg);
+            $sys    = $client->systemStatus();
+            $trunks = $client->trunks();
+
+            // Re-shape SystemStatus → the pbx fields we need (subset of
+            // ActionVoipData::mapPbx) and Trunks → the status fields the
+            // tile reads.
+            $pbx = [
+                'version'       => (string) ($sys['Version'] ?? ''),
+                'activeNow'     => (int) ($sys['CallsActive'] ?? 0),
+                'capacity'      => (int) ($sys['MaxSimCalls'] ?? 0),
+                'registeredExt' => (int) ($sys['ExtensionsRegistered'] ?? 0),
+                'totalExt'      => (int) ($sys['ExtensionsTotal'] ?? 0),
+                'callsToday'    => 0,
+                'history'       => ['concur' => array_fill(0, 96, (int) ($sys['CallsActive'] ?? 0))],
+            ];
+            $trunkRows = [];
+            foreach ($trunks as $t) {
+                if (!is_array($t)) continue;
+                $isOnline = (bool) ($t['IsOnline'] ?? false);
+                $trunkRows[] = ['status' => $isOnline ? 'reg' : 'unreg'];
+            }
+            $kpis = self::shapeVoipKpis($pbx, $trunkRows);
+
+            if (function_exists('apcu_store')) {
+                apcu_store($selfKey, $kpis, 30);
+            }
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] global voip fallback: ' . $e->getMessage());
+        }
+        return $kpis;
+    }
+
+    /** @param array<string,mixed> $pbx @param list<array<string,mixed>> $trunks */
+    private static function shapeVoipKpis(array $pbx, array $trunks): array {
+        $trunkReg = $trunkUnreg = 0;
+        foreach ($trunks as $t) {
+            $st = $t['status'] ?? '';
+            if ($st === 'reg' || $st === 'dgr') $trunkReg++;
+            elseif ($st === 'unreg')            $trunkUnreg++;
+        }
+        $concur = $pbx['history']['concur'] ?? [];
+
+        $top = null;
+        if ($trunkUnreg > 0) {
+            $top = sprintf('%d SIP trunk%s unregistered on 3CX', $trunkUnreg, $trunkUnreg === 1 ? '' : 's');
+        } elseif (isset($pbx['callsToday']) && $pbx['callsToday'] > 0) {
+            $top = number_format((int) $pbx['callsToday']).' calls handled today';
+        }
+
+        return [
+            'version'      => $pbx['version'] !== '' ? (string) $pbx['version'] : null,
+            'ext_reg'      => isset($pbx['registeredExt']) ? (int) $pbx['registeredExt'] : null,
+            'ext_total'    => isset($pbx['totalExt'])      ? (int) $pbx['totalExt']      : null,
+            'calls_active' => isset($pbx['activeNow'])     ? (int) $pbx['activeNow']     : null,
+            'capacity'     => isset($pbx['capacity'])      ? (int) $pbx['capacity']      : null,
+            'trunk_reg'    => $trunkReg,
+            'trunk_total'  => count($trunks),
+            'trunk_unreg'  => $trunkUnreg,
+            'concur24h'    => is_array($concur) ? array_map('intval', array_values($concur)) : [],
+            'top'          => $top,
+        ];
+    }
+
+    private static function voipEmptyKpis(): array {
+        return [
             'version'      => null,
             'ext_reg'      => null,
             'ext_total'    => null,
@@ -831,40 +931,15 @@ class ActionGlobalData extends ActionDataBase {
             'concur24h'    => [],
             'top'          => null,
         ];
-        if (!function_exists('apcu_fetch')) return $empty;
-        $hit = apcu_fetch('tcs_dashboard:voip:v1', $ok);
-        if (!$ok || !is_array($hit)) return $empty;
+    }
 
-        $pbx    = is_array($hit['pbx']    ?? null) ? $hit['pbx']    : [];
-        $trunks = is_array($hit['trunks'] ?? null) ? $hit['trunks'] : [];
-
-        $trunkReg = $trunkUnreg = 0;
-        foreach ($trunks as $t) {
-            if (($t['status'] ?? '') === 'reg' || ($t['status'] ?? '') === 'dgr') $trunkReg++;
-            elseif (($t['status'] ?? '') === 'unreg') $trunkUnreg++;
-        }
-
-        $concur = $pbx['history']['concur'] ?? [];
-
-        $top = null;
-        if ($trunkUnreg > 0) {
-            $top = sprintf('%d SIP trunk%s unregistered on 3CX', $trunkUnreg, $trunkUnreg === 1 ? '' : 's');
-        } elseif (isset($pbx['callsToday']) && $pbx['callsToday'] > 0) {
-            $top = number_format((int) $pbx['callsToday']).' calls handled today';
-        }
-
-        return [
-            'version'      => $pbx['version']  ?? null,
-            'ext_reg'      => isset($pbx['registeredExt']) ? (int) $pbx['registeredExt'] : null,
-            'ext_total'    => isset($pbx['totalExt'])      ? (int) $pbx['totalExt']      : null,
-            'calls_active' => isset($pbx['activeNow'])     ? (int) $pbx['activeNow']     : null,
-            'capacity'     => isset($pbx['capacity'])      ? (int) $pbx['capacity']      : null,
-            'trunk_reg'    => $trunkReg,
-            'trunk_total'  => count($trunks),
-            'trunk_unreg'  => $trunkUnreg,
-            'concur24h'    => is_array($concur) ? array_map('intval', array_values($concur)) : [],
-            'top'          => $top,
-        ];
+    private static function globalMacroStatic(string $name): string {
+        $rows = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => $name],
+        ]) ?: [];
+        return trim((string) ($rows[0]['value'] ?? ''));
     }
 
     /** Average-downsample a numeric array to $n buckets (used for 96→24 spark). */
