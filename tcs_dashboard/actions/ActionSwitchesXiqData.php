@@ -40,7 +40,10 @@ use Modules\TcsDashboard\Lib\XIQFleetClient;
 class ActionSwitchesXiqData extends ActionDataBase {
 
     protected function checkInput(): bool {
-        $ret = $this->validateInput(['switchid' => 'required|string']);
+        $ret = $this->validateInput([
+            'switchid' => 'required|string',
+            'debug'    => 'string'
+        ]);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
         }
@@ -49,6 +52,7 @@ class ActionSwitchesXiqData extends ActionDataBase {
 
     protected function doAction(): void {
         $hostid = (string) $this->getInput('switchid');
+        $debug  = $this->getInput('debug', '') !== '';
 
         $payload = [
             'ok'        => false,
@@ -59,6 +63,18 @@ class ActionSwitchesXiqData extends ActionDataBase {
             'alerts'    => [],
             'rateLimit' => ['remaining' => null, 'reset' => 0],
             'ts'        => time()
+        ];
+        $diag = [
+            'serial_used'       => '',
+            'hostname_used'     => '',
+            'lookup_match_by'   => '',
+            'device_raw_keys'   => [],
+            'clients_total'     => null,
+            'clients_returned'  => null,
+            'clients_first_keys'=> [],
+            'events_total'      => null,
+            'alerts_total'      => null,
+            'errors'            => []
         ];
 
         $token = $this->xiqToken();
@@ -71,10 +87,13 @@ class ActionSwitchesXiqData extends ActionDataBase {
         $hostMeta = $this->collectHostMeta($hostid);
         if ($hostMeta === null) {
             $payload['reason'] = 'unknown_host';
+            if ($debug) $payload['_debug'] = $diag;
             $this->respond($payload);
             return;
         }
         $payload['host'] = $hostMeta;
+        $diag['serial_used']   = $hostMeta['serial'];
+        $diag['hostname_used'] = $hostMeta['hostname'];
 
         try {
             $fleet  = XIQFleetClient::fromToken($token);
@@ -85,47 +104,69 @@ class ActionSwitchesXiqData extends ActionDataBase {
             ];
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq lookup failed: ' . $e->getMessage());
+            $diag['errors'][] = 'lookup: ' . $e->getMessage();
             $payload['reason'] = 'lookup_failed';
+            if ($debug) $payload['_debug'] = $diag;
             $this->respond($payload);
             return;
         }
 
         if (!$device || empty($device['id'])) {
             $payload['reason'] = 'not_in_xiq';
+            if ($debug) $payload['_debug'] = $diag;
             $this->respond($payload);
             return;
         }
 
         $payload['device'] = $this->shapeDevice($device);
         $deviceId = (int) $device['id'];
+        $diag['device_raw_keys'] = array_keys($device);
+        $diag['lookup_match_by'] = ($hostMeta['serial'] !== '' && isset($device['serial_number']) && (string) $device['serial_number'] === $hostMeta['serial'])
+            ? 'serial'
+            : 'hostname';
 
-        // Clients + events use the per-device XIQClient since it already
-        // normalises the shapes the dashboard wants. The two calls are
-        // independent — order them so the cheaper /alarms scan doesn't sit
-        // behind /clients on a busy switch.
-        $client = XIQClient::fromToken($token);
+        // Clients: pull the raw response so we can see what XIQ actually
+        // returned for this switch — getClients() normalises into the AP
+        // shape and silently drops rows missing `mac_address`/`mac`, which
+        // can hide every wired client if the field name differs.
+        try {
+            $rawClients = $fleet->getJson('/clients/active', [
+                'deviceIds' => $deviceId,
+                'views'     => 'FULL',
+                'page'      => 1,
+                'limit'     => 100
+            ]);
+            $rows = $rawClients['data'] ?? (is_array($rawClients) && array_values($rawClients) === $rawClients ? $rawClients : []);
+            $diag['clients_total']    = (int) ($rawClients['total_count'] ?? count(is_array($rows) ? $rows : []));
+            $diag['clients_returned'] = is_array($rows) ? count($rows) : 0;
+            if (is_array($rows) && $rows) {
+                $diag['clients_first_keys'] = array_keys($rows[0]);
+                if ($debug) $diag['clients_first_row'] = $rows[0];
+            }
+            $payload['clients'] = $this->shapeClientsRaw(is_array($rows) ? $rows : []);
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] xiq clients failed: ' . $e->getMessage());
+            $diag['errors'][] = 'clients: ' . $e->getMessage();
+        }
 
         try {
-            $payload['events'] = $client->getDeviceAlarms($deviceId, 100, 168);
+            $payload['events'] = XIQClient::fromToken($token)->getDeviceAlarms($deviceId, 100, 168);
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq alarms failed: ' . $e->getMessage());
+            $diag['errors'][] = 'events: ' . $e->getMessage();
         }
-
-        try {
-            $clients = $client->getClients($deviceId);
-            $payload['clients'] = array_map(fn($c) => $this->shapeClient($c), $clients);
-        } catch (\Throwable $e) {
-            // Many switches report zero wireless clients — non-fatal.
-            error_log('[tcs_dashboard] xiq clients failed: ' . $e->getMessage());
-        }
+        $diag['events_total'] = count($payload['events']);
 
         try {
             $payload['alerts'] = $this->collectAlerts($fleet, $hostMeta['hostname']);
+            $diag['alerts_total'] = count($payload['alerts']);
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq alerts failed: ' . $e->getMessage());
+            $diag['errors'][] = 'alerts: ' . $e->getMessage();
         }
 
         $payload['ok'] = true;
+        if ($debug) $payload['_debug'] = $diag;
         $this->respond($payload);
     }
 
@@ -203,6 +244,60 @@ class ActionSwitchesXiqData extends ActionDataBase {
             'site_id'       => (int)    $first($d, ['site_id', 'siteId'], 0),
             'location'      => (string) $first($d, ['location', 'location_name', 'locationName'])
         ];
+    }
+
+    /** Project raw /clients/active rows into the slim shape TabXiq renders.
+     *  Tolerant of XIQ field-name churn — wired clients on a switch may
+     *  use `client_mac` / `wired_mac` instead of `mac_address`, and we
+     *  must not silently drop rows just because the wireless field is
+     *  missing. Only rows with NO MAC under any alias are skipped.
+     *
+     *  @param array<int, array<string,mixed>> $rows
+     *  @return array<int, array<string,mixed>>
+     */
+    private function shapeClientsRaw(array $rows): array {
+        $first = function (array $r, array $keys, $default = '') {
+            foreach ($keys as $k) {
+                if (isset($r[$k]) && $r[$k] !== '' && $r[$k] !== null) return $r[$k];
+            }
+            return $default;
+        };
+        $out = [];
+        foreach ($rows as $c) {
+            if (!is_array($c)) continue;
+            $macRaw = (string) $first($c, ['mac_address', 'mac', 'client_mac', 'station_mac', 'wired_mac', 'macAddress', 'clientMac']);
+            if ($macRaw === '') continue;
+            $mac = strpos($macRaw, ':') === false ? XIQClient::macInsertColons($macRaw) : $macRaw;
+            $connType = (int) $first($c, ['client_connection_type', 'clientConnectionType', 'connection_type'], 0);
+            $band = (string) $first($c, ['band', 'frequency']);
+            if ($band === '') {
+                $proto = strtolower((string) $first($c, ['mac_protocol', 'macProtocol', 'protocol']));
+                if (strpos($proto, '2.4') !== false || strpos($proto, '2_4') !== false) $band = '2.4G';
+                elseif (strpos($proto, '5') !== false) $band = '5G';
+                elseif (strpos($proto, '6') !== false) $band = '6G';
+            }
+            $out[] = [
+                'mac'      => $mac,
+                'host'     => (string) $first($c, ['host_name', 'hostname', 'device_name', 'hostName']),
+                'ip'       => (string) $first($c, ['ip_address', 'ipAddress', 'ip']),
+                'user'     => (string) $first($c, ['user_name', 'username', 'userName']),
+                'role'     => (string) $first($c, ['user_profile_name', 'user_profile', 'userProfileName', 'userProfile']),
+                'ssid'     => (string) $first($c, ['ssid']),
+                'vlan'     => (int)    $first($c, ['vlan', 'vlan_id', 'vlanId'], 0),
+                'rssi'     => (int)    $first($c, ['rssi'], 0),
+                'snr'      => (int)    $first($c, ['snr'], 0),
+                'health'   => (int)    $first($c, ['client_health_status', 'client_health', 'clientHealthStatus'], 0),
+                'duration' => (int)    $first($c, ['connection_duration', 'connected_seconds', 'connectionDuration'], 0),
+                'os'       => trim(((string) $first($c, ['os_type', 'osType', 'os']))
+                                  . ' '
+                                  . ((string) $first($c, ['os_version', 'osVersion']))),
+                'protocol' => (string) $first($c, ['mac_protocol', 'macProtocol', 'protocol']),
+                'band'     => $band,
+                'wired'    => $connType === 2,
+                'port'     => (string) $first($c, ['ifname', 'port_name', 'switch_port', 'switchPort'])
+            ];
+        }
+        return $out;
     }
 
     /** Slim a normalised XIQClient::getClients() row down to the columns the
