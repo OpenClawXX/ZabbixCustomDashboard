@@ -68,12 +68,17 @@ class ActionProblemsData extends ActionDataBase {
         $search       = trim($filters['search']);
         $ack_filter   = $filters['ack'];
 
+        // High explicit limit instead of leaving it to Zabbix's default
+        // search.limit (typically 1000). The Problems page is the operator's
+        // master list — every open problem must be present, not just the
+        // newest N. Real estates rarely exceed a few thousand simultaneous
+        // problems; 10k is comfortable headroom without unbounded growth.
         $params = [
             'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged', 'r_eventid'],
             'recent'    => false,
             'sortfield' => ['eventid'],
             'sortorder' => 'DESC',
-            'limit'     => 500
+            'limit'     => 10000
         ];
         if ($group_filter) {
             $params['groupids'] = $group_filter;
@@ -134,7 +139,9 @@ class ActionProblemsData extends ActionDataBase {
         }
 
         return [
-            'problems' => array_slice($rows, 0, 200),
+            // No slice — the page is meant to be the comprehensive
+            // open-problems list. Filters narrow it; the response shouldn't.
+            'problems' => $rows,
             'metrics'  => $this->buildMetrics($rows),
             'groups'   => array_map(fn($g) => ['id' => $g['groupid'], 'name' => $g['name']], $groups),
             'filters'  => $filters,
