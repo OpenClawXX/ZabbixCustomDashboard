@@ -1416,33 +1416,41 @@ const TabXiq = ({
     }
   }, "Clients"), /*#__PURE__*/React.createElement("span", {
     className: "h-meta mono"
-  }, clients.length)), clients.length === 0 ? notes.clients ? /*#__PURE__*/React.createElement(InfoPill, null, notes.clients) : /*#__PURE__*/React.createElement("div", {
+  }, clients.length)), clients.length === 0 ? notes.clients ? /*#__PURE__*/React.createElement(InfoPill, {
+    kind: "warn"
+  }, notes.clients) : /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "10px 4px",
       color: "var(--muted)",
       fontSize: 11
     }
-  }, "No active clients reported by XIQ.") : /*#__PURE__*/React.createElement("table", {
-    className: "tbl",
-    style: {
-      width: "100%",
-      fontSize: 11
-    }
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, "SSID"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS"), /*#__PURE__*/React.createElement("th", null, "Conn"))), /*#__PURE__*/React.createElement("tbody", null, clients.slice(0, 200).map(c => /*#__PURE__*/React.createElement("tr", {
-    key: c.mac + ":" + c.duration
-  }, /*#__PURE__*/React.createElement("td", {
-    className: "mono"
-  }, c.mac || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, c.host || "—"), /*#__PURE__*/React.createElement("div", {
-    className: "mono",
-    style: {
-      color: "var(--muted)",
-      fontSize: 10
-    }
-  }, c.ip || "")), /*#__PURE__*/React.createElement("td", null, c.user || "—"), /*#__PURE__*/React.createElement("td", null, c.ssid || "—"), /*#__PURE__*/React.createElement("td", {
-    className: "mono"
-  }, c.vlan || "—"), /*#__PURE__*/React.createElement("td", null, c.os || "—"), /*#__PURE__*/React.createElement("td", {
-    className: "mono"
-  }, fmtAge(c.duration))))))), /*#__PURE__*/React.createElement("div", {
+  }, "No active clients reported by XIQ.") : (() => {
+    // When any wired clients are present, swap the SSID column
+    // for a Port column — switches don't broadcast SSIDs, but
+    // the connecting port is the most useful join key.
+    const anyWired = clients.some(c => c.wired);
+    return /*#__PURE__*/React.createElement("table", {
+      className: "tbl",
+      style: {
+        width: "100%",
+        fontSize: 11
+      }
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, anyWired ? "Port" : "SSID"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS"), /*#__PURE__*/React.createElement("th", null, anyWired ? "Profile" : "Conn"))), /*#__PURE__*/React.createElement("tbody", null, clients.slice(0, 200).map(c => /*#__PURE__*/React.createElement("tr", {
+      key: (c.mac || "?") + ":" + (c.wired ? c.port || "" : c.duration)
+    }, /*#__PURE__*/React.createElement("td", {
+      className: "mono"
+    }, c.mac || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, c.host || "—"), /*#__PURE__*/React.createElement("div", {
+      className: "mono",
+      style: {
+        color: "var(--muted)",
+        fontSize: 10
+      }
+    }, c.ip || "")), /*#__PURE__*/React.createElement("td", null, c.user || "—"), /*#__PURE__*/React.createElement("td", {
+      className: "mono"
+    }, c.wired ? c.port || "—" : c.ssid || "—"), /*#__PURE__*/React.createElement("td", {
+      className: "mono"
+    }, c.vlan || "—"), /*#__PURE__*/React.createElement("td", null, c.os || "—"), /*#__PURE__*/React.createElement("td", null, c.wired ? c.role || "—" : fmtAge(c.duration))))));
+  })()), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }

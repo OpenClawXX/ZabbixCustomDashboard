@@ -1063,39 +1063,45 @@ const TabXiq = ({ host }) => {
               </div>
               {clients.length === 0 ? (
                 notes.clients
-                  ? <InfoPill>{notes.clients}</InfoPill>
+                  ? <InfoPill kind="warn">{notes.clients}</InfoPill>
                   : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No active clients reported by XIQ.</div>
-              ) : (
-                <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
-                  <thead>
-                    <tr>
-                      <th>MAC</th>
-                      <th>Host / IP</th>
-                      <th>User</th>
-                      <th>SSID</th>
-                      <th>VLAN</th>
-                      <th>OS</th>
-                      <th>Conn</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {clients.slice(0, 200).map(c => (
-                      <tr key={c.mac + ":" + c.duration}>
-                        <td className="mono">{c.mac || "—"}</td>
-                        <td>
-                          <div>{c.host || "—"}</div>
-                          <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{c.ip || ""}</div>
-                        </td>
-                        <td>{c.user || "—"}</td>
-                        <td>{c.ssid || "—"}</td>
-                        <td className="mono">{c.vlan || "—"}</td>
-                        <td>{c.os || "—"}</td>
-                        <td className="mono">{fmtAge(c.duration)}</td>
+              ) : (() => {
+                // When any wired clients are present, swap the SSID column
+                // for a Port column — switches don't broadcast SSIDs, but
+                // the connecting port is the most useful join key.
+                const anyWired = clients.some(c => c.wired);
+                return (
+                  <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
+                    <thead>
+                      <tr>
+                        <th>MAC</th>
+                        <th>Host / IP</th>
+                        <th>User</th>
+                        <th>{anyWired ? "Port" : "SSID"}</th>
+                        <th>VLAN</th>
+                        <th>OS</th>
+                        <th>{anyWired ? "Profile" : "Conn"}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                    </thead>
+                    <tbody>
+                      {clients.slice(0, 200).map(c => (
+                        <tr key={(c.mac || "?") + ":" + (c.wired ? (c.port || "") : c.duration)}>
+                          <td className="mono">{c.mac || "—"}</td>
+                          <td>
+                            <div>{c.host || "—"}</div>
+                            <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{c.ip || ""}</div>
+                          </td>
+                          <td>{c.user || "—"}</td>
+                          <td className="mono">{c.wired ? (c.port || "—") : (c.ssid || "—")}</td>
+                          <td className="mono">{c.vlan || "—"}</td>
+                          <td>{c.os || "—"}</td>
+                          <td>{c.wired ? (c.role || "—") : fmtAge(c.duration)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                );
+              })()}
             </div>
 
             {/* ── Events (per-device alarm log) ─────────────────────── */}

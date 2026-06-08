@@ -128,14 +128,19 @@ class ActionSwitchesXiqData extends ActionDataBase {
         $isSwitch = stripos((string) ($device['device_function'] ?? ''), 'switch') !== false;
         $payload['notes'] = [];
 
-        // Clients: pull the raw response so we can see what XIQ actually
-        // returned. Note that /clients/active is wireless-association
-        // centric — for switches it nearly always returns 0 (XIQ's wired
-        // FDB / station list isn't exposed via the public REST API). We
-        // still issue the call so wireless devices (the original AP-detail
-        // use case) keep working, and we annotate the empty result for
-        // switches so the UI shows a clear explanation rather than just
-        // an empty table.
+        // Clients. Two endpoints are in play:
+        //   • /clients/active (main XIQ API) — wireless-association centric.
+        //     Returns the AP-attached station list. Used for wireless
+        //     devices (the original AP-detail use case).
+        //   • Platform ONE /wired/grid — the wired-client equivalent, on a
+        //     separate base URL with its own token scope. This is the ONLY
+        //     public endpoint that returns the switch-attached station
+        //     list, and it's required for switches (XIQ's wired FDB is
+        //     not exposed on /clients/active even though the console
+        //     shows the data).
+        // We always try /clients/active first since it works for both APs
+        // and returns 0 cheaply for switches, then for switches fall back
+        // to /wired/grid to fill in the wired stations.
         try {
             $rawClients = $fleet->getJson('/clients/active', [
                 'deviceIds' => $deviceId,
@@ -151,12 +156,28 @@ class ActionSwitchesXiqData extends ActionDataBase {
                 if ($debug) $diag['clients_first_row'] = $rows[0];
             }
             $payload['clients'] = $this->shapeClientsRaw(is_array($rows) ? $rows : []);
-            if ($isSwitch && !$payload['clients']) {
-                $payload['notes']['clients'] = 'XIQ does not expose wired client lists for switches via /clients/active. The switch FDB is shown on the Port Status tab (sourced from Zabbix).';
-            }
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq clients failed: ' . $e->getMessage());
             $diag['errors'][] = 'clients: ' . $e->getMessage();
+        }
+
+        if ($isSwitch) {
+            try {
+                $wired = $fleet->getWiredClientsForDevice($deviceId, 100, 5);
+                $diag['wired_clients_total']    = count($wired);
+                $diag['wired_clients_returned'] = count($wired);
+                if ($wired) $diag['wired_first_keys'] = array_keys($wired[0]);
+                if ($debug && $wired) $diag['wired_first_row'] = $wired[0];
+                $payload['clients'] = array_merge($payload['clients'], $this->shapeWiredClients($wired));
+            } catch (\Throwable $e) {
+                $msg = $e->getMessage();
+                if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
+                    $payload['notes']['clients'] = 'XIQ returned 403 on /wired/grid (Platform ONE Client service). The API token is missing the wired-client scope — add it under XIQ Administration → API Access Tokens.';
+                } else {
+                    error_log('[tcs_dashboard] xiq wired clients failed: ' . $msg);
+                }
+                $diag['errors'][] = 'wired_clients: ' . $msg;
+            }
         }
 
         // Events: widen the window to 30 days and paginate up to 5 pages
@@ -317,6 +338,40 @@ class ActionSwitchesXiqData extends ActionDataBase {
                 'band'     => $band,
                 'wired'    => $connType === 2,
                 'port'     => (string) $first($c, ['ifname', 'port_name', 'switch_port', 'switchPort'])
+            ];
+        }
+        return $out;
+    }
+
+    /** Project Platform ONE /wired/grid rows into the same slim shape the
+     *  Clients sub-table renders. Different field names than /clients/active
+     *  — see the WiredDataInner schema in the spec. */
+    private function shapeWiredClients(array $rows): array {
+        $out = [];
+        foreach ($rows as $c) {
+            if (!is_array($c)) continue;
+            $macRaw = (string) ($c['mac'] ?? $c['client_mac'] ?? '');
+            if ($macRaw === '') continue;
+            $mac = strpos($macRaw, ':') === false ? XIQClient::macInsertColons($macRaw) : $macRaw;
+            $out[] = [
+                'mac'      => $mac,
+                'host'     => (string) ($c['client_hostname'] ?? ''),
+                'ip'       => (string) ($c['client_ip'] ?? $c['ipv4'] ?? ''),
+                'user'     => (string) ($c['username'] ?? ''),
+                'role'     => (string) ($c['instant_port_profile'] ?? ''),
+                'ssid'     => '',
+                'vlan'     => (int)    ($c['vlan'] ?? 0),
+                'rssi'     => 0,
+                'snr'      => 0,
+                'health'   => 0,
+                'duration' => 0,
+                'os'       => (string) ($c['operating_system'] ?? ''),
+                'protocol' => '',
+                'band'     => '',
+                'wired'    => true,
+                'port'     => (string) ($c['port_number'] ?? ''),
+                'switch'   => (string) ($c['switch_name'] ?? ''),
+                'status'   => strtoupper((string) ($c['connection_status'] ?? 'CONNECTED'))
             ];
         }
         return $out;
