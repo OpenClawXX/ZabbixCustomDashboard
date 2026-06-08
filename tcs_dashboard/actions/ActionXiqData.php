@@ -295,12 +295,20 @@ class ActionXiqData extends ActionDataBase {
             $version  = (string) ($extra['version']  ?? '');
             $clients  = isset($extra['clients']) && $extra['clients'] !== '' ? (int) $extra['clients'] : 0;
 
-            // State: prefer xiq.ap.connected (XIQ's view), fall back to
-            // interface availability (Zabbix's view).
+            // State: prefer xiq.ap.connected (XIQ's view). Accept the common
+            // truthy encodings — Zabbix items occasionally land as "true" /
+            // "Connected" instead of "1" depending on the template's
+            // preprocessing. Empty / missing means XIQ hasn't reported yet:
+            // do NOT fall through to interface availability, since per-AP
+            // hosts are placeholders for XIQ data and have no real polled
+            // interface — their availability flag would falsely read as
+            // offline. Treat as unknown (idle) instead.
             if (isset($extra['connected']) && $extra['connected'] !== '') {
-                $state = ((int) $extra['connected'] === 1) ? 'online' : 'offline';
+                $raw      = strtolower(trim((string) $extra['connected']));
+                $isOnline = in_array($raw, ['1', 'true', 'connected', 'online'], true);
+                $state    = $isOnline ? 'online' : 'offline';
             } else {
-                $state = self::hostReachState($h);
+                $state = 'idle';
             }
 
             $devices[(string) $hid] = [
