@@ -125,10 +125,17 @@ class ActionSwitchesXiqData extends ActionDataBase {
             ? 'serial'
             : 'hostname';
 
+        $isSwitch = stripos((string) ($device['device_function'] ?? ''), 'switch') !== false;
+        $payload['notes'] = [];
+
         // Clients: pull the raw response so we can see what XIQ actually
-        // returned for this switch — getClients() normalises into the AP
-        // shape and silently drops rows missing `mac_address`/`mac`, which
-        // can hide every wired client if the field name differs.
+        // returned. Note that /clients/active is wireless-association
+        // centric — for switches it nearly always returns 0 (XIQ's wired
+        // FDB / station list isn't exposed via the public REST API). We
+        // still issue the call so wireless devices (the original AP-detail
+        // use case) keep working, and we annotate the empty result for
+        // switches so the UI shows a clear explanation rather than just
+        // an empty table.
         try {
             $rawClients = $fleet->getJson('/clients/active', [
                 'deviceIds' => $deviceId,
@@ -144,13 +151,20 @@ class ActionSwitchesXiqData extends ActionDataBase {
                 if ($debug) $diag['clients_first_row'] = $rows[0];
             }
             $payload['clients'] = $this->shapeClientsRaw(is_array($rows) ? $rows : []);
+            if ($isSwitch && !$payload['clients']) {
+                $payload['notes']['clients'] = 'XIQ does not expose wired client lists for switches via /clients/active. The switch FDB is shown on the Port Status tab (sourced from Zabbix).';
+            }
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq clients failed: ' . $e->getMessage());
             $diag['errors'][] = 'clients: ' . $e->getMessage();
         }
 
+        // Events: widen the window to 30 days and paginate up to 5 pages
+        // (500 alarms) so we don't drop older entries. Most switches
+        // generate a handful of events per day at most; 500 is a generous
+        // ceiling without dragging the request into multi-second territory.
         try {
-            $payload['events'] = XIQClient::fromToken($token)->getDeviceAlarms($deviceId, 100, 168);
+            $payload['events'] = $this->collectEventsPaged($token, $deviceId, /*windowHours*/ 720, /*pages*/ 5);
         } catch (\Throwable $e) {
             error_log('[tcs_dashboard] xiq alarms failed: ' . $e->getMessage());
             $diag['errors'][] = 'events: ' . $e->getMessage();
@@ -161,8 +175,16 @@ class ActionSwitchesXiqData extends ActionDataBase {
             $payload['alerts'] = $this->collectAlerts($fleet, $hostMeta['hostname']);
             $diag['alerts_total'] = count($payload['alerts']);
         } catch (\Throwable $e) {
-            error_log('[tcs_dashboard] xiq alerts failed: ' . $e->getMessage());
-            $diag['errors'][] = 'alerts: ' . $e->getMessage();
+            $msg = $e->getMessage();
+            // /alerts is gated by the "Alert Read" token scope. Surface a
+            // user-actionable note instead of just an error string so the
+            // tab can explain what's missing.
+            if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
+                $payload['notes']['alerts'] = 'XIQ returned 403 on /alerts — the API token is missing the "Alert" read scope. Edit the token under XIQ Administration → API Access Tokens.';
+            } else {
+                error_log('[tcs_dashboard] xiq alerts failed: ' . $msg);
+            }
+            $diag['errors'][] = 'alerts: ' . $msg;
         }
 
         $payload['ok'] = true;
@@ -319,6 +341,56 @@ class ActionSwitchesXiqData extends ActionDataBase {
             'protocol' => (string) ($c['protocol'] ?? ''),
             'band'     => (string) ($c['band']     ?? '')
         ];
+    }
+
+    /**
+     * Paginate /devices/{id}/alarms across multiple pages so we don't drop
+     * entries past the first 100. Each call goes through XIQClient so the
+     * row shape stays compatible with the rest of the dashboard.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function collectEventsPaged(string $token, int $deviceId, int $windowHours, int $maxPages): array {
+        $client = XIQClient::fromToken($token);
+        // XIQClient's helper handles page 1; if it returned a full 100 we
+        // walk forward until either an empty page or maxPages.
+        $page1 = $client->getDeviceAlarms($deviceId, 100, $windowHours);
+        if (count($page1) < 100) return $page1;
+
+        $all   = $page1;
+        $endMs = (int) (microtime(true) * 1000);
+        $startMs = $endMs - ($windowHours * 3600 * 1000);
+        for ($p = 2; $p <= $maxPages; $p++) {
+            $raw = XIQFleetClient::fromToken($token)->getJson("/devices/{$deviceId}/alarms", [
+                'page'      => $p,
+                'limit'     => 100,
+                'startTime' => $startMs,
+                'endTime'   => $endMs
+            ]);
+            $rows = $raw['data'] ?? (is_array($raw) && array_values($raw) === $raw ? $raw : []);
+            if (!is_array($rows) || !$rows) break;
+            foreach ($rows as $r) {
+                if (!is_array($r)) continue;
+                $tsRaw = $r['raised_time'] ?? $r['event_time'] ?? $r['created_time'] ?? $r['timestamp'] ?? 0;
+                $ts = is_numeric($tsRaw) ? (int) $tsRaw : (int) strtotime((string) $tsRaw);
+                if ($ts > 9999999999) $ts = intdiv($ts, 1000);
+                $sevRaw = strtoupper((string) ($r['severity'] ?? ''));
+                $sevMap = ['CRITICAL'=>'disaster','EMERGENCY'=>'disaster','ALERT'=>'disaster',
+                           'MAJOR'=>'high','ERROR'=>'high','MINOR'=>'warning','WARNING'=>'warning',
+                           'NOTICE'=>'info','INFO'=>'info','INFORM'=>'info'];
+                $all[] = [
+                    'id'       => (string) ($r['id'] ?? $r['alarm_id'] ?? ('xiq-'.$ts.'-'.md5((string) ($r['description'] ?? '')))),
+                    'message'  => (string) ($r['description'] ?? $r['summary'] ?? $r['name'] ?? 'XIQ alarm'),
+                    'severity' => $sevMap[$sevRaw] ?? 'warning',
+                    'clock'    => $ts > 0 ? $ts : time(),
+                    'value'    => 1,
+                    'category' => (string) ($r['category'] ?? ''),
+                    'raw'      => $r
+                ];
+            }
+            if (count($rows) < 100) break;
+        }
+        return $all;
     }
 
     /**

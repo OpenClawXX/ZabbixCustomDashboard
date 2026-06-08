@@ -968,6 +968,25 @@ const TabXiq = ({ host }) => {
   const clients = Array.isArray(state.clients) ? state.clients : [];
   const events  = Array.isArray(state.events)  ? state.events  : [];
   const alerts  = Array.isArray(state.alerts)  ? state.alerts  : [];
+  const notes   = (state.notes && typeof state.notes === "object") ? state.notes : {};
+
+  // Pill rendered in place of an empty table, explaining why XIQ has
+  // nothing to show. Used for switches against /clients/active (XIQ API
+  // limitation) and /alerts (token scope).
+  const InfoPill = ({ children, kind }) => (
+    <div style={{
+      padding: "10px 12px",
+      margin: "6px 0",
+      fontSize: 11,
+      lineHeight: 1.5,
+      color: kind === "warn" ? "var(--warn, #f5b300)" : "var(--muted)",
+      background: kind === "warn" ? "rgba(245,179,0,0.08)" : "var(--bg-2)",
+      border: "1px solid " + (kind === "warn" ? "rgba(245,179,0,0.30)" : "var(--line)"),
+      borderRadius: 6
+    }}>
+      {children}
+    </div>
+  );
 
   return (
     <div className="card" style={{ flex: 1 }}>
@@ -1043,7 +1062,9 @@ const TabXiq = ({ host }) => {
                 <span className="h-meta mono">{clients.length}</span>
               </div>
               {clients.length === 0 ? (
-                <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No active clients reported by XIQ.</div>
+                notes.clients
+                  ? <InfoPill>{notes.clients}</InfoPill>
+                  : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No active clients reported by XIQ.</div>
               ) : (
                 <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
                   <thead>
@@ -1081,10 +1102,10 @@ const TabXiq = ({ host }) => {
             <div style={{ marginBottom: 14 }}>
               <div className="card-h" style={{ padding: "4px 0", borderBottom: "1px solid var(--line)", marginBottom: 6 }}>
                 <h4 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>Events</h4>
-                <span className="h-meta mono">{events.length} · last 7d</span>
+                <span className="h-meta mono">{events.length} · last 30d</span>
               </div>
               {events.length === 0 ? (
-                <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No device events in the last 7 days.</div>
+                <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No device events in the last 30 days.</div>
               ) : (
                 <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
                   <thead>
@@ -1116,7 +1137,9 @@ const TabXiq = ({ host }) => {
                 <span className="h-meta mono">{alerts.length} · last 7d</span>
               </div>
               {alerts.length === 0 ? (
-                <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No XIQ alerts reference this host.</div>
+                notes.alerts
+                  ? <InfoPill kind="warn">{notes.alerts}</InfoPill>
+                  : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No XIQ alerts reference this host.</div>
               ) : (
                 <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
                   <thead>

@@ -1297,6 +1297,26 @@ const TabXiq = ({
   const clients = Array.isArray(state.clients) ? state.clients : [];
   const events = Array.isArray(state.events) ? state.events : [];
   const alerts = Array.isArray(state.alerts) ? state.alerts : [];
+  const notes = state.notes && typeof state.notes === "object" ? state.notes : {};
+
+  // Pill rendered in place of an empty table, explaining why XIQ has
+  // nothing to show. Used for switches against /clients/active (XIQ API
+  // limitation) and /alerts (token scope).
+  const InfoPill = ({
+    children,
+    kind
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 12px",
+      margin: "6px 0",
+      fontSize: 11,
+      lineHeight: 1.5,
+      color: kind === "warn" ? "var(--warn, #f5b300)" : "var(--muted)",
+      background: kind === "warn" ? "rgba(245,179,0,0.08)" : "var(--bg-2)",
+      border: "1px solid " + (kind === "warn" ? "rgba(245,179,0,0.30)" : "var(--line)"),
+      borderRadius: 6
+    }
+  }, children);
   return /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
@@ -1396,7 +1416,7 @@ const TabXiq = ({
     }
   }, "Clients"), /*#__PURE__*/React.createElement("span", {
     className: "h-meta mono"
-  }, clients.length)), clients.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, clients.length)), clients.length === 0 ? notes.clients ? /*#__PURE__*/React.createElement(InfoPill, null, notes.clients) : /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "10px 4px",
       color: "var(--muted)",
@@ -1442,13 +1462,13 @@ const TabXiq = ({
     }
   }, "Events"), /*#__PURE__*/React.createElement("span", {
     className: "h-meta mono"
-  }, events.length, " \xB7 last 7d")), events.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, events.length, " \xB7 last 30d")), events.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "10px 4px",
       color: "var(--muted)",
       fontSize: 11
     }
-  }, "No device events in the last 7 days.") : /*#__PURE__*/React.createElement("table", {
+  }, "No device events in the last 30 days.") : /*#__PURE__*/React.createElement("table", {
     className: "tbl",
     style: {
       width: "100%",
@@ -1492,7 +1512,9 @@ const TabXiq = ({
     }
   }, "Alerts"), /*#__PURE__*/React.createElement("span", {
     className: "h-meta mono"
-  }, alerts.length, " \xB7 last 7d")), alerts.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, alerts.length, " \xB7 last 7d")), alerts.length === 0 ? notes.alerts ? /*#__PURE__*/React.createElement(InfoPill, {
+    kind: "warn"
+  }, notes.alerts) : /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "10px 4px",
       color: "var(--muted)",
