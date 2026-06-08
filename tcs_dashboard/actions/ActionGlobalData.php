@@ -71,7 +71,8 @@ class ActionGlobalData extends ActionDataBase {
     protected function checkInput(): bool {
         $ret = $this->validateInput([
             'range' => 'string',
-            'debug' => 'string'
+            'debug' => 'string',
+            'stage' => 'string'
         ]);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
@@ -80,7 +81,13 @@ class ActionGlobalData extends ActionDataBase {
     }
 
     protected function doAction(): void {
-        $payload = $this->collect($this->getInput('range', '24h'));
+        // Staged loading lets the global dashboard render instantly and
+        // fill in sections progressively. "core" is fast Zabbix-only data
+        // (totals/sites/triggers/events); "enrich" is the slow path —
+        // external 3CX HTTP call + wide Item.get scans for XIQ/Milestone
+        // KPIs + the 24h timeline. Default keeps full-payload back-compat.
+        $stage = $this->getInput('stage', 'all');
+        $payload = $this->collect($this->getInput('range', '24h'), $stage);
         if ($this->getInput('debug', '') !== '') {
             $payload['_debug'] = $this->lastDebug;
         }
@@ -94,8 +101,10 @@ class ActionGlobalData extends ActionDataBase {
      * Build the full payload. Called by ActionGlobal::doAction() too, so
      * the first paint uses the same data shape as the polled refresh.
      */
-    public function collect(string $range = '24h'): array {
+    public function collect(string $range = '24h', string $stage = 'all'): array {
         $window_secs = self::RANGES[$range] ?? self::RANGES['24h'];
+        $want_core   = $stage === 'all' || $stage === 'core';
+        $want_enrich = $stage === 'all' || $stage === 'enrich';
 
         // Short-lived snapshot cache. The global dashboard polls this
         // controller every few seconds across many open tabs; replaying
@@ -104,7 +113,7 @@ class ActionGlobalData extends ActionDataBase {
         // staleness but long enough to coalesce a thundering herd.
         $cached = $this->loadCachedPayload($range);
         if ($cached !== null) {
-            return $cached;
+            return $this->filterStage($cached, $stage);
         }
 
         $hosts = $this->safeGet(fn() => API::Host()->get([
@@ -168,15 +177,20 @@ class ActionGlobalData extends ActionDataBase {
             fn($p) => empty($p['r_eventid']) || (int) $p['r_eventid'] === 0
         ));
 
-        $events_24h = $this->safeGet(fn() => API::Event()->get([
-            'output'    => ['eventid', 'clock', 'value'],
-            'source'    => EVENT_SOURCE_TRIGGERS,
-            'object'    => EVENT_OBJECT_TRIGGER,
-            'time_from' => time() - $window_secs,
-            'sortfield' => ['eventid'],
-            'sortorder' => 'ASC',
-            'limit'     => 10000
-        ]));
+        // The 24h-window event fetch can return ~10k rows and is the
+        // single slowest Zabbix call here — only pay for it when we're
+        // actually building the timeline (enrich stage / full payload).
+        $events_24h = $want_enrich
+            ? $this->safeGet(fn() => API::Event()->get([
+                'output'    => ['eventid', 'clock', 'value'],
+                'source'    => EVENT_SOURCE_TRIGGERS,
+                'object'    => EVENT_OBJECT_TRIGGER,
+                'time_from' => time() - $window_secs,
+                'sortfield' => ['eventid'],
+                'sortorder' => 'ASC',
+                'limit'     => 10000
+            ]))
+            : [];
 
         $recent_events = $this->safeGet(fn() => API::Event()->get([
             'output'    => ['eventid', 'objectid', 'name', 'severity', 'clock', 'value', 'r_eventid'],
@@ -200,17 +214,45 @@ class ActionGlobalData extends ActionDataBase {
         unset($p, $e);
 
         $payload = [
-            'totals'   => $this->buildTotals($hosts, $problems, $proxies),
-            'sites'    => $this->buildSites($hosts, $problems),
-            'domains'  => $this->buildDomains($hosts, $problems),
-            'triggers' => $this->buildTriggers($problems),
-            'events'   => $this->buildEvents($recent_events),
-            'timeline' => $this->buildTimeline($events_24h, $window_secs),
-            'range'    => $range,
-            'ts'       => time()
+            'range' => $range,
+            'ts'    => time(),
+            'stage' => $stage
         ];
-        $this->storeCachedPayload($range, $payload);
+        if ($want_core) {
+            // Cheap pure-Zabbix derivations off the already-fetched
+            // hosts/problems arrays. No external calls here.
+            $payload['totals']   = $this->buildTotals($hosts, $problems, $proxies);
+            $payload['sites']    = $this->buildSites($hosts, $problems);
+            $payload['triggers'] = $this->buildTriggers($problems);
+            $payload['events']   = $this->buildEvents($recent_events);
+        }
+        if ($want_enrich) {
+            // Slow path — buildDomains hits XIQ items, Milestone items,
+            // and 3CX HTTP. buildTimeline walks the 10k-row event scan.
+            $payload['domains']  = $this->buildDomains($hosts, $problems);
+            $payload['timeline'] = $this->buildTimeline($events_24h, $window_secs);
+        }
+        // Only persist the cached snapshot when we computed everything —
+        // otherwise a "core" request would poison the cache and starve
+        // subsequent "enrich" requests of the data they actually need.
+        if ($stage === 'all') {
+            $this->storeCachedPayload($range, $payload);
+        }
         return $payload;
+    }
+
+    /** Pluck the parts of a (possibly fully-populated) cached payload that
+     *  match the requested stage. */
+    private function filterStage(array $payload, string $stage): array {
+        if ($stage === 'all') return $payload;
+        $core   = ['totals', 'sites', 'triggers', 'events'];
+        $enrich = ['domains', 'timeline'];
+        $keep   = $stage === 'core' ? $core : ($stage === 'enrich' ? $enrich : []);
+        $out = ['range' => $payload['range'] ?? '24h', 'ts' => $payload['ts'] ?? time(), 'stage' => $stage];
+        foreach ($keep as $k) {
+            if (array_key_exists($k, $payload)) $out[$k] = $payload[$k];
+        }
+        return $out;
     }
 
     /** Snapshot cache TTL in seconds — see collect(). */

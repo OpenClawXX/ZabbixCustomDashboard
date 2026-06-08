@@ -8,6 +8,15 @@
 // of mock. Falls back to the synthetic shapes if the boot payload is missing,
 // so loading order accidents render dashes rather than crashing.
 //
+// Staged loading: ActionGlobal no longer ships data inline. The shell paints
+// instantly; we fire two parallel fetches on script load:
+//   - stage=core   → totals + sites + triggers + events (Zabbix-only, fast)
+//   - stage=enrich → domains + timeline (XIQ items / 3CX HTTP / Milestone /
+//                     24h event scan — the slow path)
+// Each fetch dispatches "tcs:global-data" with detail.stage set so the React
+// app can clear per-section skeletons as data lands. The recurring auto-
+// refresh uses stage=all for a single coalesced call.
+//
 // Exposes an imperative refresh API used by the header buttons:
 //   window.tcsGlobalRefresh(rangeKey?)   — fetch immediately
 //   window.tcsGlobalSetRange(rangeKey)   — change range AND refetch
@@ -79,19 +88,33 @@
         sparkLabel: d.sparkLabel ?? ""
     });
 
-    const applyBoot = (boot) => {
+    // Apply whichever sections of the payload are present. Unset sections
+    // keep their previous values so a staged response never wipes out
+    // earlier-arrived data.
+    const applyPartial = (boot) => {
         const b = boot || {};
-        window.GLOBAL_TOTALS    = normaliseTotals(b.totals);
-        window.GLOBAL_SITES     = Array.isArray(b.sites)    ? b.sites.map(normaliseSite)   : [];
-        window.GLOBAL_DOMAINS   = Array.isArray(b.domains)  ? b.domains.map(normaliseDomain) : [];
-        window.GLOBAL_TRIGGERS  = Array.isArray(b.triggers) ? b.triggers : [];
-        window.GLOBAL_EVENTS    = Array.isArray(b.events)   ? b.events   : [];
-        window.PROBLEM_TIMELINE = Array.isArray(b.timeline) && b.timeline.length === 24
-            ? b.timeline
-            : new Array(24).fill(0);
+        if (b.totals)   window.GLOBAL_TOTALS    = normaliseTotals(b.totals);
+        if (b.sites)    window.GLOBAL_SITES     = b.sites.map(normaliseSite);
+        if (b.domains)  window.GLOBAL_DOMAINS   = b.domains.map(normaliseDomain);
+        if (b.triggers) window.GLOBAL_TRIGGERS  = b.triggers;
+        if (b.events)   window.GLOBAL_EVENTS    = b.events;
+        if (Array.isArray(b.timeline) && b.timeline.length === 24) {
+            window.PROBLEM_TIMELINE = b.timeline;
+        }
     };
 
-    applyBoot(window.GLOBAL_BOOT);
+    // Seed empty containers so first paint reads dashes / zeros rather
+    // than ReferenceErrors before any fetch lands.
+    const seedEmpty = () => {
+        if (!window.GLOBAL_TOTALS)    window.GLOBAL_TOTALS    = normaliseTotals(null);
+        if (!window.GLOBAL_SITES)     window.GLOBAL_SITES     = [];
+        if (!window.GLOBAL_DOMAINS)   window.GLOBAL_DOMAINS   = [];
+        if (!window.GLOBAL_TRIGGERS)  window.GLOBAL_TRIGGERS  = [];
+        if (!window.GLOBAL_EVENTS)    window.GLOBAL_EVENTS    = [];
+        if (!window.PROBLEM_TIMELINE) window.PROBLEM_TIMELINE = new Array(24).fill(0);
+    };
+    seedEmpty();
+    if (window.GLOBAL_BOOT) applyPartial(window.GLOBAL_BOOT);
 
     window.TWEAK_DEFAULTS = window.TWEAK_DEFAULTS || {
         accent: "#d92929",
@@ -106,32 +129,56 @@
     const REFRESH_MS = 30_000;
     const baseUrl = window.TCS_GLOBAL_DATA_URL;
 
-    const fetchNow = async () => {
-        if (!baseUrl) return;
-        const url = `${baseUrl}&range=${encodeURIComponent(currentRange)}`;
+    const fetchStage = async (stage) => {
+        if (!baseUrl) return null;
+        const url = `${baseUrl}&range=${encodeURIComponent(currentRange)}&stage=${encodeURIComponent(stage)}`;
         try {
             const resp = await fetch(url, {
                 credentials: "same-origin",
                 headers: { "Accept": "application/json" }
             });
-            if (!resp.ok) return;
+            if (!resp.ok) {
+                window.dispatchEvent(new CustomEvent("tcs:global-data", {
+                    detail: { stage, error: `HTTP ${resp.status}`, fetchedAt: Date.now() }
+                }));
+                return null;
+            }
             const fresh = await resp.json();
-            applyBoot(fresh);
+            applyPartial(fresh);
             window.dispatchEvent(new CustomEvent("tcs:global-data", {
-                detail: { ...fresh, range: currentRange, fetchedAt: Date.now() }
+                detail: { ...fresh, stage: fresh.stage || stage, range: currentRange, fetchedAt: Date.now() }
             }));
+            return fresh;
         } catch (e) {
-            console.warn("[tcs] global refresh failed:", e);
+            console.warn(`[tcs] global refresh (${stage}) failed:`, e);
+            window.dispatchEvent(new CustomEvent("tcs:global-data", {
+                detail: { stage, error: String(e), fetchedAt: Date.now() }
+            }));
+            return null;
         }
     };
 
-    window.tcsGlobalRefresh = fetchNow;
+    // Full refresh = both stages, in parallel. The server-side cache
+    // coalesces overlapping work, but firing both means whichever stage
+    // finishes first paints early — operators see the cheap KPIs while
+    // the slow 3CX/Item.get path is still in flight.
+    const refreshAll = () => Promise.all([fetchStage("core"), fetchStage("enrich")]);
+
+    window.tcsGlobalRefresh = refreshAll;
     window.tcsGlobalSetRange = (r) => {
         if (!RANGES[r]) return;
         currentRange = r;
-        return fetchNow();
+        return refreshAll();
     };
     window.tcsGlobalRanges = RANGES;
 
-    setInterval(fetchNow, REFRESH_MS);
+    // Kick off the initial staged fetch as soon as the bridge is parsed.
+    // Don't wait for the React app to mount — the slow path can be in
+    // flight while React boots.
+    refreshAll();
+
+    // Periodic refresh: ActionGlobalData caches the full payload for 5s
+    // and the per-stage filter peels the right subset back out, so calling
+    // both stages in parallel here is cheap after the first call.
+    setInterval(refreshAll, REFRESH_MS);
 })();

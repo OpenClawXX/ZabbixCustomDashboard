@@ -30,11 +30,13 @@ class ActionGlobal extends ActionBase {
     }
 
     protected function doAction(): void {
-        $boot = (new ActionGlobalData())->collect();
-
+        // Render the shell instantly — the React app fetches data in two
+        // staged calls (core + enrich) via ActionGlobalData once mounted.
+        // This shaves the worst-case ~1-3s synchronous wait (3CX HTTP +
+        // wide Item.get scans + 10k-row event fetch) off first paint.
         $data = [
             'title' => _('TCS Global Dashboard'),
-            'boot'  => $boot
+            'boot'  => null
         ];
 
         $response = new CControllerResponseData($data);

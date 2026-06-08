@@ -624,13 +624,72 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "sevFilter": "all",
   "groupBy": "site"
 } /*EDITMODE-END*/;
+
+// Banner shown while staged data is still in flight. Two pill-shaped
+// segments — one per stage — light up as their fetches complete. The
+// whole banner fades out once both stages have landed.
+const LoadingBanner = ({
+  stages
+}) => {
+  const allDone = stages.core && stages.enrich;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "load-banner" + (allDone ? " done" : ""),
+    role: "status",
+    "aria-live": "polite"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "load-spin",
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "load-msg"
+  }, allDone ? "All data loaded" : "Loading dashboard…"), /*#__PURE__*/React.createElement("span", {
+    className: "load-stages"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "load-stage" + (stages.core ? " done" : "")
+  }, stages.core ? /*#__PURE__*/React.createElement(Icon, {
+    name: "check",
+    size: 10
+  }) : /*#__PURE__*/React.createElement("span", {
+    className: "load-dot"
+  }), " Core"), /*#__PURE__*/React.createElement("span", {
+    className: "load-stage" + (stages.enrich ? " done" : "")
+  }, stages.enrich ? /*#__PURE__*/React.createElement(Icon, {
+    name: "check",
+    size: 10
+  }) : /*#__PURE__*/React.createElement("span", {
+    className: "load-dot"
+  }), " Enrichment")));
+};
+
+// Block-shaped pulsing skeleton used in place of card bodies that haven't
+// received their data yet. Keeps the layout from jumping when content lands.
+const Skeleton = ({
+  rows = 3,
+  height = 36
+}) => /*#__PURE__*/React.createElement("div", {
+  className: "skeleton-stack",
+  "aria-hidden": "true"
+}, Array.from({
+  length: rows
+}).map((_, i) => /*#__PURE__*/React.createElement("div", {
+  className: "skeleton-row",
+  key: i,
+  style: {
+    height
+  }
+})));
 const App = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [rangeKey, setRangeKeyState] = React.useState("24h");
-  const [now, setNow] = React.useState("just now");
+  const [now, setNow] = React.useState("—");
   const [refreshing, setRefreshing] = React.useState(false);
   // Bump on every successful refresh so children re-read window.GLOBAL_* globals.
   const [, setTick] = React.useState(0);
+  // Per-stage "have we seen at least one successful response yet?" flags.
+  // Drives the loading banner + per-section skeletons.
+  const [stages, setStages] = React.useState({
+    core: false,
+    enrich: false
+  });
   React.useEffect(() => {
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
   }, [t.showSourceBadges]);
@@ -638,9 +697,17 @@ const App = () => {
   // Listen for bridge-published data updates: refresh timestamp + force re-render.
   React.useEffect(() => {
     const onData = ev => {
+      const d = ev.detail || {};
+      if (d.error) return; // keep the skeleton up so the user sees something's still pending
       setNow(new Date().toLocaleTimeString());
       setRefreshing(false);
       setTick(n => n + 1);
+      if (d.stage === "core" || d.stage === "enrich" || d.stage === "all") {
+        setStages(prev => ({
+          core: prev.core || d.stage === "core" || d.stage === "all",
+          enrich: prev.enrich || d.stage === "enrich" || d.stage === "all"
+        }));
+      }
     };
     window.addEventListener("tcs:global-data", onData);
     return () => window.removeEventListener("tcs:global-data", onData);
@@ -677,10 +744,48 @@ const App = () => {
     setRangeKey: setRangeKey
   }), /*#__PURE__*/React.createElement("div", {
     className: "body"
-  }, /*#__PURE__*/React.createElement(SeverityStrip, null), /*#__PURE__*/React.createElement(SystemSnapshot, null), /*#__PURE__*/React.createElement(SitesHeatmap, {
+  }, (!stages.core || !stages.enrich) && /*#__PURE__*/React.createElement(LoadingBanner, {
+    stages: stages
+  }), stages.core ? /*#__PURE__*/React.createElement(SeverityStrip, null) : /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-b"
+  }, /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 1,
+    height: 64
+  }))), stages.enrich ? /*#__PURE__*/React.createElement(SystemSnapshot, null) : /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "System Snapshot"), /*#__PURE__*/React.createElement("span", {
+    className: "h-meta"
+  }, "loading external systems\u2026")), /*#__PURE__*/React.createElement("div", {
+    className: "card-b"
+  }, /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 2,
+    height: 110
+  }))), stages.core ? /*#__PURE__*/React.createElement(SitesHeatmap, {
     filter: t.siteFilter,
     setFilter: v => setTweak("siteFilter", v)
-  }), /*#__PURE__*/React.createElement("div", {
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "Sites \u2014 Health Map")), /*#__PURE__*/React.createElement("div", {
+    className: "card-b"
+  }, /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 3,
+    height: 56
+  }))), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       gridTemplateColumns: "1.4fr 1fr",
@@ -711,8 +816,11 @@ const App = () => {
       maxHeight: 380,
       overflowY: "auto"
     }
-  }, /*#__PURE__*/React.createElement(TriggersTable, {
+  }, stages.core ? /*#__PURE__*/React.createElement(TriggersTable, {
     filterSev: t.sevFilter
+  }) : /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 5,
+    height: 28
   }))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
@@ -725,7 +833,10 @@ const App = () => {
     className: "h-meta"
   }, "by site")), /*#__PURE__*/React.createElement("div", {
     className: "card-b"
-  }, /*#__PURE__*/React.createElement(Hotspots, null)))), /*#__PURE__*/React.createElement("div", {
+  }, stages.core ? /*#__PURE__*/React.createElement(Hotspots, null) : /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 4,
+    height: 32
+  })))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "card-h"
@@ -744,7 +855,10 @@ const App = () => {
     size: 11
   }))), /*#__PURE__*/React.createElement("div", {
     className: "card-b tight"
-  }, /*#__PURE__*/React.createElement(EventsStream, null))))), /*#__PURE__*/React.createElement(TweaksPanel, {
+  }, stages.core ? /*#__PURE__*/React.createElement(EventsStream, null) : /*#__PURE__*/React.createElement(Skeleton, {
+    rows: 4,
+    height: 26
+  }))))), /*#__PURE__*/React.createElement(TweaksPanel, {
     title: "Tweaks"
   }, /*#__PURE__*/React.createElement(TweakSection, {
     title: "Layout"
