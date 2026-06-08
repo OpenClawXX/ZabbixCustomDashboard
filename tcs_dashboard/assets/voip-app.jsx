@@ -4,155 +4,37 @@
 const { useState: useStateVP, useEffect: useEffectVP, useMemo: useMemoVP } = React;
 
 // ═══════════════════════════════════════════════════════════════
-// DATA — fictional, modeled on a typical school-district 3CX v20 deploy
+// EMPTY-STATE SHELLS
+// voip-bridge.jsx fills these with live data from tcs.voip.data once
+// the SSR boot or the first fetch lands. Until then (or when 3CX /
+// Zabbix are unreachable) every card renders against the zeroed
+// shape below — no demo data is ever shown.
 // ═══════════════════════════════════════════════════════════════
 
-// 24h concurrent-calls history (15-min buckets, 96 samples)
-const _concur24h = (() => {
-  // school-day shape: ramp 7am, peak ~10-11 and 1-2pm, drop after 4pm
-  const out = [];
-  for (let i = 0; i < 96; i++) {
-    const hr = i / 4;
-    let base;
-    if (hr < 6) base = 2 + Math.sin(hr) * 1;
-    else if (hr < 7.5) base = 4 + (hr - 6) * 6;
-    else if (hr < 11) base = 22 + (hr - 7.5) * 5 + Math.sin(hr * 2) * 4;
-    else if (hr < 12) base = 38 - (hr - 11) * 6;
-    else if (hr < 14) base = 32 + Math.sin((hr - 12) * 3) * 8;
-    else if (hr < 16) base = 30 - (hr - 14) * 6;
-    else if (hr < 18) base = 16 - (hr - 16) * 4;
-    else base = 6 + Math.sin(hr) * 2;
-    out.push(Math.max(0, Math.round(base + (i % 7) * 0.4)));
-  }
-  return out;
-})();
-
-const _inbound24h  = _concur24h.map((v, i) => Math.round(v * (0.55 + Math.sin(i * 0.3) * 0.05)));
-const _outbound24h = _concur24h.map((v, i) => v - _inbound24h[i]);
-
-window.VOIP_PBX = {
-  fqdn: "pbx.tcs.local",
-  ip: "10.10.5.20",
-  version: "20.0 U4 (Build 4.2.0.1)",
-  edition: "Enterprise · 256 SC",
-  uptime: "47d 14h 22m",
-  region: "Tuscaloosa · Main Data Center (Arc-DC)",
-  activeNow: _concur24h[_concur24h.length - 1],
-  capacity: 256,
-  peakToday: Math.max(..._concur24h.slice(28)),
-  callsToday: 4187,
-  callsInbound: 2392,
-  callsOutbound: 1411,
-  callsInternal: 384,
-  registeredExt: 198,
-  totalExt: 214,
-  avgMos: 4.32,
-  asr: 96.4,  // answer-seizure ratio
-  acd: "3m 41s", // average call duration
-  history: { concur: _concur24h, inbound: _inbound24h, outbound: _outbound24h },
+window.VOIP_PBX = window.VOIP_PBX || {
+  fqdn: "—", ip: "—", version: "—", edition: "—", uptime: "—", region: "—",
+  activeNow: 0, capacity: 0, peakToday: 0,
+  callsToday: 0, callsInbound: 0, callsOutbound: 0, callsInternal: 0,
+  registeredExt: 0, totalExt: 0, trunksReg: 0, trunksTotal: 0,
+  avgMos: 0, asr: 0, acd: "—",
+  history: {
+    concur:   new Array(96).fill(0),
+    inbound:  new Array(96).fill(0),
+    outbound: new Array(96).fill(0),
+  },
 };
-
-// Services (3CX components + supporting infra)
-window.VOIP_SERVICES = [
-  { name: "3CX Phone System",     status: "running", uptime: "47d", sub: "core call manager · v20 U4",        load: "42%"  },
-  { name: "3CX Media Server",     status: "running", uptime: "47d", sub: "G.711, G.722, OPUS · 28 active",   load: "31%"  },
-  { name: "3CX Web Server (Nginx)", status: "running", uptime: "47d", sub: "TLS 1.3 · sbc.tcs.org",          load: "9%"   },
-  { name: "PostgreSQL 14",        status: "running", uptime: "47d", sub: "CDR · 2.4 GB · 14k rows/day",      load: "12%"  },
-  { name: "3CX SBC · arc-sbc-01", status: "running", uptime: "12d", sub: "Arcadia DMZ · 5060/UDP, 5061/TLS", load: "ok"   },
-  { name: "3CX SBC · bhs-sbc-01", status: "running", uptime: "9d 06h", sub: "Bryant DMZ · TLS",              load: "ok"   },
-  { name: "3CX SBC · chs-sbc-01", status: "degraded", uptime: "2h 14m", sub: "Central DMZ · jitter > 25ms upstream", load: "warn" },
-  { name: "RTP relay (proxy)",    status: "running", uptime: "47d", sub: "10000-20000/UDP",                  load: "ok"   },
-  { name: "Voicemail / FAX2Email",status: "running", uptime: "47d", sub: "32 mailboxes · 84 new today",      load: "ok"   },
-  { name: "Backup agent",         status: "running", uptime: "47d", sub: "Daily 02:00 → s3://tcs-pbx-bk",    load: "ok"   },
-];
-
-// SIP Trunks
-window.VOIP_TRUNKS = [
-  { name: "Bandwidth.com SIP — Main DID Block",   provider: "bandwidth.com", host: "siptrunk.bandwidth.com:5060", status: "reg", chTotal: 64, chIn: 14, chOut: 9, asr: 97.2, mos: 4.41, errors: 0, did: "+1 205-759-3500" },
-  { name: "Bandwidth.com SIP — E911",             provider: "bandwidth.com", host: "e911.bandwidth.com:5060",     status: "reg", chTotal: 8,  chIn: 0,  chOut: 0, asr: 100,  mos: 4.50, errors: 0, did: "E911 only" },
-  { name: "AT&T BVoIP — Failover PRI",            provider: "att.com",       host: "10.10.5.40 (Audiocodes)",     status: "reg", chTotal: 23, chIn: 2,  chOut: 1, asr: 95.8, mos: 4.28, errors: 0, did: "+1 205-507-2200" },
-  { name: "Twilio Elastic — Outbound (campus calls)", provider: "twilio.com", host: "tcs.pstn.twilio.com:5061",   status: "reg", chTotal: 32, chIn: 0,  chOut: 7, asr: 94.1, mos: 4.36, errors: 0, did: "outbound" },
-  { name: "Flowroute — Conf Bridges",             provider: "flowroute.com", host: "us-west-or.sip.flowroute.com",status: "dgr", chTotal: 16, chIn: 3,  chOut: 2, asr: 91.4, mos: 4.04, errors: 12, did: "conf · 5500-5599" },
-  { name: "Internal — TCTA Legacy Avaya bridge",  provider: "internal",      host: "10.60.5.5:5060",              status: "unreg",chTotal: 8,  chIn: 0,  chOut: 0, asr: 0,    mos: 0,    errors: 47, did: "x6000-6099" },
-];
-
-// Live active calls (a snapshot — these are happening right now)
-window.VOIP_CALLS = [
-  { dir: "in",  from: "+1 205-759-3500",          fromSub: "Bandwidth · DID 3500",     to: "1042 — Auto-attendant",   toSub: "→ x1042 Reception",       dur: "0:14",  codec: "OPUS",   trunk: "BW-Main",  mos: 4.42, q: "good" },
-  { dir: "in",  from: "+1 334-887-1102",          fromSub: "Parent · Montgomery, AL",  to: "1108 — J. Hartwell",      toSub: "Counseling · BHS",        dur: "2:41",  codec: "G.722",  trunk: "BW-Main",  mos: 4.38, q: "good" },
-  { dir: "out", from: "1213 — A. Whitley",        fromSub: "Principal · CHS",          to: "+1 205-561-8893",         toSub: "Tuscaloosa City Hall",    dur: "11:08", codec: "G.711u", trunk: "Twilio",   mos: 4.21, q: "good" },
-  { dir: "in",  from: "+1 205-242-9001",          fromSub: "Vendor · SchoolDude",      to: "1300 — Facilities Queue", toSub: "Hold 0:22 · 1 waiting",   dur: "0:54",  codec: "G.711u", trunk: "BW-Main",  mos: 4.34, q: "good" },
-  { dir: "int", from: "1207 — Nurse (ARC)",       fromSub: "Arcadia ES",               to: "1402 — Admin Office",     toSub: "→ x1402",                 dur: "0:38",  codec: "G.722",  trunk: "internal", mos: 4.48, q: "good" },
-  { dir: "in",  from: "+1 205-462-2210",          fromSub: "Unknown",                   to: "1500 — Conf Bridge",      toSub: "Flowroute · 5 in bridge", dur: "23:14", codec: "OPUS",   trunk: "Flowroute",mos: 3.81, q: "fair" },
-  { dir: "out", from: "1108 — J. Hartwell",       fromSub: "Counseling · BHS",         to: "+1 334-844-1009",         toSub: "AL DHR · Tuscaloosa",     dur: "0:09",  codec: "G.711u", trunk: "Twilio",   mos: 4.40, q: "good" },
-  { dir: "q",   from: "+1 205-345-7711",          fromSub: "Parent · Tuscaloosa",      to: "1300 — Facilities Queue", toSub: "Position 1 · waiting 0:08",dur: "0:08", codec: "—",      trunk: "BW-Main",  mos: 0,    q: "good" },
-  { dir: "in",  from: "+1 256-555-2940",          fromSub: "Vendor · Apple Edu",        to: "1019 — IT Help Desk",     toSub: "→ x1019",                 dur: "4:22",  codec: "G.722",  trunk: "BW-Main",  mos: 3.42, q: "poor" },
-  { dir: "int", from: "1018 — D. Brewer (IT)",    fromSub: "Tech Services · NRH",      to: "1002 — Network Ops",      toSub: "→ x1002",                 dur: "1:55",  codec: "G.722",  trunk: "internal", mos: 4.50, q: "good" },
-];
-
-// Top extensions by call count today
-window.VOIP_TOP = [
-  { ext: "1042", name: "Reception · Arc Admin",       site: "ARC", calls: 187, mins: 412, role: "front-desk" },
-  { ext: "1300", name: "Facilities Help Queue",       site: "DIST", calls: 142, mins: 287, role: "queue" },
-  { ext: "1019", name: "IT Help Desk Queue",          site: "DIST", calls: 118, mins: 614, role: "queue" },
-  { ext: "1108", name: "J. Hartwell · Counseling",    site: "BHS", calls: 84,  mins: 198, role: "counsel" },
-  { ext: "1207", name: "Nurse · Arcadia ES",          site: "ARC", calls: 61,  mins: 92,  role: "health" },
-  { ext: "1402", name: "Admin Office · CHS",          site: "CHS", calls: 58,  mins: 132, role: "admin" },
-];
-
-// Queues (snapshot)
-window.VOIP_QUEUES = [
-  { name: "IT Help Desk",        ext: "1019", agents: 4, agentsOn: 3, waiting: 2, sla: 88, abandon: 4, ans: 116, slaSec: 30 },
-  { name: "Facilities",          ext: "1300", agents: 3, agentsOn: 3, waiting: 1, sla: 94, abandon: 2, ans: 139, slaSec: 30 },
-  { name: "Transportation",      ext: "1320", agents: 5, agentsOn: 4, waiting: 0, sla: 97, abandon: 1, ans: 71,  slaSec: 30 },
-  { name: "Attendance · BHS",    ext: "1110", agents: 2, agentsOn: 2, waiting: 0, sla: 92, abandon: 3, ans: 54,  slaSec: 45 },
-];
-
-// Call quality 24h history (sample every 30min, 48 samples)
-window.VOIP_QUALITY = {
-  mos:    Array.from({length:48}, (_,i) => 4.3 + Math.sin(i*0.4)*0.08 + (i===24?-0.4:0) + (i===25?-0.3:0)),
-  jitter: Array.from({length:48}, (_,i) => 6 + Math.abs(Math.sin(i*0.3))*4 + (i===24?22:0) + (i===25?14:0)),
-  loss:   Array.from({length:48}, (_,i) => 0.05 + Math.abs(Math.sin(i*0.5))*0.3 + (i===24?1.4:0) + (i===25?0.8:0)),
-  rtt:    Array.from({length:48}, (_,i) => 22 + Math.sin(i*0.25)*4 + (i===24?38:0)),
+window.VOIP_TRUNKS   = window.VOIP_TRUNKS   || [];
+window.VOIP_SBCS     = window.VOIP_SBCS     || [];
+window.VOIP_CALLS    = window.VOIP_CALLS    || [];
+window.VOIP_TOP      = window.VOIP_TOP      || [];
+window.VOIP_QUEUES   = window.VOIP_QUEUES   || [];
+window.VOIP_QUALITY  = window.VOIP_QUALITY  || {
+  mos:    new Array(48).fill(0),
+  jitter: new Array(48).fill(0),
+  loss:   new Array(48).fill(0),
+  rtt:    new Array(48).fill(0),
 };
-
-// Extensions — fictional list, grouped by site
-function _genExt(site, base, count, opts={}) {
-  let x = base * 7919;
-  const rnd = () => { x = (x * 9301 + 49297) % 233280; return x / 233280; };
-  const firstNames = ["A. Bates","J. Hartwell","R. Tate","P. Cobb","M. Lewis","S. Knox","D. Brewer","K. Pierce","L. Hayes","T. Ortiz","N. Frost","E. Marsh","C. Boyd","V. Yu","O. Park","H. Reeves","I. Garcia","B. Stokes","W. Lin","F. Akin","G. Dewey","Q. Mead","Z. Bell","Y. Cruz","X. Vega","U. Owen","R. Doss","P. Wade","M. Joffe","J. Cope","H. Voss"];
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const r = rnd();
-    let state;
-    if (i === (opts.alertAt||-99)) state = "alert";
-    else if (r < 0.08) state = "unreg";
-    else if (r < 0.16) state = "call";
-    else if (r < 0.20) state = "dnd";
-    else state = "reg";
-    const n = firstNames[Math.floor(rnd() * firstNames.length)];
-    out.push({ ext: String(base + i), name: n, site, state });
-  }
-  return out;
-}
-
-window.VOIP_SITES = [
-  { id: "ARC",  name: "Arcadia Elementary",       expanded: true,  ext: _genExt("ARC", 1200, 36, {alertAt: 11}) },
-  { id: "BHS",  name: "Bryant High School",       expanded: true,  ext: _genExt("BHS", 1300, 56) },
-  { id: "CHS",  name: "Central High School",      expanded: true,  ext: _genExt("CHS", 1400, 48, {alertAt: 22}) },
-  { id: "NRH",  name: "Northridge High School",   expanded: true,  ext: _genExt("NRH", 1500, 32) },
-  { id: "TCTA", name: "Tuscaloosa Career & Tech", expanded: true,  ext: _genExt("TCTA", 1600, 18) },
-  { id: "DIST", name: "District Office & Queues", expanded: true,  ext: _genExt("DIST", 1000, 24) },
-];
-
-// Problems
-window.VOIP_PROBLEMS = [
-  { ts: "09:14:22", sev: "warning", host: "chs-sbc-01",   trig: "Upstream jitter > 25ms (Flowroute trunk)",      age: "00:24", ack: false },
-  { ts: "08:42:08", sev: "high",    host: "TCTA-Avaya",   trig: "Internal SIP trunk x6000-6099 NOT REGISTERED",  age: "00:56", ack: false },
-  { ts: "08:11:55", sev: "warning", host: "Flowroute",    trig: "12 SIP 503 errors in 5m on conf-bridge trunk",  age: "01:27", ack: false },
-  { ts: "07:33:14", sev: "info",    host: "pbx.tcs.local",trig: "Daily CDR archive rotated · 14,217 rows",        age: "02:05", ack: true },
-  { ts: "Yesterday",sev: "warning", host: "ext 1019",      trig: "Polycom VVX-450 firmware out of date (6.4.4)",  age: "16:30", ack: true },
-];
+window.VOIP_PROBLEMS = window.VOIP_PROBLEMS || [];
 
 // ═══════════════════════════════════════════════════════════════
 // WIDGETS
@@ -190,7 +72,7 @@ const ConcurrencyChart = () => {
           <div className="cm-lbl">Active right now</div>
           <div className="cm-now">{window.VOIP_PBX.activeNow}<span className="u">/ {window.VOIP_PBX.capacity} SC</span></div>
         </div>
-        <div className="cm-kv"><span className="lbl">Peak today</span><span className="v warn">{window.VOIP_PBX.peakToday} @ 10:45</span></div>
+        <div className="cm-kv"><span className="lbl">Peak today</span><span className="v warn">{window.VOIP_PBX.peakToday || "—"}</span></div>
         <div className="cm-kv"><span className="lbl">Calls today</span><span className="v">{window.VOIP_PBX.callsToday.toLocaleString()}</span></div>
         <div className="cm-kv"><span className="lbl">ACD</span><span className="v">{window.VOIP_PBX.acd}</span></div>
         <div className="cm-kv"><span className="lbl">ASR</span><span className="v">{window.VOIP_PBX.asr}%</span></div>
@@ -226,42 +108,6 @@ const ConcurrencyChart = () => {
     </div>
   );
 };
-
-// ── Services / health panel ──
-const ServicesPanel = () => (
-  <div className="card">
-    <div className="card-h">
-      <h3>System Services</h3>
-      <SourceBadge src="zbx" />
-      <SourceBadge src="3cx" />
-      <div className="h-spacer" />
-      <span className="h-meta">{window.VOIP_PBX.uptime} up</span>
-    </div>
-    <div className="svc-list">
-      {window.VOIP_SERVICES.map((s, i) => {
-        const cls = s.status === "running" ? "" : (s.status === "degraded" ? "warn" : "err");
-        const lbl = s.status === "running" ? "OK" : (s.status === "degraded" ? "DEGR" : "DOWN");
-        return (
-          <div key={i} className="svc-row">
-            <span className={"svc-led " + cls}></span>
-            <div>
-              <div className="svc-name">{s.name}</div>
-              <div className="svc-sub">{s.sub}</div>
-            </div>
-            <div className="svc-load">{typeof s.load === "string" && s.load.endsWith("%") ? s.load : ""}</div>
-            <span className={"svc-pill " + cls}>{lbl}</span>
-          </div>
-        );
-      })}
-    </div>
-    <div className="svc-foot">
-      <div><div className="k">PBX FQDN</div><div className="v">{window.VOIP_PBX.fqdn}</div></div>
-      <div><div className="k">License</div><div className="v">{window.VOIP_PBX.edition}</div></div>
-      <div><div className="k">Version</div><div className="v">{window.VOIP_PBX.version}</div></div>
-      <div><div className="k">Region</div><div className="v" style={{whiteSpace:"normal", lineHeight:1.3}}>{window.VOIP_PBX.region}</div></div>
-    </div>
-  </div>
-);
 
 // ── KPI strip across top ──
 const VoipKpis = () => {
@@ -300,6 +146,84 @@ const VoipKpis = () => {
           <div style={{fontSize:10,color:"var(--err)",fontFamily:"var(--mono)"}}>● 1 unreg · 1 degraded</div>
         </div>
       </div>
+    </div>
+  );
+};
+
+// ── Loading-status pill ──
+// Reads window.VOIP_LOADING_FLAGS (set by voip-bridge.jsx). Shows a spinner
+// + which endpoint(s) are still in flight while the first parallel fetch
+// is running, then disappears once everything has responded once.
+const LoadingPill = () => {
+  const flags = window.VOIP_LOADING_FLAGS || {};
+  const labelOf = { core: "core", top: "top talkers", calls: "active calls" };
+  const pending = Object.keys(flags).filter(k => flags[k]);
+  if (pending.length === 0) return null;
+  return (
+    <span className="pill" style={{ background:"var(--bg-2)", borderColor:"var(--cx)" }}>
+      <span className="dot" style={{
+        background:"var(--cx)",
+        animation:"voipLoadingPulse 1.4s ease-in-out infinite",
+      }} />
+      <span className="lbl">Loading</span>
+      <span className="v" style={{ fontSize:10, opacity:0.8 }}>
+        {pending.map(k => labelOf[k] || k).join(" · ")}
+      </span>
+    </span>
+  );
+};
+
+// ── SBC fleet ──
+// Each row in window.VOIP_SBCS represents one remote 3CX SBC (Session Border
+// Controller) reporting back to this PBX. We render up/down + live CPU /
+// memory / disk / latency / call & phone counts.
+const SbcsCard = () => {
+  const sbcs = window.VOIP_SBCS;
+  const upCount = sbcs.filter(s => s.up).length;
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h3>Session Border Controllers</h3>
+        <SourceBadge src="3cx" />
+        <div className="h-spacer" />
+        <span className="h-meta">{sbcs.length === 0 ? "no SBCs registered" : `${upCount} / ${sbcs.length} up`}</span>
+      </div>
+      {sbcs.length === 0 ? (
+        <div style={{padding:"18px 14px",fontSize:12,color:"var(--muted)"}}>No SBCs configured on this PBX.</div>
+      ) : (
+        <div className="svc-list">
+          {sbcs.map(s => {
+            const cls = s.up ? "" : "err";
+            const lbl = s.up ? "UP" : (s.hasConn ? "DEGR" : "DOWN");
+            const sub = [
+              s.group,
+              s.localIp && `local ${s.localIp}`,
+              s.publicIp && `pub ${s.publicIp}`,
+              s.version,
+            ].filter(Boolean).join(" · ");
+            const stats = [
+              `${s.phones} phones`,
+              `${s.calls} calls`,
+              s.latency > 0 && `${s.latency}ms`,
+              s.cpu && `cpu ${s.cpu}`,
+              s.memory && `mem ${s.memory}`,
+              s.disk && `disk ${s.disk}`,
+            ].filter(Boolean).join(" · ");
+            return (
+              <div key={s.id || s.name} className="svc-row">
+                <span className={"svc-led " + cls}></span>
+                <div>
+                  <div className="svc-name">{s.name}</div>
+                  <div className="svc-sub">{sub || "—"}</div>
+                  {stats && <div className="svc-sub" style={{marginTop:2}}>{stats}</div>}
+                </div>
+                <div className="svc-load">{s.uptime || ""}</div>
+                <span className={"svc-pill " + cls}>{lbl}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };
@@ -455,69 +379,9 @@ const CallQualityCard = () => {
   );
 };
 
-// ── Extension grid by site ──
-const ExtensionGrid = () => {
-  const [sites] = useStateVP(window.VOIP_SITES);
-  const totals = useMemoVP(() => {
-    const t = { reg:0, unreg:0, call:0, dnd:0, alert:0, total:0 };
-    sites.forEach(s => s.ext.forEach(e => { t[e.state]++; t.total++; }));
-    return t;
-  }, [sites]);
-
-  return (
-    <div className="card ext-card">
-      <div className="card-h">
-        <h3>Extensions · Registration Status</h3>
-        <SourceBadge src="3cx" />
-        <SourceBadge src="pf" />
-        <div className="h-spacer" />
-        <span className="h-meta">{totals.total} extensions · last poll 8s</span>
-      </div>
-      <div className="ext-toolbar">
-        <div className="legend">
-          <span className="it"><span className="sw reg"></span> Registered ({totals.reg})</span>
-          <span className="it"><span className="sw call"></span> On call ({totals.call})</span>
-          <span className="it"><span className="sw dnd"></span> DND ({totals.dnd})</span>
-          <span className="it"><span className="sw alert"></span> Alert ({totals.alert})</span>
-          <span className="it"><span className="sw unreg"></span> Unregistered ({totals.unreg})</span>
-        </div>
-        <span className="spacer" />
-        <span style={{fontFamily:"var(--mono)", fontSize:11, color:"var(--muted)"}}>filter:</span>
-        <span style={{fontFamily:"var(--mono)", fontSize:11, color:"var(--fg-2)", background:"var(--bg-2)", border:"1px solid var(--line)", padding:"3px 8px", borderRadius:3}}>all sites</span>
-      </div>
-      {sites.map(site => {
-        const counts = site.ext.reduce((a,e)=>{a[e.state]=(a[e.state]||0)+1;return a;},{});
-        return (
-          <div key={site.id} className="ext-site">
-            <div className="ext-site-head">
-              <span className="name">{site.name}</span>
-              <span className="stat">
-                <b className="ok">{counts.reg||0} reg</b> · <b className="ok">{counts.call||0} call</b>
-                {counts.dnd ? <> · <b className="warn">{counts.dnd} dnd</b></> : null}
-                {counts.alert ? <> · <b className="err">{counts.alert} alert</b></> : null}
-                {counts.unreg ? <> · {counts.unreg} unreg</> : null}
-                <span style={{marginLeft:8, color:"var(--muted-2)"}}>· {site.ext.length} total</span>
-              </span>
-            </div>
-            <div className="ext-grid">
-              {site.ext.map(e => (
-                <div key={e.ext} className={"ext-cell " + e.state} title={`x${e.ext} · ${e.name} · ${e.state}`}>
-                  <div className="ec-num">x{e.ext}</div>
-                  <div className="ec-name">{e.name}</div>
-                  <span className="ec-led" />
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
 // ── Top extensions / talkers ──
 const TopTalkers = () => {
-  const max = Math.max(...window.VOIP_TOP.map(t => t.calls));
+  const max = window.VOIP_TOP.length ? Math.max(...window.VOIP_TOP.map(t => t.calls)) : 1;
   return (
     <div className="card">
       <div className="card-h">
@@ -613,11 +477,21 @@ const TWEAK_DEFAULTS_VP = /*EDITMODE-BEGIN*/{
 
 const VoipApp = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS_VP);
+  const [, setTick] = useStateVP(0);
 
   useEffectVP(() => {
     document.documentElement.style.setProperty("--cx", t.accent);
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
   }, [t.accent, t.showSourceBadges]);
+
+  // Re-render whenever voip-bridge.jsx swaps in a fresh payload. The card
+  // components all read window.VOIP_* directly at render time, so bumping
+  // a tick is enough to pick up the new data.
+  useEffectVP(() => {
+    const onData = () => setTick(n => n + 1);
+    window.addEventListener("tcs:voip-data", onData);
+    return () => window.removeEventListener("tcs:voip-data", onData);
+  }, []);
 
   const densityVar = t.density === "spacious" ? 1.15 : t.density === "dense" ? 0.85 : 1;
   const p = window.VOIP_PBX;
@@ -636,6 +510,7 @@ const VoipApp = () => {
               <span className="role-tag voip" style={{ fontSize: 10, padding: "1px 8px" }}>3CX · {p.version}</span>
             </div>
             <div className="host-meta voip-meta-bar">
+              <LoadingPill />
               <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> Phone System online</span>
               <span className="pill"><span className="lbl">IP</span> <span className="v">{p.ip}</span></span>
               <span className="pill"><span className="lbl">License</span> <span className="v">{p.edition}</span></span>
@@ -652,15 +527,15 @@ const VoipApp = () => {
         </div>
 
         <div className="body" data-screen-label="VoIP Dashboard">
-          <DemoBanner name="VoIP · 3CX Dashboard" />
           <VoipKpis />
 
-          <div className="voip-row-2col" style={{ marginBottom: 14 }}>
-            <div className="voip-stack">
-              <ConcurrencyChart />
-              <CallQualityCard />
-            </div>
-            <ServicesPanel />
+          <div className="voip-row-2col-wide" style={{ marginBottom: 14 }}>
+            <ConcurrencyChart />
+            <CallQualityCard />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <ActiveCallsCard />
           </div>
 
           <div style={{ marginBottom: 14 }}>
@@ -668,16 +543,12 @@ const VoipApp = () => {
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <ActiveCallsCard />
+            <SbcsCard />
           </div>
 
           <div className="voip-row-2col-wide" style={{ marginBottom: 14 }}>
             <QueuesCard />
             <TopTalkers />
-          </div>
-
-          <div style={{ marginBottom: 14 }}>
-            <ExtensionGrid />
           </div>
 
           <VoipProblems />

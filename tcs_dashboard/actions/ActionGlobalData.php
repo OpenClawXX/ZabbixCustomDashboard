@@ -3,6 +3,7 @@
 namespace Modules\TcsDashboard\Actions;
 
 use API;
+use Modules\TcsDashboard\Lib\ThreeCXClient;
 use CControllerResponseData;
 use CControllerResponseFatal;
 
@@ -55,7 +56,8 @@ class ActionGlobalData extends ActionDataBase {
         'wireless' => ['XIQ', 'Extreme AP', 'WLC', 'wireless'],
         'switches' => ['EXOS', 'switch', 'IOS', 'Switch'],
         'servers'  => ['Linux', 'Windows', 'iDRAC', 'OS by'],
-        'nvr'      => ['Milestone', 'XProtect', 'NVR']
+        'nvr'      => ['Milestone', 'XProtect', 'NVR'],
+        'voip'     => ['3CX', 'VoIP', 'SIP'],
     ];
 
     /** Range key → window in seconds (used for both timeline + recent events). */
@@ -518,6 +520,12 @@ class ActionGlobalData extends ActionDataBase {
         // the wireless dashboard's totals.
         $wireless = $this->collectWirelessFleetKpis();
 
+        // VoIP enrichment — reuse the APCu snapshot the VoIP dashboard's
+        // tcs.voip.data action populates ($cacheKey 'tcs_dashboard:voip:v1').
+        // Avoids hammering 3CX with a second SystemStatus call when the
+        // VoIP page is already polling on its own cadence.
+        $voip = $this->collectVoipFleetKpis();
+
         // Surveillance enrichment — pull milestone.cam.status[*] across all
         // Milestone Site hosts. The per-camera Zabbix hosts are filtered out
         // by EXCLUDE_HOST_GROUPS above (their SNMP-interface state would
@@ -551,6 +559,12 @@ class ActionGlobalData extends ActionDataBase {
                 'icon'  => 'shield',                  'src'        => 'ext',
                 'href'  => 'zabbix.php?action=tcs.surveillance.view',
                 'sparkColor' => 'var(--ext)',         'sparkLabel' => 'Cameras online · 24h'
+            ],
+            'voip'     => [
+                'label' => 'VoIP · 3CX',              'sub'        => '3CX Phone System',
+                'icon'  => 'phone',                   'src'        => 'ext',
+                'href'  => 'zabbix.php?action=tcs.voip.view',
+                'sparkColor' => 'var(--cx)',          'sparkLabel' => 'Concurrent calls · 24h'
             ]
         ];
 
@@ -566,8 +580,24 @@ class ActionGlobalData extends ActionDataBase {
                 $d['up']    = $surveillance['online'];
                 $d['down']  = max(0, $surveillance['total'] - $surveillance['online']);
             }
+            // Fold VoIP-side fleet counts into $d so the trunk-error count
+            // factors into the tile's worst-status color and the click-
+            // through shows the 3CX active-calls headline.
+            if ($id === 'voip') {
+                if ($voip['ext_total'] !== null) {
+                    $d['total'] = $voip['ext_total'];
+                    $d['up']    = $voip['ext_reg'] ?? 0;
+                    $d['down']  = max(0, $voip['ext_total'] - ($voip['ext_reg'] ?? 0));
+                }
+                if (!empty($voip['top'])) $d['top'] = $voip['top'];
+                // Trunk outages bump the tile to "warning" even when no
+                // Zabbix problem fires — operators care about unreg trunks.
+                if (($voip['trunk_unreg'] ?? 0) > 0) {
+                    $d['warn'] = max($d['warn'], $voip['trunk_unreg']);
+                }
+            }
             $d['status'] = $this->domainStatus($d);
-            $d['kpis']   = $this->buildDomainKpis($id, $d, $wireless, $surveillance);
+            $d['kpis']   = $this->buildDomainKpis($id, $d, $wireless, $surveillance, $voip);
             // Live wireless: surface the current client total as a flat
             // sparkline so the labelled "Connected clients" graph isn't a
             // dead line of zeros until proper history wiring lands.
@@ -578,12 +608,22 @@ class ActionGlobalData extends ActionDataBase {
             if ($id === 'nvr' && $surveillance['online'] !== null) {
                 $d['spark'] = array_fill(0, 24, $surveillance['online']);
             }
+            // VoIP sparkline: real 24h concurrent-calls history if the
+            // VoIP-side cache has populated it (96-bucket → downsample to 24).
+            if ($id === 'voip' && !empty($voip['concur24h'])) {
+                $d['spark'] = self::downsample($voip['concur24h'], 24);
+            }
             $tileMeta = $meta[$id] ?? [];
             // Refine the subtitle with a live host count if we have one.
             // NVR uses camera count instead of host count since per-camera
             // hosts don't appear in $d['total'] anymore.
             if ($id === 'nvr' && $surveillance['total']) {
                 $tileMeta['sub'] = trim(($tileMeta['sub'] ?? '').' · '.number_format($surveillance['total']).' cameras');
+            } elseif ($id === 'voip') {
+                if (!empty($voip['version'])) $tileMeta['sub'] = '3CX Phone System · v'.$voip['version'];
+                if ($voip['ext_total'] !== null) {
+                    $tileMeta['sub'] = trim(($tileMeta['sub'] ?? '').' · '.number_format($voip['ext_total']).' extensions');
+                }
             } elseif ($d['total'] > 0 && isset($tileMeta['sub'])) {
                 $tileMeta['sub'] = trim($tileMeta['sub'].' · '.number_format($d['total']).' hosts');
             }
@@ -613,10 +653,25 @@ class ActionGlobalData extends ActionDataBase {
      *     online: ?int, total: ?int, faulted: ?int, disabled: ?int
      * } $surveillance
      */
-    private function buildDomainKpis(string $domain, array $d, array $wireless, array $surveillance = []): array {
+    private function buildDomainKpis(string $domain, array $d, array $wireless, array $surveillance = [], array $voip = []): array {
         $fmt = fn(?int $n) => $n === null ? '—' : number_format($n);
         $up = $d['up']; $total = $d['total']; $down = $d['down'];
         $withProblems = $d['hosts_with_problems'];
+
+        if ($domain === 'voip') {
+            $extReg     = $voip['ext_reg']      ?? null;
+            $extTotal   = $voip['ext_total']    ?? null;
+            $callsNow   = $voip['calls_active'] ?? null;
+            $capacity   = $voip['capacity']     ?? null;
+            $trunkReg   = $voip['trunk_reg']    ?? null;
+            $trunkTot   = $voip['trunk_total']  ?? null;
+            $trunkUnreg = $voip['trunk_unreg']  ?? null;
+            return [
+                ['label' => 'Active calls',  'value' => $fmt($callsNow).' / '.$fmt($capacity),  'note' => $capacity ? round(($callsNow ?? 0) / max(1, $capacity) * 100).'% of capacity' : ''],
+                ['label' => 'Extensions',    'value' => $fmt($extReg).' / '.$fmt($extTotal),    'note' => $extTotal && $extReg !== null ? $fmt($extTotal - $extReg).' unregistered' : ''],
+                ['label' => 'SIP trunks',    'value' => $fmt($trunkReg).' / '.$fmt($trunkTot),  'note' => $trunkUnreg > 0 ? $fmt($trunkUnreg).' unregistered' : 'all registered'],
+            ];
+        }
 
         if ($domain === 'wireless') {
             // Live xiq.ap.* item totals beat the template-bucketed host
@@ -748,6 +803,162 @@ class ActionGlobalData extends ActionDataBase {
      *
      * @return array{online: ?int, total: ?int, faulted: ?int, disabled: ?int}
      */
+    /**
+     * 3CX-side fleet KPIs for the System Snapshot's VoIP tile.
+     *
+     * Strategy:
+     *   1. Try the APCu snapshot ActionVoipData populates
+     *      ('tcs_dashboard:voip:v1') — when the VoIP page has been visited
+     *      recently this hit is free.
+     *   2. Fall back to a direct ThreeCXClient call (SystemStatus + Trunks),
+     *      cached under our own key ('tcs_dashboard:global:voip:v1', 30s TTL)
+     *      so global polls don't hammer 3CX. This makes the tile self-
+     *      sufficient — it lights up whether or not the operator has
+     *      visited the VoIP page yet.
+     *
+     * @return array{
+     *   version: ?string, ext_reg: ?int, ext_total: ?int, calls_active: ?int,
+     *   capacity: ?int, trunk_reg: ?int, trunk_total: ?int, trunk_unreg: ?int,
+     *   concur24h: array<int,int>, top: ?string
+     * }
+     */
+    private function collectVoipFleetKpis(): array {
+        // 1. Try VoIP-page cache first (richest payload).
+        $hit = function_exists('apcu_fetch')
+            ? apcu_fetch('tcs_dashboard:voip:v1', $ok)
+            : null;
+        if (($ok ?? false) && is_array($hit)) {
+            $pbx    = is_array($hit['pbx']    ?? null) ? $hit['pbx']    : [];
+            $trunks = is_array($hit['trunks'] ?? null) ? $hit['trunks'] : [];
+            if (!empty($pbx)) {
+                return self::shapeVoipKpis($pbx, $trunks);
+            }
+        }
+
+        // 2. Our own cache layer for direct fallback calls.
+        $selfKey = 'tcs_dashboard:global:voip:v1';
+        if (function_exists('apcu_fetch')) {
+            $self = apcu_fetch($selfKey, $ok2);
+            if (($ok2 ?? false) && is_array($self)) return $self;
+        }
+
+        // 3. Direct fallback. Mirrors what ActionVoipData does for the
+        //    same two endpoints, but skips the heavier Queues/Sbcs/etc.
+        $kpis = self::voipEmptyKpis();
+        try {
+            $cfg = [
+                'url'           => self::globalMacroStatic('{$TCS.3CX.URL}'),
+                'client_id'     => self::globalMacroStatic('{$TCS.3CX.CLIENT_ID}'),
+                'client_secret' => self::globalMacroStatic('{$TCS.3CX.CLIENT_SECRET}'),
+                'verify_ssl'    => self::globalMacroStatic('{$TCS.3CX.VERIFY.SSL}') !== '0',
+            ];
+            if ($cfg['url'] === '' || $cfg['client_id'] === '') return $kpis;
+
+            $client = ThreeCXClient::fromMacros($cfg);
+            $sys    = $client->systemStatus();
+            $trunks = $client->trunks();
+
+            // Re-shape SystemStatus → the pbx fields we need (subset of
+            // ActionVoipData::mapPbx) and Trunks → the status fields the
+            // tile reads.
+            $pbx = [
+                'version'       => (string) ($sys['Version'] ?? ''),
+                'activeNow'     => (int) ($sys['CallsActive'] ?? 0),
+                'capacity'      => (int) ($sys['MaxSimCalls'] ?? 0),
+                'registeredExt' => (int) ($sys['ExtensionsRegistered'] ?? 0),
+                'totalExt'      => (int) ($sys['ExtensionsTotal'] ?? 0),
+                'callsToday'    => 0,
+                'history'       => ['concur' => array_fill(0, 96, (int) ($sys['CallsActive'] ?? 0))],
+            ];
+            $trunkRows = [];
+            foreach ($trunks as $t) {
+                if (!is_array($t)) continue;
+                $isOnline = (bool) ($t['IsOnline'] ?? false);
+                $trunkRows[] = ['status' => $isOnline ? 'reg' : 'unreg'];
+            }
+            $kpis = self::shapeVoipKpis($pbx, $trunkRows);
+
+            if (function_exists('apcu_store')) {
+                apcu_store($selfKey, $kpis, 30);
+            }
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] global voip fallback: ' . $e->getMessage());
+        }
+        return $kpis;
+    }
+
+    /** @param array<string,mixed> $pbx @param list<array<string,mixed>> $trunks */
+    private static function shapeVoipKpis(array $pbx, array $trunks): array {
+        $trunkReg = $trunkUnreg = 0;
+        foreach ($trunks as $t) {
+            $st = $t['status'] ?? '';
+            if ($st === 'reg' || $st === 'dgr') $trunkReg++;
+            elseif ($st === 'unreg')            $trunkUnreg++;
+        }
+        $concur = $pbx['history']['concur'] ?? [];
+
+        $top = null;
+        if ($trunkUnreg > 0) {
+            $top = sprintf('%d SIP trunk%s unregistered on 3CX', $trunkUnreg, $trunkUnreg === 1 ? '' : 's');
+        } elseif (isset($pbx['callsToday']) && $pbx['callsToday'] > 0) {
+            $top = number_format((int) $pbx['callsToday']).' calls handled today';
+        }
+
+        return [
+            'version'      => $pbx['version'] !== '' ? (string) $pbx['version'] : null,
+            'ext_reg'      => isset($pbx['registeredExt']) ? (int) $pbx['registeredExt'] : null,
+            'ext_total'    => isset($pbx['totalExt'])      ? (int) $pbx['totalExt']      : null,
+            'calls_active' => isset($pbx['activeNow'])     ? (int) $pbx['activeNow']     : null,
+            'capacity'     => isset($pbx['capacity'])      ? (int) $pbx['capacity']      : null,
+            'trunk_reg'    => $trunkReg,
+            'trunk_total'  => count($trunks),
+            'trunk_unreg'  => $trunkUnreg,
+            'concur24h'    => is_array($concur) ? array_map('intval', array_values($concur)) : [],
+            'top'          => $top,
+        ];
+    }
+
+    private static function voipEmptyKpis(): array {
+        return [
+            'version'      => null,
+            'ext_reg'      => null,
+            'ext_total'    => null,
+            'calls_active' => null,
+            'capacity'     => null,
+            'trunk_reg'    => null,
+            'trunk_total'  => null,
+            'trunk_unreg'  => null,
+            'concur24h'    => [],
+            'top'          => null,
+        ];
+    }
+
+    private static function globalMacroStatic(string $name): string {
+        $rows = API::UserMacro()->get([
+            'output'      => ['macro', 'value'],
+            'globalmacro' => true,
+            'filter'      => ['macro' => $name],
+        ]) ?: [];
+        return trim((string) ($rows[0]['value'] ?? ''));
+    }
+
+    /** Average-downsample a numeric array to $n buckets (used for 96→24 spark). */
+    private static function downsample(array $src, int $n): array {
+        $len = count($src);
+        if ($len === 0 || $n <= 0) return array_fill(0, max(1, $n), 0);
+        if ($len <= $n) return array_pad($src, $n, 0);
+        $out  = [];
+        $step = $len / $n;
+        for ($i = 0; $i < $n; $i++) {
+            $a = (int) floor($i * $step);
+            $b = (int) floor(($i + 1) * $step);
+            if ($b <= $a) $b = $a + 1;
+            $slice = array_slice($src, $a, $b - $a);
+            $out[] = (int) round(array_sum($slice) / max(1, count($slice)));
+        }
+        return $out;
+    }
+
     private function collectSurveillanceFleetKpis(): array {
         // Scope to whichever monitored host carries the milestone.cam.status[*]
         // items (the Milestone Site host). Without this hostids filter the
