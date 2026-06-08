@@ -226,6 +226,14 @@ const SwitchesApp = () => {
               </div>
             </React.Fragment>
           )}
+          {effectiveTab === "xiq" && (
+            <React.Fragment>
+              <div className="switch-layout-2col">
+                <HostNavigator activeId={activeId} onSelect={(id) => { setActiveId(id); setTweak("selectedSwitch", id); }} />
+                <TabXiq host={host} />
+              </div>
+            </React.Fragment>
+          )}
           {effectiveTab === "cli" && isAdmin && (
             <React.Fragment>
               <div className="switch-layout-2col">

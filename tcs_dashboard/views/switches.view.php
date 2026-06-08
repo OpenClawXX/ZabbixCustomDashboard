@@ -67,6 +67,7 @@ $asset_base = 'modules/tcs_dashboard/assets';
     window.TCS_SWITCH_FLEET_URL    = "zabbix.php?action=tcs.switches.fleet.data";
     window.TCS_SWITCH_SNAPSHOT_URL = "zabbix.php?action=tcs.switches.snapshot.data";
     window.TCS_SWITCH_PORTHIST_URL = "zabbix.php?action=tcs.switches.port.history.data";
+    window.TCS_SWITCH_XIQ_URL      = "zabbix.php?action=tcs.switches.xiq.data";
 
     // Disable Zabbix's standard whole-page refresh on this view. The user
     // profile "Refresh time" setting drives PageRefresh / location.reload

@@ -1209,6 +1209,330 @@ const TabBackups = () => {
 };
 
 // ───────────────────────────────────────────────────────────────────
+// XIQ tab — looks the switch up in ExtremeCloud IQ and shows the
+// XIQ-side connected clients, recent device-scoped events, and any
+// open alerts that mention the switch hostname. Fetches lazily on
+// first tab activation; result is cached on window so re-clicking
+// doesn't refire the lookup.
+// ───────────────────────────────────────────────────────────────────
+const TabXiq = ({
+  host
+}) => {
+  const [state, setState] = useStateTAB(() => window.SWITCH_XIQ || {
+    loading: false,
+    loaded: false
+  });
+  const [now, setNow] = useStateTAB(() => Date.now());
+
+  // Single-flight: per page session we fetch once per host. The
+  // bridge exposes window.tcsLoadSwitchXiq for the Refresh button.
+  const hostid = host && host.hostid ? String(host.hostid) : "";
+  React.useEffect(() => {
+    if (!hostid || state.loading || state.loaded) return;
+    if (typeof window.tcsLoadSwitchXiq !== "function") return;
+    setState(s => ({
+      ...s,
+      loading: true,
+      error: null
+    }));
+    window.tcsLoadSwitchXiq(hostid).then(d => {
+      window.SWITCH_XIQ = {
+        ...d,
+        loading: false,
+        loaded: true
+      };
+      setState(window.SWITCH_XIQ);
+    }).catch(e => setState({
+      loading: false,
+      loaded: true,
+      error: String(e && e.message ? e.message : e)
+    }));
+  }, [hostid]);
+
+  // Live-aging timer for "X ago" labels.
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+  const refresh = () => {
+    if (!hostid || typeof window.tcsLoadSwitchXiq !== "function") return;
+    setState(s => ({
+      ...s,
+      loading: true,
+      error: null
+    }));
+    window.tcsLoadSwitchXiq(hostid, true).then(d => {
+      window.SWITCH_XIQ = {
+        ...d,
+        loading: false,
+        loaded: true
+      };
+      setState(window.SWITCH_XIQ);
+    }).catch(e => setState({
+      loading: false,
+      loaded: true,
+      error: String(e && e.message ? e.message : e)
+    }));
+  };
+  const fmtAge = sec => {
+    if (!sec || sec < 0) return "—";
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m";
+    if (sec < 86400) return Math.floor(sec / 3600) + "h " + Math.floor(sec % 3600 / 60) + "m";
+    return Math.floor(sec / 86400) + "d";
+  };
+  const tsAgo = ts => fmtAge(Math.max(0, Math.floor(now / 1000 - (Number(ts) || 0))));
+  const tsLabel = ts => {
+    if (!ts) return "—";
+    const d = new Date(Number(ts) * 1000);
+    return d.toLocaleString();
+  };
+  const reasonMsg = {
+    no_token: "No XIQ API token configured — set the {$XIQ_API_TOKEN} global macro.",
+    unknown_host: "Host not visible in Zabbix.",
+    lookup_failed: "XIQ lookup failed — see PHP error log.",
+    not_in_xiq: "This switch isn't onboarded in ExtremeCloud IQ."
+  };
+  const device = state.device || null;
+  const clients = Array.isArray(state.clients) ? state.clients : [];
+  const events = Array.isArray(state.events) ? state.events : [];
+  const alerts = Array.isArray(state.alerts) ? state.alerts : [];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "ExtremeCloud IQ"), /*#__PURE__*/React.createElement(SourceBadge, {
+    src: "ext"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "h-spacer"
+  }), state.rateLimit && state.rateLimit.remaining != null && /*#__PURE__*/React.createElement("span", {
+    className: "h-meta mono",
+    title: "XIQ quota remaining (7,500/hr/VIQ)"
+  }, "quota ", state.rateLimit.remaining), /*#__PURE__*/React.createElement("button", {
+    className: "seg-btn",
+    onClick: refresh,
+    disabled: state.loading,
+    style: {
+      marginLeft: 8
+    }
+  }, state.loading ? "Refreshing…" : "Refresh")), /*#__PURE__*/React.createElement("div", {
+    className: "card-b"
+  }, state.loading && !state.loaded && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "30px 12px",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 12
+    }
+  }, "Looking up ", /*#__PURE__*/React.createElement("span", {
+    className: "mono"
+  }, host && host.host), " in ExtremeCloud IQ\u2026"), state.error && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 12,
+      color: "var(--err, #f25f5c)",
+      fontSize: 12
+    }
+  }, state.error), state.loaded && !state.ok && state.reason && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "20px 12px",
+      color: "var(--muted)",
+      fontSize: 12
+    }
+  }, reasonMsg[state.reason] || state.reason), state.loaded && state.ok && device && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "xiq-identity",
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+      gap: 10,
+      marginBottom: 14,
+      padding: 12,
+      background: "var(--bg-2)",
+      border: "1px solid var(--line)",
+      borderRadius: 6
+    }
+  }, [["Hostname", device.hostname || "—"], ["Model", device.model || "—"], ["Firmware", device.firmware || "—"], ["Serial", device.serial || "—"], ["MAC", device.mac || "—"], ["IP", device.ip || "—"], ["Policy", device.policy_name || "—"], ["Connected", device.connected ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "var(--ok, #34d399)"
+    }
+  }, "\u25CF online") : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "var(--err, #f25f5c)"
+    }
+  }, "\u25CF offline")]].map(([k, v]) => /*#__PURE__*/React.createElement("div", {
+    key: k
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--muted)",
+      textTransform: "uppercase",
+      letterSpacing: 0.4
+    }
+  }, k), /*#__PURE__*/React.createElement("div", {
+    className: "mono",
+    style: {
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, v)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h",
+    style: {
+      padding: "4px 0",
+      borderBottom: "1px solid var(--line)",
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      textTransform: "uppercase",
+      letterSpacing: 0.5
+    }
+  }, "Clients"), /*#__PURE__*/React.createElement("span", {
+    className: "h-meta mono"
+  }, clients.length)), clients.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 4px",
+      color: "var(--muted)",
+      fontSize: 11
+    }
+  }, "No active clients reported by XIQ.") : /*#__PURE__*/React.createElement("table", {
+    className: "tbl",
+    style: {
+      width: "100%",
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, "SSID"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS"), /*#__PURE__*/React.createElement("th", null, "Conn"))), /*#__PURE__*/React.createElement("tbody", null, clients.slice(0, 200).map(c => /*#__PURE__*/React.createElement("tr", {
+    key: c.mac + ":" + c.duration
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "mono"
+  }, c.mac || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, c.host || "—"), /*#__PURE__*/React.createElement("div", {
+    className: "mono",
+    style: {
+      color: "var(--muted)",
+      fontSize: 10
+    }
+  }, c.ip || "")), /*#__PURE__*/React.createElement("td", null, c.user || "—"), /*#__PURE__*/React.createElement("td", null, c.ssid || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "mono"
+  }, c.vlan || "—"), /*#__PURE__*/React.createElement("td", null, c.os || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "mono"
+  }, fmtAge(c.duration))))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h",
+    style: {
+      padding: "4px 0",
+      borderBottom: "1px solid var(--line)",
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      textTransform: "uppercase",
+      letterSpacing: 0.5
+    }
+  }, "Events"), /*#__PURE__*/React.createElement("span", {
+    className: "h-meta mono"
+  }, events.length, " \xB7 last 7d")), events.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 4px",
+      color: "var(--muted)",
+      fontSize: 11
+    }
+  }, "No device events in the last 7 days.") : /*#__PURE__*/React.createElement("table", {
+    className: "tbl",
+    style: {
+      width: "100%",
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 70
+    }
+  }, "Sev"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 130
+    }
+  }, "When"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 130
+    }
+  }, "Category"), /*#__PURE__*/React.createElement("th", null, "Message"))), /*#__PURE__*/React.createElement("tbody", null, events.slice(0, 100).map(e => /*#__PURE__*/React.createElement("tr", {
+    key: e.id,
+    style: e.value === 0 ? {
+      opacity: 0.55
+    } : null
+  }, /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Sev, {
+    level: e.severity
+  })), /*#__PURE__*/React.createElement("td", {
+    className: "mono",
+    title: tsLabel(e.clock)
+  }, tsAgo(e.clock), " ago"), /*#__PURE__*/React.createElement("td", null, e.category || "—"), /*#__PURE__*/React.createElement("td", null, e.message || "—")))))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "card-h",
+    style: {
+      padding: "4px 0",
+      borderBottom: "1px solid var(--line)",
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      textTransform: "uppercase",
+      letterSpacing: 0.5
+    }
+  }, "Alerts"), /*#__PURE__*/React.createElement("span", {
+    className: "h-meta mono"
+  }, alerts.length, " \xB7 last 7d")), alerts.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 4px",
+      color: "var(--muted)",
+      fontSize: 11
+    }
+  }, "No XIQ alerts reference this host.") : /*#__PURE__*/React.createElement("table", {
+    className: "tbl",
+    style: {
+      width: "100%",
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 70
+    }
+  }, "Sev"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 130
+    }
+  }, "When"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 130
+    }
+  }, "Source"), /*#__PURE__*/React.createElement("th", null, "Summary"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 60
+    }
+  }, "Ack"))), /*#__PURE__*/React.createElement("tbody", null, alerts.map(a => /*#__PURE__*/React.createElement("tr", {
+    key: a.id || a.ts + a.summary
+  }, /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Sev, {
+    level: a.severity
+  })), /*#__PURE__*/React.createElement("td", {
+    className: "mono",
+    title: tsLabel(a.ts)
+  }, tsAgo(a.ts), " ago"), /*#__PURE__*/React.createElement("td", null, a.source || a.category || "—"), /*#__PURE__*/React.createElement("td", null, a.summary || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "mono"
+  }, a.acknowledged ? "✓" : "")))))))));
+};
+
+// ───────────────────────────────────────────────────────────────────
 // Tab definitions table — exported
 // ───────────────────────────────────────────────────────────────────
 window.SWITCH_TABS = [{
@@ -1232,6 +1556,10 @@ window.SWITCH_TABS = [{
   label: "PoE Budget",
   badge: null
 }, {
+  id: "xiq",
+  label: "XIQ",
+  badge: null
+}, {
   id: "cli",
   label: "CLI",
   badge: null,
@@ -1249,6 +1577,7 @@ window.TabTopology = TabTopology;
 window.TabStackHealth = TabStackHealth;
 window.TabVlan = TabVlan;
 window.TabPoe = TabPoe;
+window.TabXiq = TabXiq;
 window.TabCli = TabCli;
 window.TabTriggers = TabTriggers;
 window.TabBackups = TabBackups;

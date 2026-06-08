@@ -308,7 +308,17 @@ const SwitchesApp = () => {
       setActiveId(id);
       setTweak("selectedSwitch", id);
     }
-  }), /*#__PURE__*/React.createElement(TabPoe, null))), effectiveTab === "cli" && isAdmin && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement(TabPoe, null))), effectiveTab === "xiq" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "switch-layout-2col"
+  }, /*#__PURE__*/React.createElement(HostNavigator, {
+    activeId: activeId,
+    onSelect: id => {
+      setActiveId(id);
+      setTweak("selectedSwitch", id);
+    }
+  }), /*#__PURE__*/React.createElement(TabXiq, {
+    host: host
+  }))), effectiveTab === "cli" && isAdmin && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "switch-layout-2col"
   }, /*#__PURE__*/React.createElement(HostNavigator, {
     activeId: activeId,

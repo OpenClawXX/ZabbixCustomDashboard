@@ -73,6 +73,11 @@
             "layout": "layout.json",
             "view": null
         },
+        "tcs.switches.xiq.data": {
+            "class": "ActionSwitchesXiqData",
+            "layout": "layout.json",
+            "view": null
+        },
         "tcs.servers.view": {
             "class": "ActionServers",
             "view": "servers.view",

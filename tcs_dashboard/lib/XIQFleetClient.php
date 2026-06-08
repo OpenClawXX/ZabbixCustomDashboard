@@ -77,6 +77,68 @@ final class XIQFleetClient {
     }
 
     /**
+     * Resolve a XIQ device by hostname and/or serial number.
+     *
+     * Tries the cheap path first: GET /devices with the API's own filter
+     * params (`hostnames`, `sns`). One small page back from XIQ, no fleet
+     * paging. Returns the first BASIC-view device row matched, or null when
+     * neither identifier hits.
+     *
+     * Used by the Switches dashboard's XIQ tab to look up a switch's XIQ
+     * device id from its Zabbix host name + inventory serial without
+     * dragging the whole fleet list through APCu.
+     *
+     * Cached 5 min under "find:<hostname>:<serial>" since the mapping is
+     * stable — switches rarely change name or get re-onboarded in XIQ.
+     *
+     * @param string $hostname  Zabbix host technical name (may match XIQ
+     *                          hostname when names are kept in sync).
+     * @param string $serial    Inventory serial number (most reliable match).
+     * @return array<string,mixed>|null
+     */
+    public function findDevice(string $hostname, string $serial = '', int $cacheTtl = 300): ?array {
+        $hostname = trim($hostname);
+        $serial   = trim($serial);
+        if ($hostname === '' && $serial === '') return null;
+
+        $bucket = 'find:' . md5($hostname . '|' . $serial);
+        $found = $this->cached($bucket, $cacheTtl, function () use ($hostname, $serial) {
+            $tryFilter = function (array $extra) {
+                $query = http_build_query($extra + [
+                    'page'  => 1,
+                    'limit' => 10,
+                    'views' => 'BASIC',
+                ]);
+                $resp = $this->getRaw('/devices?' . $query);
+                $isList = is_array($resp) && (array_values($resp) === $resp);
+                $rows = $resp['data'] ?? ($isList ? $resp : []);
+                return is_array($rows) ? $rows : [];
+            };
+
+            // Serial first — globally unique, never reused.
+            if ($serial !== '') {
+                $rows = $tryFilter(['sns' => $serial]);
+                if ($rows) return $rows[0];
+            }
+            // Then hostname — XIQ matches the param case-sensitively, so
+            // we try the technical name verbatim before any lowercasing.
+            if ($hostname !== '') {
+                $rows = $tryFilter(['hostnames' => $hostname]);
+                if ($rows) return $rows[0];
+                $lower = strtolower($hostname);
+                if ($lower !== $hostname) {
+                    $rows = $tryFilter(['hostnames' => $lower]);
+                    if ($rows) return $rows[0];
+                }
+            }
+            return ['__not_found' => true];
+        });
+
+        if (!is_array($found) || ($found['__not_found'] ?? false)) return null;
+        return $found;
+    }
+
+    /**
      * List of network policies (id + name). Use as the seed for SSID rollups
      * via XIQClient::getPolicySsids($policyId).
      */
