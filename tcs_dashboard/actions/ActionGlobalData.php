@@ -351,13 +351,19 @@ class ActionGlobalData extends ActionDataBase {
 
     private function buildSites(array $hosts, array $problems): array {
         // Bucket hosts by site group. Hosts in zero site-prefix groups go
-        // to "Unassigned". Aggregator hosts (XIQ_AP, etc.) never enter the
-        // map at all — their problems are filtered below.
+        // to "Unassigned". Aggregator hosts (XIQ_AP, etc.) and wireless APs
+        // never enter the map at all — their problems are filtered below.
+        // APs are excluded because the wireless fleet (1,000+ APs across
+        // every site) drowns out the health map and dominates the "top
+        // problem hotspots" list, hiding the per-site infra issues the
+        // heatmap is supposed to surface. Wireless health has its own
+        // dedicated tile in the System Snapshot + the XIQ dashboard.
         $host_to_site = [];
         $excluded_hostids = [];
         $sites = [];
         foreach ($hosts as $h) {
-            if (in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)) {
+            if (in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)
+                || $this->classifyHostDomain($h) === 'wireless') {
                 $excluded_hostids[(string) $h['hostid']] = true;
                 continue;
             }
@@ -395,14 +401,13 @@ class ActionGlobalData extends ActionDataBase {
         foreach ($problems as $p) {
             $sev = (int) $p['severity'];
             $hosts_on_trigger = $p['hosts'] ?? [];
-            // Match by host technical name too — the aggregator may not be
-            // in host.get if it's filtered out by monitored_hosts, in which
-            // case the hostid-based excluded_hostids map is empty.
+            // Drop a problem from the heatmap when EVERY host on the
+            // trigger is excluded — aggregator hosts (XIQ_AP, etc.) plus
+            // wireless APs. A trigger with a mix of wireless + non-wireless
+            // hosts still surfaces on the non-wireless sites it touches.
             $all_excluded = $hosts_on_trigger !== [] && array_reduce(
                 $hosts_on_trigger,
-                fn($acc, $h) => $acc
-                    && (isset($excluded_hostids[(string) $h['hostid']])
-                        || in_array($h['host'] ?? '', self::HEATMAP_EXCLUDE_HOSTS, true)),
+                fn($acc, $h) => $acc && !isset($host_to_site[(string) $h['hostid']]),
                 true
             );
             if ($all_excluded) {
@@ -1095,6 +1100,20 @@ class ActionGlobalData extends ActionDataBase {
     }
 
     /* --------------------------------------------------------------------- */
+
+    /** Bucket a host into one of DOMAIN_PATTERNS by template-name match,
+     *  or null if no pattern hits. Same logic buildDomains() uses inline. */
+    private function classifyHostDomain(array $host): ?string {
+        $names = array_column($host['parentTemplates'] ?? [], 'name');
+        if (!$names) return null;
+        $blob = implode(' ', $names);
+        foreach (self::DOMAIN_PATTERNS as $domain => $needles) {
+            foreach ($needles as $needle) {
+                if (stripos($blob, $needle) !== false) return $domain;
+            }
+        }
+        return null;
+    }
 
     private function hostAvailable(array $host): int {
         $any_main = false;
