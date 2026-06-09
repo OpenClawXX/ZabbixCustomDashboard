@@ -209,9 +209,6 @@ class ActionSwitchesXiqData extends ActionDataBase {
                 if ($wired) $diag['wired_first_keys'] = array_keys($wired[0]);
                 if ($debug && $wired) $diag['wired_first_row'] = $wired[0];
                 $payload['clients'] = array_merge($payload['clients'], $this->shapeWiredClients($wired));
-                if (!$wired && (int) ($wiredMeta['total_count'] ?? 0) === 0) {
-                    $payload['notes']['clients'] = 'XIQ reports 0 wired clients for this switch on /dashboard/wired/client-health/grid. The console-side Connected Clients view may be sourced from a different telemetry channel (e.g. switch FDB pushed via Instant Port Profile); check Site → Switch in XIQ to confirm.';
-                }
             } catch (\Throwable $e) {
                 $msg = $e->getMessage();
                 if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
@@ -220,6 +217,40 @@ class ActionSwitchesXiqData extends ActionDataBase {
                     error_log('[tcs_dashboard] xiq wired clients failed: ' . $msg);
                 }
                 $diag['errors'][] = 'wired_clients: ' . $msg;
+            }
+
+            // Cross-check against the legacy /clients/active count endpoint
+            // when the grid returned nothing. Two zeroes from two
+            // independent endpoints is a definitive "XIQ has no wired-
+            // client telemetry indexed for this switch" — not a transient
+            // grid-side issue. The Python SDK confirms these are the only
+            // public wired-client list endpoints.
+            $gridTotal = (int) ($diag['wired_clients_total'] ?? 0);
+            if ($gridTotal === 0 && empty($payload['clients'])) {
+                try {
+                    $cnt = $fleet->getJson('/clients/active/count', [
+                        'deviceIds'             => $deviceId,
+                        'clientConnectionTypes' => 2,   // 2 = WIRED
+                        'excludeLocallyManaged' => 'false'
+                    ]);
+                    // /clients/active/count returns a bare int on success.
+                    $activeCount = is_numeric($cnt) ? (int) $cnt
+                        : (int) ($cnt['count'] ?? $cnt['total_count'] ?? 0);
+                    $diag['clients_active_wired_count'] = $activeCount;
+                    if ($activeCount === 0 && empty($payload['notes']['clients'])) {
+                        $payload['notes']['clients'] =
+                            'XIQ has no wired-client telemetry indexed for this switch — both '
+                            . '/dashboard/wired/client-health/grid and /clients/active (count) '
+                            . 'returned 0. This is typically because the switch isn\'t pushing '
+                            . 'client telemetry to XIQ: assign an Instant Port Profile to the '
+                            . 'access ports in the device\'s policy, or enable Wired Client '
+                            . 'Visibility on the device. The switch FDB shown on the Port Status '
+                            . 'tab (sourced from Zabbix via SNMP) is the source of truth in the '
+                            . 'meantime.';
+                    }
+                } catch (\Throwable $e) {
+                    $diag['errors'][] = 'wired_count_probe: ' . $e->getMessage();
+                }
             }
         }
 
