@@ -1300,6 +1300,148 @@ const TabXiq = ({
   const alerts = Array.isArray(state.alerts) ? state.alerts : [];
   const notes = state.notes && typeof state.notes === "object" ? state.notes : {};
 
+  // ── Merge XIQ + SNMP auth + PF per (port, MAC) ──────────────────────
+  // XIQ wired-client rows carry port=`1:1` and a colon-separated MAC.
+  // window.PORT_AUTH is keyed by "m.p" (e.g. "1.1") with array of
+  // sessions {mac, applied, policy, policyName, agentLabel, vlan, duration}.
+  // window._tcsPfByKey same "m.p" keying with PF rows {mac, host, ip, role,
+  // owner, os, dhcpFp, lastSeen, reg}.
+  // The merged row collects the strongest data from each source and
+  // records `sources` (XIQ/SNMP/PF) so the UI can show provenance.
+  const normMac = s => String(s || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  const dotKey = port => String(port || "").replace(/:/g, "."); // "1:1" → "1.1"
+  const colonPort = k => String(k || "").replace(/\./g, ":");
+  const buildMergedClients = () => {
+    const xiqWired = clients.filter(c => c.wired);
+    // Group all three sources by "port|mac" so rows from different
+    // sources for the same physical client collapse together.
+    const byKey = new Map(); // key → merged row
+    const ensure = (port, mac) => {
+      const k = dotKey(port) + "|" + normMac(mac);
+      if (!byKey.has(k)) {
+        byKey.set(k, {
+          key: k,
+          port: colonPort(port),
+          portDot: dotKey(port),
+          mac: mac || "",
+          macNorm: normMac(mac),
+          host: "",
+          ip: "",
+          user: "",
+          vlan: "",
+          os: "",
+          ipp: "",
+          // XIQ Instant Port Profile
+          role: "",
+          // PF role
+          owner: "",
+          // PF dot1x username
+          dhcpFp: "",
+          lastSeen: "",
+          reg: "",
+          authPolicy: "",
+          // SNMP policy profile name
+          authMethod: "",
+          // SNMP agent label ("802.1X" / "MAC" / etc.)
+          authApplied: false,
+          authVlan: "",
+          authDuration: 0,
+          authSessionCount: 0,
+          sources: new Set()
+        });
+      }
+      return byKey.get(k);
+    };
+    const setIf = (row, field, val) => {
+      if (val == null || val === "" || row[field]) return;
+      row[field] = val;
+    };
+
+    // 1. XIQ wired rows (richest single source for connected clients).
+    for (const c of xiqWired) {
+      if (!c.port) continue;
+      const row = ensure(c.port, c.mac);
+      row.sources.add("XIQ");
+      setIf(row, "host", c.host);
+      setIf(row, "ip", c.ip);
+      setIf(row, "user", c.user);
+      setIf(row, "vlan", c.vlan);
+      setIf(row, "os", c.os);
+      setIf(row, "ipp", c.role); // XIQ's "role" is the Instant Port Profile
+    }
+
+    // 2. SNMP auth sessions (etsysMultiAuthSessionStationTable). Multiple
+    //    sessions per port are common (e.g. dual-supplicant on phone+PC),
+    //    one row per MAC.
+    const portAuth = window.PORT_AUTH || {};
+    const policyNames = window.POLICY_PROFILES || {};
+    for (const k of Object.keys(portAuth)) {
+      const sessions = Array.isArray(portAuth[k]) ? portAuth[k] : [];
+      for (const s of sessions) {
+        if (!s || !s.mac) continue;
+        const row = ensure(colonPort(k), s.mac);
+        row.sources.add("SNMP");
+        row.authSessionCount++;
+        // The "applied" session wins for the per-row display; track
+        // whether any session on this port-MAC is applied separately.
+        if (s.applied || !row.authApplied) {
+          row.authApplied = !!(s.applied || row.authApplied);
+          if (s.policy != null) {
+            row.authPolicy = policyNames[s.policy] || String(s.policy);
+          }
+          if (s.agentLabel) row.authMethod = s.agentLabel;
+          if (s.vlan != null && s.vlan !== "") row.authVlan = s.vlan;
+          if (s.duration != null) row.authDuration = Math.max(row.authDuration, s.duration);
+        }
+      }
+    }
+
+    // 3. PF nodes (registration / role / dot1x / DHCP fingerprint).
+    const pfByKey = window._tcsPfByKey || {};
+    for (const k of Object.keys(pfByKey)) {
+      const rows = Array.isArray(pfByKey[k]) ? pfByKey[k] : [];
+      for (const p of rows) {
+        if (!p || !p.mac) continue;
+        const row = ensure(colonPort(k), p.mac);
+        row.sources.add("PF");
+        setIf(row, "host", p.host);
+        setIf(row, "ip", p.ip);
+        setIf(row, "owner", p.owner);
+        setIf(row, "role", p.role);
+        setIf(row, "os", p.os);
+        setIf(row, "dhcpFp", p.dhcpFp);
+        setIf(row, "lastSeen", p.lastSeen);
+        setIf(row, "reg", p.reg);
+        // PF VLAN is from locationlog — fill it in if XIQ/SNMP didn't
+        if (!row.vlan && p.vlan) row.vlan = p.vlan;
+      }
+    }
+
+    // Sort: by port (member, then port number numerically), then by MAC.
+    const portCmp = (a, b) => {
+      const pa = a.portDot.split(".").map(n => Number(n) || 0);
+      const pb = b.portDot.split(".").map(n => Number(n) || 0);
+      return pa[0] - pb[0] || pa[1] - pb[1] || a.macNorm.localeCompare(b.macNorm);
+    };
+    return Array.from(byKey.values()).sort(portCmp);
+  };
+  const merged = device ? buildMergedClients() : [];
+  const sourceBadge = (label, on) => /*#__PURE__*/React.createElement("span", {
+    key: label,
+    style: {
+      display: "inline-block",
+      marginRight: 4,
+      padding: "0 5px",
+      fontSize: 9,
+      lineHeight: "14px",
+      borderRadius: 3,
+      fontFamily: "var(--mono)",
+      color: on ? "var(--fg)" : "var(--muted)",
+      background: on ? "var(--bg-3)" : "transparent",
+      border: "1px solid " + (on ? "var(--line)" : "transparent")
+    }
+  }, label);
+
   // Pill rendered in place of an empty table, explaining why XIQ has
   // nothing to show. Used for switches against /clients/active (XIQ API
   // limitation) and /alerts (token scope).
@@ -1417,7 +1559,7 @@ const TabXiq = ({
     }
   }, "Clients"), /*#__PURE__*/React.createElement("span", {
     className: "h-meta mono"
-  }, clients.length)), clients.length === 0 ? notes.clients ? /*#__PURE__*/React.createElement(InfoPill, {
+  }, clients.length)), clients.length === 0 && merged.length === 0 ? notes.clients ? /*#__PURE__*/React.createElement(InfoPill, {
     kind: "warn"
   }, notes.clients) : /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1426,18 +1568,20 @@ const TabXiq = ({
       fontSize: 11
     }
   }, "No active clients reported by XIQ.") : (() => {
-    // When any wired clients are present, swap the SSID column
-    // for a Port column — switches don't broadcast SSIDs, but
-    // the connecting port is the most useful join key.
-    const anyWired = clients.some(c => c.wired);
-    return /*#__PURE__*/React.createElement("table", {
+    // Wireless XIQ rows (APs) render the legacy SSID/Conn table.
+    // Switch tabs render the merged XIQ + SNMP-auth + PF view
+    // built above, keyed by (port, MAC). Both can coexist if
+    // a stack happens to host an AP child.
+    const wireless = clients.filter(c => !c.wired);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, wireless.length > 0 && /*#__PURE__*/React.createElement("table", {
       className: "tbl",
       style: {
         width: "100%",
-        fontSize: 11
+        fontSize: 11,
+        marginBottom: merged.length ? 12 : 0
       }
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, anyWired ? "Port" : "SSID"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS"), /*#__PURE__*/React.createElement("th", null, anyWired ? "Profile" : "Conn"))), /*#__PURE__*/React.createElement("tbody", null, clients.slice(0, 200).map(c => /*#__PURE__*/React.createElement("tr", {
-      key: (c.mac || "?") + ":" + (c.wired ? c.port || "" : c.duration)
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, "SSID"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS"), /*#__PURE__*/React.createElement("th", null, "Conn"))), /*#__PURE__*/React.createElement("tbody", null, wireless.slice(0, 200).map(c => /*#__PURE__*/React.createElement("tr", {
+      key: "w:" + (c.mac || "?") + ":" + c.duration
     }, /*#__PURE__*/React.createElement("td", {
       className: "mono"
     }, c.mac || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, c.host || "—"), /*#__PURE__*/React.createElement("div", {
@@ -1446,11 +1590,99 @@ const TabXiq = ({
         color: "var(--muted)",
         fontSize: 10
       }
-    }, c.ip || "")), /*#__PURE__*/React.createElement("td", null, c.user || "—"), /*#__PURE__*/React.createElement("td", {
+    }, c.ip || "")), /*#__PURE__*/React.createElement("td", null, c.user || "—"), /*#__PURE__*/React.createElement("td", null, c.ssid || "—"), /*#__PURE__*/React.createElement("td", {
       className: "mono"
-    }, c.wired ? c.port || "—" : c.ssid || "—"), /*#__PURE__*/React.createElement("td", {
+    }, c.vlan || "—"), /*#__PURE__*/React.createElement("td", null, c.os || "—"), /*#__PURE__*/React.createElement("td", {
       className: "mono"
-    }, c.vlan || "—"), /*#__PURE__*/React.createElement("td", null, c.os || "—"), /*#__PURE__*/React.createElement("td", null, c.wired ? c.role || "—" : fmtAge(c.duration))))));
+    }, fmtAge(c.duration)))))), merged.length > 0 && /*#__PURE__*/React.createElement("table", {
+      className: "tbl",
+      style: {
+        width: "100%",
+        fontSize: 11
+      }
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+      style: {
+        width: 110
+      }
+    }, "Sources"), /*#__PURE__*/React.createElement("th", {
+      style: {
+        width: 70
+      }
+    }, "Port"), /*#__PURE__*/React.createElement("th", null, "MAC"), /*#__PURE__*/React.createElement("th", null, "Host / IP"), /*#__PURE__*/React.createElement("th", null, "User"), /*#__PURE__*/React.createElement("th", null, "Role / Profile"), /*#__PURE__*/React.createElement("th", null, "Auth"), /*#__PURE__*/React.createElement("th", null, "VLAN"), /*#__PURE__*/React.createElement("th", null, "OS / Fingerprint"), /*#__PURE__*/React.createElement("th", null, "Last seen"))), /*#__PURE__*/React.createElement("tbody", null, merged.slice(0, 300).map(r => {
+      const xiq = r.sources.has("XIQ");
+      const snmp = r.sources.has("SNMP");
+      const pf = r.sources.has("PF");
+      const role = r.role || r.ipp; // PF role beats IPP if both set above
+      const authLabel = r.authMethod ? r.authMethod + (r.authApplied ? "" : " (pending)") : "";
+      const vlan = r.vlan || r.authVlan;
+      const os = r.os;
+      return /*#__PURE__*/React.createElement("tr", {
+        key: r.key
+      }, /*#__PURE__*/React.createElement("td", null, sourceBadge("XIQ", xiq), sourceBadge("SNMP", snmp), sourceBadge("PF", pf)), /*#__PURE__*/React.createElement("td", {
+        className: "mono"
+      }, r.port || "—"), /*#__PURE__*/React.createElement("td", {
+        className: "mono"
+      }, r.mac || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, r.host || "—"), /*#__PURE__*/React.createElement("div", {
+        className: "mono",
+        style: {
+          color: "var(--muted)",
+          fontSize: 10
+        }
+      }, r.ip || "")), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, r.owner || r.user || "—"), r.owner && r.user && r.owner !== r.user && /*#__PURE__*/React.createElement("div", {
+        className: "mono",
+        style: {
+          color: "var(--muted)",
+          fontSize: 10
+        },
+        title: "XIQ-side user"
+      }, "xiq:", r.user)), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, role || "—"), r.authPolicy && r.authPolicy !== role && /*#__PURE__*/React.createElement("div", {
+        className: "mono",
+        style: {
+          color: "var(--muted)",
+          fontSize: 10
+        },
+        title: "SNMP policy profile"
+      }, "snmp:", r.authPolicy)), /*#__PURE__*/React.createElement("td", null, snmp ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: r.authApplied ? "var(--ok, #34d399)" : "var(--warn, #f5b300)"
+        }
+      }, authLabel || (r.authApplied ? "applied" : "—")) : "—", r.authSessionCount > 1 && /*#__PURE__*/React.createElement("span", {
+        className: "mono",
+        style: {
+          color: "var(--muted)",
+          fontSize: 10,
+          marginLeft: 4
+        },
+        title: "multiple auth sessions"
+      }, "\xD7", r.authSessionCount)), /*#__PURE__*/React.createElement("td", {
+        className: "mono"
+      }, vlan || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", null, os || "—"), r.dhcpFp && /*#__PURE__*/React.createElement("div", {
+        className: "mono",
+        style: {
+          color: "var(--muted)",
+          fontSize: 10
+        },
+        title: "DHCP fingerprint"
+      }, r.dhcpFp)), /*#__PURE__*/React.createElement("td", {
+        className: "mono",
+        style: {
+          fontSize: 10
+        }
+      }, r.lastSeen || "—"));
+    }))), merged.length > 0 && (() => {
+      const xiqOnly = merged.filter(r => r.sources.size === 1 && r.sources.has("XIQ")).length;
+      const pfOnly = merged.filter(r => r.sources.size === 1 && r.sources.has("PF")).length;
+      const snmpOnly = merged.filter(r => r.sources.size === 1 && r.sources.has("SNMP")).length;
+      const multi = merged.length - xiqOnly - pfOnly - snmpOnly;
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 6,
+          fontSize: 10,
+          color: "var(--muted)",
+          fontFamily: "var(--mono)"
+        }
+      }, merged.length, " clients \xB7 ", multi, " multi-source \xB7 ", xiqOnly, " XIQ-only \xB7 ", snmpOnly, " SNMP-only \xB7 ", pfOnly, " PF-only");
+    })());
   })()), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14

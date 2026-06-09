@@ -971,6 +971,135 @@ const TabXiq = ({ host }) => {
   const alerts  = Array.isArray(state.alerts)  ? state.alerts  : [];
   const notes   = (state.notes && typeof state.notes === "object") ? state.notes : {};
 
+  // ── Merge XIQ + SNMP auth + PF per (port, MAC) ──────────────────────
+  // XIQ wired-client rows carry port=`1:1` and a colon-separated MAC.
+  // window.PORT_AUTH is keyed by "m.p" (e.g. "1.1") with array of
+  // sessions {mac, applied, policy, policyName, agentLabel, vlan, duration}.
+  // window._tcsPfByKey same "m.p" keying with PF rows {mac, host, ip, role,
+  // owner, os, dhcpFp, lastSeen, reg}.
+  // The merged row collects the strongest data from each source and
+  // records `sources` (XIQ/SNMP/PF) so the UI can show provenance.
+  const normMac = (s) => String(s || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  const dotKey  = (port) => String(port || "").replace(/:/g, ".");      // "1:1" → "1.1"
+  const colonPort = (k)  => String(k || "").replace(/\./g, ":");
+
+  const buildMergedClients = () => {
+    const xiqWired = clients.filter(c => c.wired);
+    // Group all three sources by "port|mac" so rows from different
+    // sources for the same physical client collapse together.
+    const byKey = new Map();   // key → merged row
+    const ensure = (port, mac) => {
+      const k = dotKey(port) + "|" + normMac(mac);
+      if (!byKey.has(k)) {
+        byKey.set(k, {
+          key: k,
+          port: colonPort(port),
+          portDot: dotKey(port),
+          mac: mac || "",
+          macNorm: normMac(mac),
+          host: "", ip: "", user: "", vlan: "", os: "",
+          ipp: "",        // XIQ Instant Port Profile
+          role: "",       // PF role
+          owner: "",      // PF dot1x username
+          dhcpFp: "",
+          lastSeen: "",
+          reg: "",
+          authPolicy: "", // SNMP policy profile name
+          authMethod: "", // SNMP agent label ("802.1X" / "MAC" / etc.)
+          authApplied: false,
+          authVlan: "",
+          authDuration: 0,
+          authSessionCount: 0,
+          sources: new Set()
+        });
+      }
+      return byKey.get(k);
+    };
+    const setIf = (row, field, val) => {
+      if (val == null || val === "" || row[field]) return;
+      row[field] = val;
+    };
+
+    // 1. XIQ wired rows (richest single source for connected clients).
+    for (const c of xiqWired) {
+      if (!c.port) continue;
+      const row = ensure(c.port, c.mac);
+      row.sources.add("XIQ");
+      setIf(row, "host",  c.host);
+      setIf(row, "ip",    c.ip);
+      setIf(row, "user",  c.user);
+      setIf(row, "vlan",  c.vlan);
+      setIf(row, "os",    c.os);
+      setIf(row, "ipp",   c.role);     // XIQ's "role" is the Instant Port Profile
+    }
+
+    // 2. SNMP auth sessions (etsysMultiAuthSessionStationTable). Multiple
+    //    sessions per port are common (e.g. dual-supplicant on phone+PC),
+    //    one row per MAC.
+    const portAuth = window.PORT_AUTH || {};
+    const policyNames = window.POLICY_PROFILES || {};
+    for (const k of Object.keys(portAuth)) {
+      const sessions = Array.isArray(portAuth[k]) ? portAuth[k] : [];
+      for (const s of sessions) {
+        if (!s || !s.mac) continue;
+        const row = ensure(colonPort(k), s.mac);
+        row.sources.add("SNMP");
+        row.authSessionCount++;
+        // The "applied" session wins for the per-row display; track
+        // whether any session on this port-MAC is applied separately.
+        if (s.applied || !row.authApplied) {
+          row.authApplied = !!(s.applied || row.authApplied);
+          if (s.policy != null) {
+            row.authPolicy = policyNames[s.policy] || String(s.policy);
+          }
+          if (s.agentLabel) row.authMethod = s.agentLabel;
+          if (s.vlan != null && s.vlan !== "") row.authVlan = s.vlan;
+          if (s.duration != null) row.authDuration = Math.max(row.authDuration, s.duration);
+        }
+      }
+    }
+
+    // 3. PF nodes (registration / role / dot1x / DHCP fingerprint).
+    const pfByKey = window._tcsPfByKey || {};
+    for (const k of Object.keys(pfByKey)) {
+      const rows = Array.isArray(pfByKey[k]) ? pfByKey[k] : [];
+      for (const p of rows) {
+        if (!p || !p.mac) continue;
+        const row = ensure(colonPort(k), p.mac);
+        row.sources.add("PF");
+        setIf(row, "host",   p.host);
+        setIf(row, "ip",     p.ip);
+        setIf(row, "owner",  p.owner);
+        setIf(row, "role",   p.role);
+        setIf(row, "os",     p.os);
+        setIf(row, "dhcpFp", p.dhcpFp);
+        setIf(row, "lastSeen", p.lastSeen);
+        setIf(row, "reg",    p.reg);
+        // PF VLAN is from locationlog — fill it in if XIQ/SNMP didn't
+        if (!row.vlan && p.vlan) row.vlan = p.vlan;
+      }
+    }
+
+    // Sort: by port (member, then port number numerically), then by MAC.
+    const portCmp = (a, b) => {
+      const pa = a.portDot.split(".").map(n => Number(n) || 0);
+      const pb = b.portDot.split(".").map(n => Number(n) || 0);
+      return (pa[0] - pb[0]) || (pa[1] - pb[1]) || a.macNorm.localeCompare(b.macNorm);
+    };
+    return Array.from(byKey.values()).sort(portCmp);
+  };
+
+  const merged = device ? buildMergedClients() : [];
+  const sourceBadge = (label, on) => (
+    <span key={label} style={{
+      display: "inline-block", marginRight: 4, padding: "0 5px",
+      fontSize: 9, lineHeight: "14px", borderRadius: 3, fontFamily: "var(--mono)",
+      color: on ? "var(--fg)" : "var(--muted)",
+      background: on ? "var(--bg-3)" : "transparent",
+      border: "1px solid " + (on ? "var(--line)" : "transparent")
+    }}>{label}</span>
+  );
+
   // Pill rendered in place of an empty table, explaining why XIQ has
   // nothing to show. Used for switches against /clients/active (XIQ API
   // limitation) and /alerts (token scope).
@@ -1062,45 +1191,138 @@ const TabXiq = ({ host }) => {
                 <h4 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>Clients</h4>
                 <span className="h-meta mono">{clients.length}</span>
               </div>
-              {clients.length === 0 ? (
+              {clients.length === 0 && merged.length === 0 ? (
                 notes.clients
                   ? <InfoPill kind="warn">{notes.clients}</InfoPill>
                   : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No active clients reported by XIQ.</div>
               ) : (() => {
-                // When any wired clients are present, swap the SSID column
-                // for a Port column — switches don't broadcast SSIDs, but
-                // the connecting port is the most useful join key.
-                const anyWired = clients.some(c => c.wired);
+                // Wireless XIQ rows (APs) render the legacy SSID/Conn table.
+                // Switch tabs render the merged XIQ + SNMP-auth + PF view
+                // built above, keyed by (port, MAC). Both can coexist if
+                // a stack happens to host an AP child.
+                const wireless = clients.filter(c => !c.wired);
                 return (
-                  <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
-                    <thead>
-                      <tr>
-                        <th>MAC</th>
-                        <th>Host / IP</th>
-                        <th>User</th>
-                        <th>{anyWired ? "Port" : "SSID"}</th>
-                        <th>VLAN</th>
-                        <th>OS</th>
-                        <th>{anyWired ? "Profile" : "Conn"}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {clients.slice(0, 200).map(c => (
-                        <tr key={(c.mac || "?") + ":" + (c.wired ? (c.port || "") : c.duration)}>
-                          <td className="mono">{c.mac || "—"}</td>
-                          <td>
-                            <div>{c.host || "—"}</div>
-                            <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{c.ip || ""}</div>
-                          </td>
-                          <td>{c.user || "—"}</td>
-                          <td className="mono">{c.wired ? (c.port || "—") : (c.ssid || "—")}</td>
-                          <td className="mono">{c.vlan || "—"}</td>
-                          <td>{c.os || "—"}</td>
-                          <td>{c.wired ? (c.role || "—") : fmtAge(c.duration)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <React.Fragment>
+                    {wireless.length > 0 && (
+                      <table className="tbl" style={{ width: "100%", fontSize: 11, marginBottom: merged.length ? 12 : 0 }}>
+                        <thead>
+                          <tr>
+                            <th>MAC</th>
+                            <th>Host / IP</th>
+                            <th>User</th>
+                            <th>SSID</th>
+                            <th>VLAN</th>
+                            <th>OS</th>
+                            <th>Conn</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {wireless.slice(0, 200).map(c => (
+                            <tr key={"w:" + (c.mac || "?") + ":" + c.duration}>
+                              <td className="mono">{c.mac || "—"}</td>
+                              <td>
+                                <div>{c.host || "—"}</div>
+                                <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{c.ip || ""}</div>
+                              </td>
+                              <td>{c.user || "—"}</td>
+                              <td>{c.ssid || "—"}</td>
+                              <td className="mono">{c.vlan || "—"}</td>
+                              <td>{c.os || "—"}</td>
+                              <td className="mono">{fmtAge(c.duration)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {merged.length > 0 && (
+                      <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ width: 110 }}>Sources</th>
+                            <th style={{ width: 70 }}>Port</th>
+                            <th>MAC</th>
+                            <th>Host / IP</th>
+                            <th>User</th>
+                            <th>Role / Profile</th>
+                            <th>Auth</th>
+                            <th>VLAN</th>
+                            <th>OS / Fingerprint</th>
+                            <th>Last seen</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {merged.slice(0, 300).map(r => {
+                            const xiq  = r.sources.has("XIQ");
+                            const snmp = r.sources.has("SNMP");
+                            const pf   = r.sources.has("PF");
+                            const role = r.role || r.ipp;            // PF role beats IPP if both set above
+                            const authLabel = r.authMethod
+                              ? r.authMethod + (r.authApplied ? "" : " (pending)")
+                              : "";
+                            const vlan = r.vlan || r.authVlan;
+                            const os   = r.os;
+                            return (
+                              <tr key={r.key}>
+                                <td>
+                                  {sourceBadge("XIQ",  xiq)}
+                                  {sourceBadge("SNMP", snmp)}
+                                  {sourceBadge("PF",   pf)}
+                                </td>
+                                <td className="mono">{r.port || "—"}</td>
+                                <td className="mono">{r.mac || "—"}</td>
+                                <td>
+                                  <div>{r.host || "—"}</div>
+                                  <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{r.ip || ""}</div>
+                                </td>
+                                <td>
+                                  <div>{r.owner || r.user || "—"}</div>
+                                  {r.owner && r.user && r.owner !== r.user && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="XIQ-side user">xiq:{r.user}</div>
+                                  )}
+                                </td>
+                                <td>
+                                  <div>{role || "—"}</div>
+                                  {r.authPolicy && r.authPolicy !== role && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="SNMP policy profile">snmp:{r.authPolicy}</div>
+                                  )}
+                                </td>
+                                <td>
+                                  {snmp ? (
+                                    <span style={{ color: r.authApplied ? "var(--ok, #34d399)" : "var(--warn, #f5b300)" }}>
+                                      {authLabel || (r.authApplied ? "applied" : "—")}
+                                    </span>
+                                  ) : "—"}
+                                  {r.authSessionCount > 1 && (
+                                    <span className="mono" style={{ color: "var(--muted)", fontSize: 10, marginLeft: 4 }} title="multiple auth sessions">×{r.authSessionCount}</span>
+                                  )}
+                                </td>
+                                <td className="mono">{vlan || "—"}</td>
+                                <td>
+                                  <div>{os || "—"}</div>
+                                  {r.dhcpFp && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="DHCP fingerprint">{r.dhcpFp}</div>
+                                  )}
+                                </td>
+                                <td className="mono" style={{ fontSize: 10 }}>{r.lastSeen || "—"}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                    {/* Footer note: how many rows have multi-source coverage */}
+                    {merged.length > 0 && (() => {
+                      const xiqOnly = merged.filter(r => r.sources.size === 1 && r.sources.has("XIQ")).length;
+                      const pfOnly  = merged.filter(r => r.sources.size === 1 && r.sources.has("PF")).length;
+                      const snmpOnly= merged.filter(r => r.sources.size === 1 && r.sources.has("SNMP")).length;
+                      const multi   = merged.length - xiqOnly - pfOnly - snmpOnly;
+                      return (
+                        <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                          {merged.length} clients · {multi} multi-source · {xiqOnly} XIQ-only · {snmpOnly} SNMP-only · {pfOnly} PF-only
+                        </div>
+                      );
+                    })()}
+                  </React.Fragment>
                 );
               })()}
             </div>
