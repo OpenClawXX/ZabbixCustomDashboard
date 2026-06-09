@@ -118,6 +118,12 @@ class ActionSurveillanceData extends ActionDataBase {
             case 'cameras': {
                 $cam_hosts       = $this->findCameraHosts();
                 $out['cameras']  = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
+                // Surface the per-camera grouping diagnostic so the
+                // Cameras-tab navigator issue is debuggable from the
+                // payload — directGroupHits vs. snapFallbackHits vs.
+                // siteFallbackHits tells you which attribution path
+                // (or none) actually fired.
+                $out['__camGroupDiag'] = $this->camGroupDiag;
                 break;
             }
             case 'servers': {
