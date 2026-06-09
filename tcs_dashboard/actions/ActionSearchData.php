@@ -5,6 +5,7 @@ namespace Modules\TcsDashboard\Actions;
 use API;
 use CControllerResponseData;
 use Modules\TcsDashboard\Lib\PFClient;
+use Modules\TcsDashboard\Lib\XIQFleetClient;
 
 /**
  * GET zabbix.php?action=tcs.search.data&q=<fragment>
@@ -31,6 +32,7 @@ class ActionSearchData extends ActionDataBase {
     /** Cap per source so a broad query can't balloon the payload. */
     private const HOST_LIMIT   = 20;
     private const CLIENT_LIMIT = 25;
+    private const XIQ_LIMIT    = 25;
 
     /** Template-name substrings → device kind. First match wins. */
     private const TEMPLATE_PATTERNS = [
@@ -58,6 +60,11 @@ class ActionSearchData extends ActionDataBase {
                 $results = array_merge($results, $this->searchPacketFence($q));
             } catch (\Throwable $e) {
                 error_log('[tcs_dashboard] search PF: '.$e->getMessage());
+            }
+            try {
+                $results = array_merge($results, $this->searchXiq($q));
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] search XIQ: '.$e->getMessage());
             }
         }
 
@@ -280,6 +287,233 @@ class ActionSearchData extends ActionDataBase {
             return $adminBase.'/admin/#/node/'.rawurlencode($mac);
         }
         return 'zabbix.php?action=tcs.pf.clients.view';
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* XIQ client search (MAC / IP / username substring)                     */
+    /* --------------------------------------------------------------------- */
+
+    /**
+     * Look the query up in XIQ. Three call modes depending on what the
+     * fragment looks like:
+     *
+     *   • MAC (≥6 hex chars, any separator style) — exact-match via
+     *     /clients/byMac/<MAC> for the wireless side plus a wired-grid
+     *     keyword search; both endpoints take the canonical no-separator
+     *     uppercase form.
+     *   • Anything else (IP fragments, hostnames, usernames) — broad
+     *     searchString filter on /clients/active plus the wired-grid
+     *     keyword search.
+     *
+     * Each unique client (deduped by MAC) becomes one search row tagged
+     * "client", with a deep-link back into the dashboard: wired clients
+     * point at the switch detail page when the XIQ switch_name maps to
+     * a known Zabbix host; wireless clients point at the AP-detail page
+     * the same way.
+     *
+     * Silently skipped when no XIQ token is configured.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function searchXiq(string $q): array {
+        $token = $this->resolveXiqTokenGlobal();
+        if ($token === null) return [];
+
+        $fleet  = XIQFleetClient::fromToken($token);
+        $isMac  = $this->looksLikeMac($q);
+        $rawClients = [];
+
+        if ($isMac) {
+            $macCanonical = strtoupper((string) preg_replace('/[^0-9A-Fa-f]/', '', $q));
+            if (strlen($macCanonical) === 12) {
+                try {
+                    $byMac = $fleet->getJson('/clients/byMac/' . rawurlencode($macCanonical), ['views' => 'FULL']);
+                    if (is_array($byMac) && !empty($byMac['mac_address'])) $rawClients[] = $byMac;
+                } catch (\Throwable $e) {
+                    // 404 = no exact-match client; partial MAC fragments still
+                    // get covered by the wired-grid keyword fetch below.
+                }
+            }
+        } else {
+            try {
+                $resp = $fleet->getJson('/clients/active', [
+                    'searchString' => $q,
+                    'views'        => 'FULL',
+                    'page'         => 1,
+                    'limit'        => self::XIQ_LIMIT
+                ]);
+                foreach (($resp['data'] ?? []) as $r) $rawClients[] = $r;
+            } catch (\Throwable $e) {
+                error_log('[tcs_dashboard] search XIQ /clients/active: ' . $e->getMessage());
+            }
+        }
+
+        // Wired-grid keyword search runs for both modes — covers wired
+        // stations that /clients/active doesn't surface for switches.
+        try {
+            $resp = $fleet->postJson('/dashboard/wired/client-health/grid', [
+                'page'      => 1,
+                'limit'     => self::XIQ_LIMIT,
+                'keyword'   => $q,
+                'sortField' => 'MAC',
+                'sortOrder' => 'ASC'
+            ], [
+                'site_ids'     => [],
+                'device_ids'   => [],
+                'filter_field' => []
+            ]);
+            foreach (($resp['data'] ?? []) as $r) {
+                $r['__source'] = 'wired';
+                $rawClients[] = $r;
+            }
+        } catch (\Throwable $e) {
+            error_log('[tcs_dashboard] search XIQ /wired/grid: ' . $e->getMessage());
+        }
+
+        if (!$rawClients) return [];
+
+        // Dedup by canonical MAC. Collect the set of XIQ switch_name /
+        // hostname strings we'll need to reverse-map to Zabbix hostids
+        // so the result rows can deep-link.
+        $byMac = [];
+        $xiqHostnames = [];
+        foreach ($rawClients as $c) {
+            $mac = $this->extractClientMac($c);
+            if ($mac === '') continue;
+            if (!isset($byMac[$mac])) $byMac[$mac] = $c;
+            // Prefer rows with richer fields (switch_name + port_number
+            // win over a sparse /clients/active row for the same MAC).
+            elseif (!empty($c['switch_name']) && empty($byMac[$mac]['switch_name'])) {
+                $byMac[$mac] = $c + $byMac[$mac];
+            }
+            $h = (string) ($c['switch_name'] ?? $c['device_host_name'] ?? '');
+            if ($h !== '') $xiqHostnames[$h] = true;
+        }
+
+        // ONE Zabbix host.get covering every unique XIQ hostname so we
+        // can deep-link rows that originated from a known switch / AP.
+        $hostidByName = $this->resolveZabbixHostidsByName(array_keys($xiqHostnames));
+
+        $out = [];
+        foreach ($byMac as $mac => $c) {
+            $out[] = $this->shapeXiqClientRow($mac, $c, $hostidByName);
+            if (count($out) >= self::XIQ_LIMIT) break;
+        }
+        return $out;
+    }
+
+    /** Detect MAC fragments: ≥6 hex chars in any common formatting. */
+    private function looksLikeMac(string $q): bool {
+        $hex = preg_replace('/[^0-9A-Fa-f]/', '', $q);
+        if ($hex === '' || strlen($hex) < 6) return false;
+        // Must be majority hex — otherwise an arbitrary string with a
+        // few hex letters in it would falsely register as a MAC.
+        return strlen($hex) >= (int) ceil(strlen($q) * 0.6);
+    }
+
+    /** Pull the MAC out of any of the XIQ client response shapes. */
+    private function extractClientMac(array $c): string {
+        foreach (['mac', 'mac_address', 'client_mac', 'macAddress'] as $k) {
+            $v = (string) ($c[$k] ?? '');
+            if ($v === '') continue;
+            $clean = strtoupper((string) preg_replace('/[^0-9A-F]/i', '', $v));
+            if (strlen($clean) === 12) return $clean;
+        }
+        return '';
+    }
+
+    /** Build a "client" palette row from any XIQ client shape. */
+    private function shapeXiqClientRow(string $macCanonical, array $c, array $hostidByName): array {
+        // Pretty MAC for display + sub-label.
+        $macDisplay = implode(':', str_split($macCanonical, 2));
+
+        $host  = (string) ($c['client_hostname'] ?? $c['host_name']    ?? $c['hostname'] ?? '');
+        $ip    = (string) ($c['client_ip']       ?? $c['ip_address']   ?? $c['ipv4'] ?? '');
+        $user  = (string) ($c['username']        ?? $c['user_name']    ?? '');
+        $os    = (string) ($c['operating_system']?? $c['os_type']      ?? '');
+        $ssid  = (string) ($c['ssid']            ?? '');
+        $vlan  =          (int) ($c['vlan']      ?? 0);
+
+        // Wired vs. wireless heuristic:
+        //   • presence of switch_name / port_number → wired
+        //   • presence of ssid / radio / wifi_protocol → wireless
+        // Default to "client" when ambiguous.
+        $isWired = !empty($c['switch_name']) || !empty($c['port_number']) || ($c['__source'] ?? '') === 'wired';
+        $switchName = (string) ($c['switch_name'] ?? $c['device_host_name'] ?? '');
+        $port       = (string) ($c['port_number'] ?? '');
+        $hostidForSwitch = $hostidByName[$switchName] ?? null;
+
+        $label = $host !== '' ? $host
+               : ($ip !== '' ? $ip : $macDisplay);
+
+        $subBits = [$macDisplay];
+        if ($isWired) {
+            if ($switchName !== '') {
+                $subBits[] = $port !== '' ? ($switchName . ' · ' . $port) : $switchName;
+            }
+            if ($vlan > 0) $subBits[] = 'VLAN ' . $vlan;
+        } else {
+            if ($ssid !== '')  $subBits[] = 'SSID ' . $ssid;
+            if ($vlan > 0)     $subBits[] = 'VLAN ' . $vlan;
+        }
+        if ($user !== '') $subBits[] = $user;
+        if ($os   !== '') $subBits[] = $os;
+
+        // Deep-link: when the XIQ switch_name resolves to a Zabbix host we
+        // know, link to that switch's XIQ tab; otherwise fall back to the
+        // switches list. Wireless clients link to the AP-detail dashboard
+        // when the AP hostname matches a Zabbix host.
+        if ($hostidForSwitch !== null) {
+            $href = $isWired
+                ? 'zabbix.php?action=tcs.switches.view&switchid=' . rawurlencode($hostidForSwitch) . '&tab=xiq'
+                : 'zabbix.php?action=tcs.dashboard.view&hostid='  . rawurlencode($hostidForSwitch);
+        } else {
+            $href = $isWired
+                ? 'zabbix.php?action=tcs.switches.view'
+                : 'zabbix.php?action=tcs.dashboard.view';
+        }
+
+        return [
+            'type'  => 'client',
+            'cat'   => 'XIQ ' . ($isWired ? 'wired' : 'wireless'),
+            'icon'  => $isWired ? 'ethernet' : 'wifi',
+            'label' => $label,
+            'sub'   => implode(' · ', $subBits),
+            'href'  => $href,
+        ];
+    }
+
+    /**
+     * Batch host.get to resolve a set of XIQ hostnames into Zabbix hostids.
+     * Returns [hostname → hostid]. Unknown hostnames are simply missing
+     * from the map.
+     *
+     * @param array<int, string> $names
+     * @return array<string, string>
+     */
+    private function resolveZabbixHostidsByName(array $names): array {
+        $names = array_values(array_filter(array_unique($names), 'strlen'));
+        if (!$names) return [];
+        $hosts = API::Host()->get([
+            'output'          => ['hostid', 'host'],
+            'filter'          => ['host' => $names],
+            'monitored_hosts' => true,
+            'limit'           => count($names)
+        ]) ?: [];
+        $out = [];
+        foreach ($hosts as $h) {
+            $out[(string) $h['host']] = (string) $h['hostid'];
+        }
+        return $out;
+    }
+
+    /** Same chain XIQFleetClient::resolveToken() walks, but with a
+     *  global-only macro lookup (no host context in the palette). */
+    private function resolveXiqTokenGlobal(): ?string {
+        return XIQFleetClient::resolveToken(function (string $name): string {
+            $bag = $this->collectMacroBag([$name]);
+            return (string) ($bag[$name] ?? '');
+        });
     }
 
     /**
