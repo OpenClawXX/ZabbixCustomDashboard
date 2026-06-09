@@ -497,19 +497,19 @@ class ActionSwitchesXiqData extends ActionDataBase {
     }
 
     /**
-     * Same {$XIQ_API_TOKEN} → {$XIQ_TOKEN} fallback ActionXiqData uses.
-     * Token must be a non-secret global macro so it's readable from PHP.
+     * Resolve the XIQ API token through the standard chain (macro →
+     * macro-pointed file → conventional path → env var → legacy macro).
+     * See {@see XIQFleetClient::resolveToken()} for the full order.
      */
     private function xiqToken(): ?string {
-        foreach (['{$XIQ_API_TOKEN}', '{$XIQ_TOKEN}'] as $name) {
+        $lookup = function (string $name): ?string {
             $rows = API::UserMacro()->get([
                 'output'      => ['macro', 'value'],
                 'globalmacro' => true,
                 'filter'      => ['macro' => $name]
             ]) ?: [];
-            $v = trim((string) ($rows[0]['value'] ?? ''));
-            if ($v !== '') return $v;
-        }
-        return null;
+            return (string) ($rows[0]['value'] ?? '');
+        };
+        return XIQFleetClient::resolveToken($lookup);
     }
 }

@@ -1288,7 +1288,7 @@ const TabXiq = ({
     return d.toLocaleString();
   };
   const reasonMsg = {
-    no_token: "No XIQ API token configured — set the {$XIQ_API_TOKEN} global macro.",
+    no_token: "No XIQ API token configured. For short tokens set {$XIQ_API_TOKEN}; for the longer Platform ONE JWT, set {$XIQ_API_TOKEN_FILE} to a file path containing the token, or drop it at /etc/zabbix/tcs_dashboard/xiq_api_token.",
     unknown_host: "Host not visible in Zabbix.",
     lookup_failed: "XIQ lookup failed — see PHP error log.",
     not_in_xiq: "This switch isn't onboarded in ExtremeCloud IQ."

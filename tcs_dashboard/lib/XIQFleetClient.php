@@ -53,6 +53,63 @@ final class XIQFleetClient {
         return new self($token);
     }
 
+    /**
+     * Resolve the XIQ API token from any of the supported sources, in
+     * priority order. Returns null when no source produces a non-empty
+     * value.
+     *
+     * The Platform ONE bearer tokens are JWTs in the 1.5–3 KB range,
+     * which exceeds the Zabbix macro value cap (255 chars on 6.x, 2048
+     * on 7.x). To keep the macro path working for shorter tokens AND
+     * accommodate the longer ones, we look in this order:
+     *
+     *   1. Global macro {$XIQ_API_TOKEN}                    — short tokens
+     *   2. Global macro {$XIQ_API_TOKEN_FILE} (path)        — path to a
+     *      file containing the token. Macro stores the path, file holds
+     *      the (potentially multi-KB) token. Works around the macro cap
+     *      while keeping configuration in Zabbix.
+     *   3. /etc/zabbix/tcs_dashboard/xiq_api_token          — conventional
+     *      default path so a fresh install can just drop the token in.
+     *   4. Environment variable TCS_XIQ_API_TOKEN           — Docker-
+     *      friendly path; readable by PHP-FPM via fastcgi_param /
+     *      clear_env=no.
+     *   5. Global macro {$XIQ_TOKEN}                        — legacy
+     *      fallback for instances that already had this set non-secret.
+     *
+     * File contents are trimmed of trailing whitespace + BOM so a stray
+     * newline doesn't make the bearer header malformed.
+     *
+     * @param \Closure(string):?string $macroLookup
+     *        callback returning the macro value (caller supplies, since
+     *        this lib doesn't depend on Zabbix's API class directly).
+     */
+    public static function resolveToken(\Closure $macroLookup): ?string {
+        $clean = function (string $s): string {
+            // Strip UTF-8 BOM + trailing whitespace; tokens are ASCII.
+            if (str_starts_with($s, "\xEF\xBB\xBF")) $s = substr($s, 3);
+            return trim($s);
+        };
+
+        $v = $clean((string) $macroLookup('{$XIQ_API_TOKEN}'));
+        if ($v !== '') return $v;
+
+        $path = $clean((string) $macroLookup('{$XIQ_API_TOKEN_FILE}'));
+        if ($path === '') $path = '/etc/zabbix/tcs_dashboard/xiq_api_token';
+        if (is_readable($path)) {
+            $raw = (string) @file_get_contents($path);
+            $tok = $clean($raw);
+            if ($tok !== '') return $tok;
+        }
+
+        $env = $clean((string) (getenv('TCS_XIQ_API_TOKEN') ?: ($_SERVER['TCS_XIQ_API_TOKEN'] ?? '')));
+        if ($env !== '') return $env;
+
+        $legacy = $clean((string) $macroLookup('{$XIQ_TOKEN}'));
+        if ($legacy !== '') return $legacy;
+
+        return null;
+    }
+
     public function getRateLimitRemaining(): int { return $this->rateLimitRemaining; }
     public function getRateLimitReset(): int     { return $this->rateLimitReset; }
     public function isRateLimitLow(): bool       { return $this->rateLimitRemaining >= 0 && $this->rateLimitRemaining < 500; }
