@@ -47,6 +47,63 @@ final class XIQFleetClient {
         return new self($token);
     }
 
+    /**
+     * Resolve the XIQ API token from any of the supported sources, in
+     * priority order. Returns null when no source produces a non-empty
+     * value.
+     *
+     * The Platform ONE bearer tokens are JWTs in the 1.5–3 KB range,
+     * which exceeds the Zabbix macro value cap (255 chars on 6.x, 2048
+     * on 7.x). To keep the macro path working for shorter tokens AND
+     * accommodate the longer ones, we look in this order:
+     *
+     *   1. Global macro {$XIQ_API_TOKEN}                    — short tokens
+     *   2. Global macro {$XIQ_API_TOKEN_FILE} (path)        — path to a
+     *      file containing the token. Macro stores the path, file holds
+     *      the (potentially multi-KB) token. Works around the macro cap
+     *      while keeping configuration in Zabbix.
+     *   3. /etc/zabbix/tcs_dashboard/xiq_api_token          — conventional
+     *      default path so a fresh install can just drop the token in.
+     *   4. Environment variable TCS_XIQ_API_TOKEN           — Docker-
+     *      friendly path; readable by PHP-FPM via fastcgi_param /
+     *      clear_env=no.
+     *   5. Global macro {$XIQ_TOKEN}                        — legacy
+     *      fallback for instances that already had this set non-secret.
+     *
+     * File contents are trimmed of trailing whitespace + BOM so a stray
+     * newline doesn't make the bearer header malformed.
+     *
+     * @param \Closure(string):?string $macroLookup
+     *        callback returning the macro value (caller supplies, since
+     *        this lib doesn't depend on Zabbix's API class directly).
+     */
+    public static function resolveToken(\Closure $macroLookup): ?string {
+        $clean = function (string $s): string {
+            // Strip UTF-8 BOM + trailing whitespace; tokens are ASCII.
+            if (str_starts_with($s, "\xEF\xBB\xBF")) $s = substr($s, 3);
+            return trim($s);
+        };
+
+        $v = $clean((string) $macroLookup('{$XIQ_API_TOKEN}'));
+        if ($v !== '') return $v;
+
+        $path = $clean((string) $macroLookup('{$XIQ_API_TOKEN_FILE}'));
+        if ($path === '') $path = '/etc/zabbix/tcs_dashboard/xiq_api_token';
+        if (is_readable($path)) {
+            $raw = (string) @file_get_contents($path);
+            $tok = $clean($raw);
+            if ($tok !== '') return $tok;
+        }
+
+        $env = $clean((string) (getenv('TCS_XIQ_API_TOKEN') ?: ($_SERVER['TCS_XIQ_API_TOKEN'] ?? '')));
+        if ($env !== '') return $env;
+
+        $legacy = $clean((string) $macroLookup('{$XIQ_TOKEN}'));
+        if ($legacy !== '') return $legacy;
+
+        return null;
+    }
+
     public function getRateLimitRemaining(): int { return $this->rateLimitRemaining; }
     public function getRateLimitReset(): int     { return $this->rateLimitReset; }
     public function isRateLimitLow(): bool       { return $this->rateLimitRemaining >= 0 && $this->rateLimitRemaining < 500; }
@@ -74,6 +131,241 @@ final class XIQFleetClient {
         return $this->cached('clients_active', $cacheTtl, function () {
             return $this->getPaged('/clients/active', ['fields' => 'ID,RADIO_TYPE,OS_TYPE,SSID']);
         });
+    }
+
+    /**
+     * Resolve a XIQ device by serial, hostname, and/or MAC address.
+     *
+     * Strategy: hit GET /devices once per available identifier (sns,
+     * hostnames, macAddresses) and intersect the candidate sets. A device
+     * id that comes back from MORE than one filter is the strongest match
+     * because it agrees on independent identifiers — that's how we avoid
+     * resolving e.g. an AP that happens to share a hostname with a
+     * switch. Ties are broken in order serial > MAC > hostname (most
+     * canonical first).
+     *
+     * Once we've picked the best candidate, we re-fetch it via the
+     * single-device endpoint (GET /devices/{id}) — this serves two
+     * purposes: (a) confirms the id actually resolves on its own (the
+     * filtered list endpoint occasionally returns stale rows under
+     * device-renames / re-onboards), and (b) gives us the freshest copy
+     * of `connected` / `last_connect_time_ms` for the identity card.
+     *
+     * Cross-checks are recorded on the returned row under the special
+     * `__match` key so callers (and the ?debug=1 path) can surface what
+     * identifiers actually agreed.
+     *
+     * Cached 5 min under "find:<sha1(hostname|serial|mac)>" since the
+     * mapping is stable — switches rarely change name or get re-
+     * onboarded in XIQ.
+     *
+     * @param string $hostname  Zabbix host technical name.
+     * @param string $serial    Inventory serial (most reliable identifier).
+     * @param string $mac       MAC address (colon-less or colon-separated).
+     * @return array<string,mixed>|null
+     */
+    public function findDevice(string $hostname, string $serial = '', string $mac = '', int $cacheTtl = 300): ?array {
+        $hostname = trim($hostname);
+        $serial   = trim($serial);
+        $macClean = strtoupper((string) preg_replace('/[^0-9A-Fa-f]/', '', trim($mac)));
+        if (strlen($macClean) !== 12) $macClean = '';
+        if ($hostname === '' && $serial === '' && $macClean === '') return null;
+
+        $bucket = 'find:' . sha1($hostname . '|' . $serial . '|' . $macClean);
+        $found = $this->cached($bucket, $cacheTtl, function () use ($hostname, $serial, $macClean) {
+            $tryFilter = function (array $extra) {
+                $query = http_build_query($extra + [
+                    'page'  => 1,
+                    'limit' => 25,
+                    'views' => 'BASIC'
+                ]);
+                $resp = $this->getRaw('/devices?' . $query);
+                $isList = is_array($resp) && (array_values($resp) === $resp);
+                $rows = $resp['data'] ?? ($isList ? $resp : []);
+                return is_array($rows) ? $rows : [];
+            };
+
+            // Gather candidates from every filter we can use. Each
+            // candidate set is keyed by device id so duplicates from the
+            // same filter don't double-count toward the agreement score.
+            $bySerial   = []; $byHostname = []; $byMac = [];
+            $rowById    = [];
+
+            if ($serial !== '') {
+                foreach ($tryFilter(['sns' => $serial]) as $r) {
+                    if (!is_array($r) || empty($r['id'])) continue;
+                    $id = (string) $r['id'];
+                    $bySerial[$id] = true;
+                    $rowById[$id]  = $r;
+                }
+            }
+            if ($macClean !== '') {
+                foreach ($tryFilter(['macAddresses' => $macClean]) as $r) {
+                    if (!is_array($r) || empty($r['id'])) continue;
+                    $id = (string) $r['id'];
+                    $byMac[$id]   = true;
+                    $rowById[$id] = $rowById[$id] ?? $r;
+                }
+            }
+            if ($hostname !== '') {
+                $candHosts = [$hostname];
+                $lower = strtolower($hostname);
+                if ($lower !== $hostname) $candHosts[] = $lower;
+                foreach ($candHosts as $h) {
+                    foreach ($tryFilter(['hostnames' => $h]) as $r) {
+                        if (!is_array($r) || empty($r['id'])) continue;
+                        $id = (string) $r['id'];
+                        $byHostname[$id] = true;
+                        $rowById[$id]    = $rowById[$id] ?? $r;
+                    }
+                }
+            }
+
+            if (!$rowById) return ['__not_found' => true];
+
+            // Score each candidate by how many independent filters it
+            // appeared in. Tie-break order: serial > MAC > hostname.
+            $score = [];
+            foreach ($rowById as $id => $_) {
+                $score[$id] = (isset($bySerial[$id])   ? 1 : 0)
+                            + (isset($byMac[$id])      ? 1 : 0)
+                            + (isset($byHostname[$id]) ? 1 : 0);
+            }
+            uksort($score, function ($a, $b) use ($score, $bySerial, $byMac, $byHostname) {
+                if ($score[$a] !== $score[$b]) return $score[$b] - $score[$a];
+                if (isset($bySerial[$a])   !== isset($bySerial[$b]))   return isset($bySerial[$a])   ? -1 : 1;
+                if (isset($byMac[$a])      !== isset($byMac[$b]))      return isset($byMac[$a])      ? -1 : 1;
+                if (isset($byHostname[$a]) !== isset($byHostname[$b])) return isset($byHostname[$a]) ? -1 : 1;
+                return 0;
+            });
+            $bestId = (string) array_key_first($score);
+
+            // Verify the winner directly via GET /devices/{id}. This
+            // gives us a fresh, authoritative copy of the device record
+            // and catches the edge case where the filter endpoint
+            // returned a stale id that no longer exists.
+            try {
+                $verified = $this->getJson('/devices/' . $bestId, []);
+            } catch (\Throwable $e) {
+                error_log('[tcs] /devices/{id} verify failed for ' . $bestId . ': ' . $e->getMessage());
+                $verified = $rowById[$bestId];
+            }
+            if (!is_array($verified) || empty($verified['id'])) {
+                $verified = $rowById[$bestId];
+            }
+
+            // Collect every sibling candidate that shares the SAME
+            // hostname as the primary, minus the primary itself. Switch
+            // stacks and re-onboarded devices often register multiple
+            // XIQ device IDs under the same hostname; the wired-client
+            // telemetry sometimes attaches to a sibling instead of the
+            // record whose serial matched. The action layer fetches
+            // clients/events for the union to avoid missing data.
+            $primaryHost = strtolower((string) ($verified['hostname'] ?? $rowById[$bestId]['hostname'] ?? ''));
+            $siblings = [];
+            foreach ($rowById as $id => $row) {
+                if ((string) $id === $bestId) continue;
+                $rowHost = strtolower((string) ($row['hostname'] ?? ''));
+                if ($primaryHost !== '' && $rowHost === $primaryHost) {
+                    $siblings[] = [
+                        'id'       => (int) ($row['id'] ?? 0),
+                        'hostname' => (string) ($row['hostname'] ?? ''),
+                        'serial'   => (string) ($row['serial_number'] ?? ''),
+                        'model'    => (string) ($row['product_type'] ?? ''),
+                        'function' => (string) ($row['device_function'] ?? ''),
+                        'mac'      => (string) ($row['mac_address'] ?? '')
+                    ];
+                }
+            }
+
+            // Decorate with the cross-check info so the action can decide
+            // whether to trust the match (and the ?debug=1 path can show it).
+            $verified['__match'] = [
+                'score'      => (int) ($score[$bestId] ?? 0),
+                'by_serial'  => isset($bySerial[$bestId]),
+                'by_mac'     => isset($byMac[$bestId]),
+                'by_host'    => isset($byHostname[$bestId]),
+                'candidates' => count($rowById),
+                'verified'   => (string) ($verified['id'] ?? '') === $bestId,
+                'siblings'   => $siblings
+            ];
+            return $verified;
+        });
+
+        if (!is_array($found) || ($found['__not_found'] ?? false)) return null;
+        return $found;
+    }
+
+    /**
+     * Fetch wired clients connected to one switch device via the main XIQ
+     * Dashboard API.
+     *
+     * Endpoint: POST /dashboard/wired/client-health/grid
+     * Query:    page=N&limit=100&sortField=MAC&sortOrder=ASC
+     * Body:     { "device_ids": [<switchId>], "site_ids": [], "filter_field": [] }
+     *
+     * This is the public endpoint that returns the wired station list for
+     * a switch — /clients/active is wireless-association centric and
+     * returns 0 rows for switches even when the console shows attached
+     * devices. Same base URL and token scope as the other Dashboard
+     * endpoints (no separate Platform ONE service required).
+     *
+     * Pages through total_pages on the response so deployments with more
+     * than `limit` clients on one switch still come back in full. Returns
+     * the flat data rows.
+     *
+     * @return array<int, array<string,mixed>>
+     */
+    public function getWiredClientsForDevice(int $deviceId, int $limit = 100, int $maxPages = 5): array {
+        [$rows, ] = $this->getWiredClientsForDeviceDetailed($deviceId, $limit, $maxPages);
+        return $rows;
+    }
+
+    /**
+     * Same as {@see getWiredClientsForDevice()} but also returns XIQ's
+     * first-page envelope so callers can see total_count / total_pages /
+     * any non-data fields (used by the debug diagnostics path).
+     *
+     * @return array{0: array<int,array<string,mixed>>, 1: array<string,mixed>}
+     */
+    public function getWiredClientsForDeviceDetailed(int $deviceId, int $limit = 100, int $maxPages = 5): array {
+        if ($deviceId <= 0) return [[], []];
+        $limit = max(1, min(100, $limit));   // /dashboard/wired/client-health/grid caps limit at 100
+
+        $body = [
+            'device_ids'   => [$deviceId],
+            'site_ids'     => [],
+            'filter_field' => []
+        ];
+
+        $first = $this->postJson('/dashboard/wired/client-health/grid', [
+            'page'      => 1,
+            'limit'     => $limit,
+            'sortField' => 'MAC',
+            'sortOrder' => 'ASC'
+        ], $body);
+        $rows = $first['data'] ?? [];
+        if (!is_array($rows)) $rows = [];
+        $all = $rows;
+
+        $totalPages = (int) ($first['total_pages'] ?? 0);
+        $last       = min($totalPages, $maxPages);
+        for ($p = 2; $p <= $last; $p++) {
+            $resp = $this->postJson('/dashboard/wired/client-health/grid', [
+                'page'      => $p,
+                'limit'     => $limit,
+                'sortField' => 'MAC',
+                'sortOrder' => 'ASC'
+            ], $body);
+            $more = $resp['data'] ?? [];
+            if (!is_array($more) || !$more) break;
+            foreach ($more as $r) $all[] = $r;
+            if (count($more) < $limit) break;
+        }
+        // Strip data from the returned envelope to keep the meta small.
+        $meta = $first;
+        unset($meta['data']);
+        return [$all, is_array($meta) ? $meta : []];
     }
 
     /**
@@ -354,7 +646,16 @@ final class XIQFleetClient {
             throw new \RuntimeException("XIQ HTTP $status on $path — $snip");
         }
 
-        $decoded = json_decode($body, true);
+        // Most XIQ endpoints return JSON objects/arrays, but a few count
+        // endpoints (/clients/active/count, /devices/count) return a bare
+        // integer as the response body. json_decode("42", true) → 42, which
+        // is valid JSON. Wrap scalar results in a uniform shape so callers
+        // can read $resp['count'] without special-casing per endpoint.
+        $decoded = json_decode($body, true, 512, JSON_BIGINT_AS_STRING);
+        if (is_int($decoded) || is_float($decoded) || (is_string($decoded) && ctype_digit($decoded))) {
+            return ['count' => (int) $decoded, '__scalar' => true];
+        }
+        if (is_bool($decoded)) return ['value' => $decoded, '__scalar' => true];
         if (!is_array($decoded)) {
             throw new \RuntimeException('XIQ returned non-JSON body');
         }

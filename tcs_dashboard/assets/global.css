@@ -350,3 +350,69 @@
   .row[style*="1.5fr 1fr"], .row[style*="1.4fr 1fr"] { grid-template-columns: 1fr !important; }
   .sites-grid { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
 }
+
+/* ───────── Staged-loading indicator & skeletons ───────── */
+.load-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  background: linear-gradient(90deg, rgba(95,168,211,0.10), rgba(95,168,211,0.04));
+  border: 1px solid rgba(95,168,211,0.30);
+  border-radius: var(--r-2);
+  font-size: 12px;
+  color: var(--fg-2);
+  transition: opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease;
+  overflow: hidden;
+  max-height: 60px;
+}
+.load-banner.done {
+  opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0;
+  margin-bottom: 0; border-color: transparent;
+  pointer-events: none;
+}
+.load-spin {
+  width: 12px; height: 12px;
+  border: 2px solid rgba(95,168,211,0.25);
+  border-top-color: var(--info, #5fa8d3);
+  border-radius: 50%;
+  animation: load-spin 0.9s linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes load-spin { to { transform: rotate(360deg); } }
+.load-msg { flex: 1; font-weight: 500; color: var(--fg); }
+.load-stages { display: inline-flex; gap: 6px; }
+.load-stage {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 10.5px;
+  padding: 2px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+}
+.load-stage.done {
+  color: var(--ok, #34d399);
+  border-color: rgba(52,211,153,0.40);
+  background: rgba(52,211,153,0.08);
+}
+.load-dot {
+  width: 6px; height: 6px;
+  background: var(--muted);
+  border-radius: 50%;
+  animation: load-pulse 1.2s ease-in-out infinite;
+}
+@keyframes load-pulse {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
+}
+.skeleton-stack { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+.skeleton-row {
+  background: linear-gradient(90deg, var(--bg-2) 0%, var(--bg-3) 50%, var(--bg-2) 100%);
+  background-size: 200% 100%;
+  border-radius: var(--r-2);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position:  200% 0; }
+  100% { background-position: -200% 0; }
+}

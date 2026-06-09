@@ -732,6 +732,44 @@
     }
   };
 
+  // XIQ tab loader — single-flight per hostid + page session. The XIQ
+  // lookup is the slowest data fetch on the page (one XIQ /devices probe
+  // + per-device /clients + /alarms + global /alerts), so it only runs
+  // when the user actually clicks the XIQ tab. Result is cached on
+  // window.SWITCH_XIQ so flipping back to the tab is instant. Pass
+  // `force=true` to bypass the cache (the tab's Refresh button does).
+  let _xiqInFlight = null;
+  let _xiqCachedHostid = "";
+  window.tcsLoadSwitchXiq = function (hostid, force) {
+    const id = String(hostid || "");
+    if (!id) return Promise.reject(new Error("no hostid"));
+    if (!force && _xiqCachedHostid === id && window.SWITCH_XIQ && window.SWITCH_XIQ.loaded) {
+      return Promise.resolve(window.SWITCH_XIQ);
+    }
+    if (_xiqInFlight && _xiqCachedHostid === id && !force) return _xiqInFlight;
+    const url = (window.TCS_SWITCH_XIQ_URL || "zabbix.php?action=tcs.switches.xiq.data") + "&switchid=" + encodeURIComponent(id);
+    _xiqCachedHostid = id;
+    _xiqInFlight = fetchJson(url).then(j => {
+      const data = {
+        ...j,
+        loaded: true,
+        loading: false
+      };
+      window.SWITCH_XIQ = data;
+      return data;
+    }).catch(e => {
+      window.SWITCH_XIQ = {
+        loaded: true,
+        loading: false,
+        error: String(e && e.message ? e.message : e)
+      };
+      throw e;
+    }).finally(() => {
+      _xiqInFlight = null;
+    });
+    return _xiqInFlight;
+  };
+
   // PacketFence per-device write-actions (reevaluate access / restart
   // switchport). Same envelope as tcsCyclePoe: returns { ok, message? }
   // on success, { ok:false, error } otherwise. Backend is admin-gated.

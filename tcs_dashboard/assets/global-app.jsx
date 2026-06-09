@@ -388,13 +388,49 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "groupBy": "site"
 }/*EDITMODE-END*/;
 
+// Banner shown while staged data is still in flight. Two pill-shaped
+// segments — one per stage — light up as their fetches complete. The
+// whole banner fades out once both stages have landed.
+const LoadingBanner = ({ stages }) => {
+  const allDone = stages.core && stages.enrich;
+  return (
+    <div className={"load-banner" + (allDone ? " done" : "")} role="status" aria-live="polite">
+      <span className="load-spin" aria-hidden="true" />
+      <span className="load-msg">
+        {allDone ? "All data loaded" : "Loading dashboard…"}
+      </span>
+      <span className="load-stages">
+        <span className={"load-stage" + (stages.core   ? " done" : "")}>
+          {stages.core   ? <Icon name="check" size={10} /> : <span className="load-dot" />} Core
+        </span>
+        <span className={"load-stage" + (stages.enrich ? " done" : "")}>
+          {stages.enrich ? <Icon name="check" size={10} /> : <span className="load-dot" />} Enrichment
+        </span>
+      </span>
+    </div>
+  );
+};
+
+// Block-shaped pulsing skeleton used in place of card bodies that haven't
+// received their data yet. Keeps the layout from jumping when content lands.
+const Skeleton = ({ rows = 3, height = 36 }) => (
+  <div className="skeleton-stack" aria-hidden="true">
+    {Array.from({ length: rows }).map((_, i) => (
+      <div className="skeleton-row" key={i} style={{ height }} />
+    ))}
+  </div>
+);
+
 const App = () => {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [rangeKey, setRangeKeyState] = React.useState("24h");
-  const [now, setNow] = React.useState("just now");
+  const [now, setNow] = React.useState("—");
   const [refreshing, setRefreshing] = React.useState(false);
   // Bump on every successful refresh so children re-read window.GLOBAL_* globals.
   const [, setTick] = React.useState(0);
+  // Per-stage "have we seen at least one successful response yet?" flags.
+  // Drives the loading banner + per-section skeletons.
+  const [stages, setStages] = React.useState({ core: false, enrich: false });
 
   React.useEffect(() => {
     document.documentElement.classList.toggle("hide-src-badges", !t.showSourceBadges);
@@ -403,9 +439,17 @@ const App = () => {
   // Listen for bridge-published data updates: refresh timestamp + force re-render.
   React.useEffect(() => {
     const onData = (ev) => {
+      const d = ev.detail || {};
+      if (d.error) return; // keep the skeleton up so the user sees something's still pending
       setNow(new Date().toLocaleTimeString());
       setRefreshing(false);
       setTick(n => n + 1);
+      if (d.stage === "core" || d.stage === "enrich" || d.stage === "all") {
+        setStages(prev => ({
+          core:   prev.core   || d.stage === "core"   || d.stage === "all",
+          enrich: prev.enrich || d.stage === "enrich" || d.stage === "all"
+        }));
+      }
     };
     window.addEventListener("tcs:global-data", onData);
     return () => window.removeEventListener("tcs:global-data", onData);
@@ -434,11 +478,25 @@ const App = () => {
         <GlobalTopbar crumb={["Tuscaloosa City Schools", "Operations", "Global"]} onRefresh={doRefresh} refreshing={refreshing} />
         <GlobalHeader now={now} rangeKey={rangeKey} setRangeKey={setRangeKey} />
         <div className="body">
-          <SeverityStrip />
+          {(!stages.core || !stages.enrich) && <LoadingBanner stages={stages} />}
 
-          <SystemSnapshot />
+          {stages.core
+            ? <SeverityStrip />
+            : <div className="card" style={{ marginBottom: 14 }}><div className="card-b"><Skeleton rows={1} height={64} /></div></div>}
 
-          <SitesHeatmap filter={t.siteFilter} setFilter={v => setTweak("siteFilter", v)} />
+          {stages.enrich
+            ? <SystemSnapshot />
+            : <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-h"><h3>System Snapshot</h3><span className="h-meta">loading external systems…</span></div>
+                <div className="card-b"><Skeleton rows={2} height={110} /></div>
+              </div>}
+
+          {stages.core
+            ? <SitesHeatmap filter={t.siteFilter} setFilter={v => setTweak("siteFilter", v)} />
+            : <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-h"><h3>Sites — Health Map</h3></div>
+                <div className="card-b"><Skeleton rows={3} height={56} /></div>
+              </div>}
 
           <div className="row" style={{ gridTemplateColumns: "1.4fr 1fr", marginBottom: 14 }}>
             <div className="card">
@@ -454,7 +512,7 @@ const App = () => {
                 <a className="h-link">All <Icon name="external" size={11} /></a>
               </div>
               <div className="card-b tight" style={{ maxHeight: 380, overflowY: "auto" }}>
-                <TriggersTable filterSev={t.sevFilter} />
+                {stages.core ? <TriggersTable filterSev={t.sevFilter} /> : <Skeleton rows={5} height={28} />}
               </div>
             </div>
             <div className="card">
@@ -465,7 +523,7 @@ const App = () => {
                 <span className="h-meta">by site</span>
               </div>
               <div className="card-b">
-                <Hotspots />
+                {stages.core ? <Hotspots /> : <Skeleton rows={4} height={32} />}
               </div>
             </div>
           </div>
@@ -480,7 +538,7 @@ const App = () => {
               <a className="h-link">Open in event console <Icon name="external" size={11} /></a>
             </div>
             <div className="card-b tight">
-              <EventsStream />
+              {stages.core ? <EventsStream /> : <Skeleton rows={4} height={26} />}
             </div>
           </div>
         </div>

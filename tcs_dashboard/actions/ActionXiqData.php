@@ -121,7 +121,7 @@ class ActionXiqData extends ActionDataBase {
         if ($token === null) {
             $payload['sources']['xiq'] = 'no-token';
             $payload['warning']        = $payload['warning']
-                ?? 'XIQ direct queries skipped — set global macro {$XIQ_API_TOKEN} (non-secret) for client mix / SSID counts. The host-scoped {$XIQ_TOKEN} is SECRET_TEXT and not readable from the dashboard.';
+                ?? 'XIQ direct queries skipped — provide a token via global macro {$XIQ_API_TOKEN} (short tokens), {$XIQ_API_TOKEN_FILE} (path to a file containing the token, for Platform ONE JWTs that exceed the macro length cap), /etc/zabbix/tcs_dashboard/xiq_api_token, or the TCS_XIQ_API_TOKEN env var.';
         } else {
             try {
                 self::overlayXiqClients($payload, $token);
@@ -677,26 +677,21 @@ class ActionXiqData extends ActionDataBase {
     // ── Layer 3: XIQ direct (per-client breakdown only) ─────────────────────
 
     /**
-     * Returns the XIQ API token from a global Zabbix macro, or null when unset.
-     *
-     * The template ships {$XIQ_TOKEN} on the fleet host as SECRET_TEXT — Zabbix
-     * masks SECRET_TEXT values when read via UserMacro.get, so we can't pull
-     * it from the host scope. Use a separate non-secret global macro
-     * {$XIQ_API_TOKEN} for read-side consumers like this dashboard. Falls back
-     * to a global {$XIQ_TOKEN} only if someone set the non-secret version
-     * under that name.
+     * Resolve the XIQ API token through the standard chain. Platform ONE
+     * tokens (~2 KB JWTs) exceed Zabbix's macro value cap on 6.x, so the
+     * shared resolver also accepts a file path or env var — see
+     * {@see XIQFleetClient::resolveToken()} for the full lookup order.
      */
     private static function xiqToken(): ?string {
-        foreach (['{$XIQ_API_TOKEN}', '{$XIQ_TOKEN}'] as $name) {
+        $lookup = function (string $name): ?string {
             $rows = API::UserMacro()->get([
                 'output'      => ['macro', 'value'],
                 'globalmacro' => true,
-                'filter'      => ['macro' => $name],
+                'filter'      => ['macro' => $name]
             ]) ?: [];
-            $v = trim((string) ($rows[0]['value'] ?? ''));
-            if ($v !== '') return $v;
-        }
-        return null;
+            return (string) ($rows[0]['value'] ?? '');
+        };
+        return XIQFleetClient::resolveToken($lookup);
     }
 
     /** Pull /clients/active and project PHY / OS / SSID breakdowns. */

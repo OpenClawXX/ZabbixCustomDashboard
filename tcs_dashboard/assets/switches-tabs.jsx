@@ -906,6 +906,502 @@ const TabBackups = () => {
 };
 
 // ───────────────────────────────────────────────────────────────────
+// XIQ tab — looks the switch up in ExtremeCloud IQ and shows the
+// XIQ-side connected clients, recent device-scoped events, and any
+// open alerts that mention the switch hostname. Fetches lazily on
+// first tab activation; result is cached on window so re-clicking
+// doesn't refire the lookup.
+// ───────────────────────────────────────────────────────────────────
+const TabXiq = ({ host }) => {
+  const [state, setState] = useStateTAB(() => window.SWITCH_XIQ || { loading: false, loaded: false });
+  const [now, setNow] = useStateTAB(() => Date.now());
+
+  // Single-flight: per page session we fetch once per host. The
+  // bridge exposes window.tcsLoadSwitchXiq for the Refresh button.
+  const hostid = host && host.hostid ? String(host.hostid) : "";
+
+  React.useEffect(() => {
+    if (!hostid || state.loading || state.loaded) return;
+    if (typeof window.tcsLoadSwitchXiq !== "function") return;
+    setState(s => ({ ...s, loading: true, error: null }));
+    window.tcsLoadSwitchXiq(hostid)
+      .then(d => { window.SWITCH_XIQ = { ...d, loading: false, loaded: true }; setState(window.SWITCH_XIQ); })
+      .catch(e => setState({ loading: false, loaded: true, error: String(e && e.message ? e.message : e) }));
+  }, [hostid]);
+
+  // Live-aging timer for "X ago" labels.
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const refresh = () => {
+    if (!hostid || typeof window.tcsLoadSwitchXiq !== "function") return;
+    setState(s => ({ ...s, loading: true, error: null }));
+    window.tcsLoadSwitchXiq(hostid, true)
+      .then(d => { window.SWITCH_XIQ = { ...d, loading: false, loaded: true }; setState(window.SWITCH_XIQ); })
+      .catch(e => setState({ loading: false, loaded: true, error: String(e && e.message ? e.message : e) }));
+  };
+
+  const fmtAge = (sec) => {
+    if (!sec || sec < 0) return "—";
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m";
+    if (sec < 86400) return Math.floor(sec / 3600) + "h " + Math.floor((sec % 3600) / 60) + "m";
+    return Math.floor(sec / 86400) + "d";
+  };
+  const tsAgo = (ts) => fmtAge(Math.max(0, Math.floor(now / 1000 - (Number(ts) || 0))));
+  const tsLabel = (ts) => {
+    if (!ts) return "—";
+    const d = new Date(Number(ts) * 1000);
+    return d.toLocaleString();
+  };
+
+  const reasonMsg = {
+    no_token:      "No XIQ API token configured. For short tokens set {$XIQ_API_TOKEN}; for the longer Platform ONE JWT, set {$XIQ_API_TOKEN_FILE} to a file path containing the token, or drop it at /etc/zabbix/tcs_dashboard/xiq_api_token.",
+    unknown_host:  "Host not visible in Zabbix.",
+    lookup_failed: "XIQ lookup failed — see PHP error log.",
+    not_in_xiq:    "This switch isn't onboarded in ExtremeCloud IQ.",
+    lookup_ambiguous: "Refused to query XIQ — the candidate device matched only the hostname, not the serial/MAC. Verify the Zabbix host inventory serialno_a matches XIQ.",
+  };
+
+  const device  = state.device || null;
+  const clients = Array.isArray(state.clients) ? state.clients : [];
+  const events  = Array.isArray(state.events)  ? state.events  : [];
+  const alerts  = Array.isArray(state.alerts)  ? state.alerts  : [];
+  const notes   = (state.notes && typeof state.notes === "object") ? state.notes : {};
+
+  // ── Merge XIQ + SNMP auth + PF per (port, MAC) ──────────────────────
+  // XIQ wired-client rows carry port=`1:1` and a colon-separated MAC.
+  // window.PORT_AUTH is keyed by "m.p" (e.g. "1.1") with array of
+  // sessions {mac, applied, policy, policyName, agentLabel, vlan, duration}.
+  // window._tcsPfByKey same "m.p" keying with PF rows {mac, host, ip, role,
+  // owner, os, dhcpFp, lastSeen, reg}.
+  // The merged row collects the strongest data from each source and
+  // records `sources` (XIQ/SNMP/PF) so the UI can show provenance.
+  const normMac = (s) => String(s || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  const dotKey  = (port) => String(port || "").replace(/:/g, ".");      // "1:1" → "1.1"
+  const colonPort = (k)  => String(k || "").replace(/\./g, ":");
+
+  const buildMergedClients = () => {
+    const xiqWired = clients.filter(c => c.wired);
+    // Group all three sources by "port|mac" so rows from different
+    // sources for the same physical client collapse together.
+    const byKey = new Map();   // key → merged row
+    const ensure = (port, mac) => {
+      const k = dotKey(port) + "|" + normMac(mac);
+      if (!byKey.has(k)) {
+        byKey.set(k, {
+          key: k,
+          port: colonPort(port),
+          portDot: dotKey(port),
+          mac: mac || "",
+          macNorm: normMac(mac),
+          host: "", ip: "", user: "", vlan: "", os: "",
+          ipp: "",        // XIQ Instant Port Profile
+          role: "",       // PF role
+          owner: "",      // PF dot1x username
+          dhcpFp: "",
+          lastSeen: "",
+          reg: "",
+          authPolicy: "", // SNMP policy profile name
+          authMethod: "", // SNMP agent label ("802.1X" / "MAC" / etc.)
+          authApplied: false,
+          authVlan: "",
+          authDuration: 0,
+          authSessionCount: 0,
+          sources: new Set()
+        });
+      }
+      return byKey.get(k);
+    };
+    const setIf = (row, field, val) => {
+      if (val == null || val === "" || row[field]) return;
+      row[field] = val;
+    };
+
+    // 1. XIQ wired rows (richest single source for connected clients).
+    for (const c of xiqWired) {
+      if (!c.port) continue;
+      const row = ensure(c.port, c.mac);
+      row.sources.add("XIQ");
+      setIf(row, "host",  c.host);
+      setIf(row, "ip",    c.ip);
+      setIf(row, "user",  c.user);
+      setIf(row, "vlan",  c.vlan);
+      setIf(row, "os",    c.os);
+      setIf(row, "ipp",   c.role);     // XIQ's "role" is the Instant Port Profile
+    }
+
+    // 2. SNMP auth sessions (etsysMultiAuthSessionStationTable). Multiple
+    //    sessions per port are common (e.g. dual-supplicant on phone+PC),
+    //    one row per MAC.
+    const portAuth = window.PORT_AUTH || {};
+    const policyNames = window.POLICY_PROFILES || {};
+    for (const k of Object.keys(portAuth)) {
+      const sessions = Array.isArray(portAuth[k]) ? portAuth[k] : [];
+      for (const s of sessions) {
+        if (!s || !s.mac) continue;
+        const row = ensure(colonPort(k), s.mac);
+        row.sources.add("SNMP");
+        row.authSessionCount++;
+        // The "applied" session wins for the per-row display; track
+        // whether any session on this port-MAC is applied separately.
+        if (s.applied || !row.authApplied) {
+          row.authApplied = !!(s.applied || row.authApplied);
+          if (s.policy != null) {
+            row.authPolicy = policyNames[s.policy] || String(s.policy);
+          }
+          if (s.agentLabel) row.authMethod = s.agentLabel;
+          if (s.vlan != null && s.vlan !== "") row.authVlan = s.vlan;
+          if (s.duration != null) row.authDuration = Math.max(row.authDuration, s.duration);
+        }
+      }
+    }
+
+    // 3. PF nodes (registration / role / dot1x / DHCP fingerprint).
+    const pfByKey = window._tcsPfByKey || {};
+    for (const k of Object.keys(pfByKey)) {
+      const rows = Array.isArray(pfByKey[k]) ? pfByKey[k] : [];
+      for (const p of rows) {
+        if (!p || !p.mac) continue;
+        const row = ensure(colonPort(k), p.mac);
+        row.sources.add("PF");
+        setIf(row, "host",   p.host);
+        setIf(row, "ip",     p.ip);
+        setIf(row, "owner",  p.owner);
+        setIf(row, "role",   p.role);
+        setIf(row, "os",     p.os);
+        setIf(row, "dhcpFp", p.dhcpFp);
+        setIf(row, "lastSeen", p.lastSeen);
+        setIf(row, "reg",    p.reg);
+        // PF VLAN is from locationlog — fill it in if XIQ/SNMP didn't
+        if (!row.vlan && p.vlan) row.vlan = p.vlan;
+      }
+    }
+
+    // Sort: by port (member, then port number numerically), then by MAC.
+    const portCmp = (a, b) => {
+      const pa = a.portDot.split(".").map(n => Number(n) || 0);
+      const pb = b.portDot.split(".").map(n => Number(n) || 0);
+      return (pa[0] - pb[0]) || (pa[1] - pb[1]) || a.macNorm.localeCompare(b.macNorm);
+    };
+    return Array.from(byKey.values()).sort(portCmp);
+  };
+
+  const merged = device ? buildMergedClients() : [];
+  const sourceBadge = (label, on) => (
+    <span key={label} style={{
+      display: "inline-block", marginRight: 4, padding: "0 5px",
+      fontSize: 9, lineHeight: "14px", borderRadius: 3, fontFamily: "var(--mono)",
+      color: on ? "var(--fg)" : "var(--muted)",
+      background: on ? "var(--bg-3)" : "transparent",
+      border: "1px solid " + (on ? "var(--line)" : "transparent")
+    }}>{label}</span>
+  );
+
+  // Pill rendered in place of an empty table, explaining why XIQ has
+  // nothing to show. Used for switches against /clients/active (XIQ API
+  // limitation) and /alerts (token scope).
+  const InfoPill = ({ children, kind }) => (
+    <div style={{
+      padding: "10px 12px",
+      margin: "6px 0",
+      fontSize: 11,
+      lineHeight: 1.5,
+      color: kind === "warn" ? "var(--warn, #f5b300)" : "var(--muted)",
+      background: kind === "warn" ? "rgba(245,179,0,0.08)" : "var(--bg-2)",
+      border: "1px solid " + (kind === "warn" ? "rgba(245,179,0,0.30)" : "var(--line)"),
+      borderRadius: 6
+    }}>
+      {children}
+    </div>
+  );
+
+  return (
+    <div className="card" style={{ flex: 1 }}>
+      <div className="card-h">
+        <h3>ExtremeCloud IQ</h3>
+        <SourceBadge src="ext" />
+        <div className="h-spacer" />
+        {state.rateLimit && state.rateLimit.remaining != null && (
+          <span className="h-meta mono" title="XIQ quota remaining (7,500/hr/VIQ)">
+            quota {state.rateLimit.remaining}
+          </span>
+        )}
+        <button className="seg-btn" onClick={refresh} disabled={state.loading} style={{ marginLeft: 8 }}>
+          {state.loading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      <div className="card-b">
+        {state.loading && !state.loaded && (
+          <div style={{ padding: "30px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+            Looking up <span className="mono">{host && host.host}</span> in ExtremeCloud IQ…
+          </div>
+        )}
+
+        {state.error && (
+          <div style={{ padding: 12, color: "var(--err, #f25f5c)", fontSize: 12 }}>
+            {state.error}
+          </div>
+        )}
+
+        {state.loaded && !state.ok && state.reason && (
+          <div style={{ padding: "20px 12px", color: "var(--muted)", fontSize: 12 }}>
+            {reasonMsg[state.reason] || state.reason}
+          </div>
+        )}
+
+        {state.loaded && state.ok && device && (
+          <React.Fragment>
+            {/* ── Identity card ─────────────────────────────────────── */}
+            <div className="xiq-identity" style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: 10,
+              marginBottom: 14,
+              padding: 12,
+              background: "var(--bg-2)",
+              border: "1px solid var(--line)",
+              borderRadius: 6
+            }}>
+              {[
+                ["Hostname",  device.hostname || "—"],
+                ["Model",     device.model || "—"],
+                ["Firmware",  device.firmware || "—"],
+                ["Serial",    device.serial || "—"],
+                ["MAC",       device.mac || "—"],
+                ["IP",        device.ip || "—"],
+                ["Policy",    device.policy_name || "—"],
+                ["Connected", device.connected
+                    ? <span style={{ color: "var(--ok, #34d399)" }}>● online</span>
+                    : <span style={{ color: "var(--err, #f25f5c)" }}>● offline</span>]
+              ].map(([k, v]) => (
+                <div key={k}>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>{k}</div>
+                  <div className="mono" style={{ fontSize: 12, marginTop: 2 }}>{v}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* ── Connected clients ─────────────────────────────────── */}
+            <div style={{ marginBottom: 14 }}>
+              <div className="card-h" style={{ padding: "4px 0", borderBottom: "1px solid var(--line)", marginBottom: 6 }}>
+                <h4 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>Clients</h4>
+                <span className="h-meta mono">{clients.length}</span>
+              </div>
+              {clients.length === 0 && merged.length === 0 ? (
+                notes.clients
+                  ? <InfoPill kind="warn">{notes.clients}</InfoPill>
+                  : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No active clients reported by XIQ.</div>
+              ) : (() => {
+                // Wireless XIQ rows (APs) render the legacy SSID/Conn table.
+                // Switch tabs render the merged XIQ + SNMP-auth + PF view
+                // built above, keyed by (port, MAC). Both can coexist if
+                // a stack happens to host an AP child.
+                const wireless = clients.filter(c => !c.wired);
+                return (
+                  <React.Fragment>
+                    {wireless.length > 0 && (
+                      <table className="tbl" style={{ width: "100%", fontSize: 11, marginBottom: merged.length ? 12 : 0 }}>
+                        <thead>
+                          <tr>
+                            <th>MAC</th>
+                            <th>Host / IP</th>
+                            <th>User</th>
+                            <th>SSID</th>
+                            <th>VLAN</th>
+                            <th>OS</th>
+                            <th>Conn</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {wireless.slice(0, 200).map(c => (
+                            <tr key={"w:" + (c.mac || "?") + ":" + c.duration}>
+                              <td className="mono">{c.mac || "—"}</td>
+                              <td>
+                                <div>{c.host || "—"}</div>
+                                <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{c.ip || ""}</div>
+                              </td>
+                              <td>{c.user || "—"}</td>
+                              <td>{c.ssid || "—"}</td>
+                              <td className="mono">{c.vlan || "—"}</td>
+                              <td>{c.os || "—"}</td>
+                              <td className="mono">{fmtAge(c.duration)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {merged.length > 0 && (
+                      <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ width: 110 }}>Sources</th>
+                            <th style={{ width: 70 }}>Port</th>
+                            <th>MAC</th>
+                            <th>Host / IP</th>
+                            <th>User</th>
+                            <th>Role / Profile</th>
+                            <th>Auth</th>
+                            <th>VLAN</th>
+                            <th>OS / Fingerprint</th>
+                            <th>Last seen</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {merged.slice(0, 300).map(r => {
+                            const xiq  = r.sources.has("XIQ");
+                            const snmp = r.sources.has("SNMP");
+                            const pf   = r.sources.has("PF");
+                            const role = r.role || r.ipp;            // PF role beats IPP if both set above
+                            const authLabel = r.authMethod
+                              ? r.authMethod + (r.authApplied ? "" : " (pending)")
+                              : "";
+                            const vlan = r.vlan || r.authVlan;
+                            const os   = r.os;
+                            return (
+                              <tr key={r.key}>
+                                <td>
+                                  {sourceBadge("XIQ",  xiq)}
+                                  {sourceBadge("SNMP", snmp)}
+                                  {sourceBadge("PF",   pf)}
+                                </td>
+                                <td className="mono">{r.port || "—"}</td>
+                                <td className="mono">{r.mac || "—"}</td>
+                                <td>
+                                  <div>{r.host || "—"}</div>
+                                  <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }}>{r.ip || ""}</div>
+                                </td>
+                                <td>
+                                  <div>{r.owner || r.user || "—"}</div>
+                                  {r.owner && r.user && r.owner !== r.user && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="XIQ-side user">xiq:{r.user}</div>
+                                  )}
+                                </td>
+                                <td>
+                                  <div>{role || "—"}</div>
+                                  {r.authPolicy && r.authPolicy !== role && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="SNMP policy profile">snmp:{r.authPolicy}</div>
+                                  )}
+                                </td>
+                                <td>
+                                  {snmp ? (
+                                    <span style={{ color: r.authApplied ? "var(--ok, #34d399)" : "var(--warn, #f5b300)" }}>
+                                      {authLabel || (r.authApplied ? "applied" : "—")}
+                                    </span>
+                                  ) : "—"}
+                                  {r.authSessionCount > 1 && (
+                                    <span className="mono" style={{ color: "var(--muted)", fontSize: 10, marginLeft: 4 }} title="multiple auth sessions">×{r.authSessionCount}</span>
+                                  )}
+                                </td>
+                                <td className="mono">{vlan || "—"}</td>
+                                <td>
+                                  <div>{os || "—"}</div>
+                                  {r.dhcpFp && (
+                                    <div className="mono" style={{ color: "var(--muted)", fontSize: 10 }} title="DHCP fingerprint">{r.dhcpFp}</div>
+                                  )}
+                                </td>
+                                <td className="mono" style={{ fontSize: 10 }}>{r.lastSeen || "—"}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                    {/* Footer note: how many rows have multi-source coverage */}
+                    {merged.length > 0 && (() => {
+                      const xiqOnly = merged.filter(r => r.sources.size === 1 && r.sources.has("XIQ")).length;
+                      const pfOnly  = merged.filter(r => r.sources.size === 1 && r.sources.has("PF")).length;
+                      const snmpOnly= merged.filter(r => r.sources.size === 1 && r.sources.has("SNMP")).length;
+                      const multi   = merged.length - xiqOnly - pfOnly - snmpOnly;
+                      return (
+                        <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                          {merged.length} clients · {multi} multi-source · {xiqOnly} XIQ-only · {snmpOnly} SNMP-only · {pfOnly} PF-only
+                        </div>
+                      );
+                    })()}
+                  </React.Fragment>
+                );
+              })()}
+            </div>
+
+            {/* ── Events (per-device alarm log) ─────────────────────── */}
+            <div style={{ marginBottom: 14 }}>
+              <div className="card-h" style={{ padding: "4px 0", borderBottom: "1px solid var(--line)", marginBottom: 6 }}>
+                <h4 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>Events</h4>
+                <span className="h-meta mono">{events.length} · last 30d</span>
+              </div>
+              {events.length === 0 ? (
+                <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No device events in the last 30 days.</div>
+              ) : (
+                <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 70 }}>Sev</th>
+                      <th style={{ width: 130 }}>When</th>
+                      <th style={{ width: 130 }}>Category</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {events.slice(0, 100).map(e => (
+                      <tr key={e.id} style={e.value === 0 ? { opacity: 0.55 } : null}>
+                        <td><Sev level={e.severity} /></td>
+                        <td className="mono" title={tsLabel(e.clock)}>{tsAgo(e.clock)} ago</td>
+                        <td>{e.category || "—"}</td>
+                        <td>{e.message || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* ── Alerts (global, hostname-keyword filtered) ────────── */}
+            <div>
+              <div className="card-h" style={{ padding: "4px 0", borderBottom: "1px solid var(--line)", marginBottom: 6 }}>
+                <h4 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>Alerts</h4>
+                <span className="h-meta mono">{alerts.length} · last 7d</span>
+              </div>
+              {alerts.length === 0 ? (
+                notes.alerts
+                  ? <InfoPill kind="warn">{notes.alerts}</InfoPill>
+                  : <div style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 11 }}>No XIQ alerts reference this host.</div>
+              ) : (
+                <table className="tbl" style={{ width: "100%", fontSize: 11 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 70 }}>Sev</th>
+                      <th style={{ width: 130 }}>When</th>
+                      <th style={{ width: 130 }}>Source</th>
+                      <th>Summary</th>
+                      <th style={{ width: 60 }}>Ack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {alerts.map(a => (
+                      <tr key={a.id || (a.ts + a.summary)}>
+                        <td><Sev level={a.severity} /></td>
+                        <td className="mono" title={tsLabel(a.ts)}>{tsAgo(a.ts)} ago</td>
+                        <td>{a.source || a.category || "—"}</td>
+                        <td>{a.summary || "—"}</td>
+                        <td className="mono">{a.acknowledged ? "✓" : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ───────────────────────────────────────────────────────────────────
 // Tab definitions table — exported
 // ───────────────────────────────────────────────────────────────────
 window.SWITCH_TABS = [
@@ -914,6 +1410,7 @@ window.SWITCH_TABS = [
   { id: "health",   label: "Stack Health",  badge: null },
   { id: "vlan",     label: "VLAN",          badge: null },
   { id: "poe",      label: "PoE Budget",    badge: null },
+  { id: "xiq",      label: "XIQ",           badge: null },
   { id: "cli",      label: "CLI",           badge: null, admin: true },
   { id: "triggers", label: "Triggers",      badge: null },
   { id: "backups",  label: "Config Backups",badge: null },
@@ -923,6 +1420,7 @@ window.TabTopology    = TabTopology;
 window.TabStackHealth = TabStackHealth;
 window.TabVlan        = TabVlan;
 window.TabPoe         = TabPoe;
+window.TabXiq         = TabXiq;
 window.TabCli         = TabCli;
 window.TabTriggers    = TabTriggers;
 window.TabBackups     = TabBackups;

@@ -171,6 +171,10 @@ class ActionEventsData extends ActionDataBase {
      * because the unresolved set has no duration.
      */
     private function collectOpen(int $now): array {
+        // High explicit limit so the Problems page (which boots via this
+        // "open" path) shows the complete set of currently-firing
+        // problems, not just the newest 1000. Operators rely on this list
+        // as the master triage view — truncation silently hides work.
         $problems = $this->safeGet(fn() => API::Problem()->get([
             'output'     => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged', 'r_eventid'],
             'source'     => EVENT_SOURCE_TRIGGERS,
@@ -180,7 +184,7 @@ class ActionEventsData extends ActionDataBase {
             'selectTags' => ['tag', 'value'],
             'sortfield'  => ['eventid'],
             'sortorder'  => 'DESC',
-            'limit'      => 1000
+            'limit'      => 10000
         ]));
         $problems = array_values(array_filter(
             $problems,
