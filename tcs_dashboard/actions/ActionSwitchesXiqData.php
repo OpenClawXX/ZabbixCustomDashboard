@@ -65,16 +65,20 @@ class ActionSwitchesXiqData extends ActionDataBase {
             'ts'        => time()
         ];
         $diag = [
-            'serial_used'       => '',
-            'hostname_used'     => '',
-            'lookup_match_by'   => '',
-            'device_raw_keys'   => [],
-            'clients_total'     => null,
-            'clients_returned'  => null,
-            'clients_first_keys'=> [],
-            'events_total'      => null,
-            'alerts_total'      => null,
-            'errors'            => []
+            'serial_used'        => '',
+            'hostname_used'      => '',
+            'mac_used'           => '',
+            'lookup_match_by'    => '',
+            'lookup_match_score' => 0,
+            'lookup_candidates'  => 0,
+            'lookup_verified'    => false,
+            'device_raw_keys'    => [],
+            'clients_total'      => null,
+            'clients_returned'   => null,
+            'clients_first_keys' => [],
+            'events_total'       => null,
+            'alerts_total'       => null,
+            'errors'             => []
         ];
 
         $token = $this->xiqToken();
@@ -94,10 +98,11 @@ class ActionSwitchesXiqData extends ActionDataBase {
         $payload['host'] = $hostMeta;
         $diag['serial_used']   = $hostMeta['serial'];
         $diag['hostname_used'] = $hostMeta['hostname'];
+        $diag['mac_used']      = $hostMeta['mac'];
 
         try {
             $fleet  = XIQFleetClient::fromToken($token);
-            $device = $fleet->findDevice($hostMeta['hostname'], $hostMeta['serial']);
+            $device = $fleet->findDevice($hostMeta['hostname'], $hostMeta['serial'], $hostMeta['mac']);
             $payload['rateLimit'] = [
                 'remaining' => $fleet->getRateLimitRemaining(),
                 'reset'     => $fleet->getRateLimitReset()
@@ -118,12 +123,42 @@ class ActionSwitchesXiqData extends ActionDataBase {
             return;
         }
 
+        // Cross-check the resolved device against the identifiers we
+        // asked for. The lookup is "ambiguous" when ONLY the hostname
+        // agreed AND we had a serial/MAC to compare against — that's
+        // the classic "matched an AP that shares the closet hostname"
+        // failure mode. Refuse rather than silently fetch the wrong
+        // device's clients.
+        $match = is_array($device['__match'] ?? null) ? $device['__match'] : [];
+        $diag['lookup_match_score'] = (int) ($match['score'] ?? 0);
+        $diag['lookup_candidates']  = (int) ($match['candidates'] ?? 1);
+        $diag['lookup_verified']    = (bool) ($match['verified'] ?? false);
+        // Compose a human-readable summary of which identifiers agreed.
+        $matchBy = [];
+        if (!empty($match['by_serial'])) $matchBy[] = 'serial';
+        if (!empty($match['by_mac']))    $matchBy[] = 'mac';
+        if (!empty($match['by_host']))   $matchBy[] = 'hostname';
+        $diag['lookup_match_by'] = implode('+', $matchBy) ?: 'none';
+
+        // Acceptable if the match is by serial or MAC alone, by any
+        // combination of two filters, or by hostname when no other
+        // identifier was available to cross-check.
+        $hadStrongKey  = $hostMeta['serial'] !== '' || $hostMeta['mac'] !== '';
+        $matchedStrong = !empty($match['by_serial']) || !empty($match['by_mac']);
+        if ($hadStrongKey && !$matchedStrong) {
+            $payload['reason'] = 'lookup_ambiguous';
+            $payload['device'] = $this->shapeDevice($device);
+            $payload['notes']  = [
+                'clients' => 'Refused to fetch XIQ data: the only matching XIQ device shares the Zabbix host name but has a different serial/MAC. Verify the Zabbix host inventory serialno_a (got "' . $hostMeta['serial'] . '") matches the XIQ device, or correct the hostname.'
+            ];
+            if ($debug) $payload['_debug'] = $diag;
+            $this->respond($payload);
+            return;
+        }
+
         $payload['device'] = $this->shapeDevice($device);
         $deviceId = (int) $device['id'];
         $diag['device_raw_keys'] = array_keys($device);
-        $diag['lookup_match_by'] = ($hostMeta['serial'] !== '' && isset($device['serial_number']) && (string) $device['serial_number'] === $hostMeta['serial'])
-            ? 'serial'
-            : 'hostname';
 
         $isSwitch = stripos((string) ($device['device_function'] ?? ''), 'switch') !== false;
         $payload['notes'] = [];
@@ -228,7 +263,7 @@ class ActionSwitchesXiqData extends ActionDataBase {
     private function collectHostMeta(string $hostid): ?array {
         $hosts = API::Host()->get([
             'output'           => ['hostid', 'host', 'name'],
-            'selectInventory'  => ['serialno_a', 'serialno_b'],
+            'selectInventory'  => ['serialno_a', 'serialno_b', 'macaddress_a', 'macaddress_b'],
             'selectInterfaces' => ['ip', 'main', 'type'],
             'hostids'          => [$hostid]
         ]) ?: [];
@@ -239,6 +274,14 @@ class ActionSwitchesXiqData extends ActionDataBase {
         if ($serial === '') {
             $serial = trim((string) ($h['inventory']['serialno_b'] ?? ''));
         }
+        // MAC: prefer inventory.macaddress_a, then macaddress_b. XIQ matches
+        // on the colon-less form so we normalise here too.
+        $macRaw = trim((string) ($h['inventory']['macaddress_a'] ?? ''));
+        if ($macRaw === '') {
+            $macRaw = trim((string) ($h['inventory']['macaddress_b'] ?? ''));
+        }
+        $mac = preg_replace('/[^0-9A-Fa-f]/', '', $macRaw);
+        if (strlen((string) $mac) !== 12 || $mac === '000000000000') $mac = '';
 
         $ip = '';
         foreach ($h['interfaces'] ?? [] as $iface) {
@@ -253,6 +296,7 @@ class ActionSwitchesXiqData extends ActionDataBase {
             'hostname'     => (string) $h['host'],
             'visible_name' => (string) $h['name'],
             'serial'       => $serial,
+            'mac'          => (string) $mac,
             'ip'           => $ip
         ];
     }

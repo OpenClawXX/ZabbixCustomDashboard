@@ -134,37 +134,50 @@ final class XIQFleetClient {
     }
 
     /**
-     * Resolve a XIQ device by hostname and/or serial number.
+     * Resolve a XIQ device by serial, hostname, and/or MAC address.
      *
-     * Tries the cheap path first: GET /devices with the API's own filter
-     * params (`hostnames`, `sns`). One small page back from XIQ, no fleet
-     * paging. Returns the first BASIC-view device row matched, or null when
-     * neither identifier hits.
+     * Strategy: hit GET /devices once per available identifier (sns,
+     * hostnames, macAddresses) and intersect the candidate sets. A device
+     * id that comes back from MORE than one filter is the strongest match
+     * because it agrees on independent identifiers — that's how we avoid
+     * resolving e.g. an AP that happens to share a hostname with a
+     * switch. Ties are broken in order serial > MAC > hostname (most
+     * canonical first).
      *
-     * Used by the Switches dashboard's XIQ tab to look up a switch's XIQ
-     * device id from its Zabbix host name + inventory serial without
-     * dragging the whole fleet list through APCu.
+     * Once we've picked the best candidate, we re-fetch it via the
+     * single-device endpoint (GET /devices/{id}) — this serves two
+     * purposes: (a) confirms the id actually resolves on its own (the
+     * filtered list endpoint occasionally returns stale rows under
+     * device-renames / re-onboards), and (b) gives us the freshest copy
+     * of `connected` / `last_connect_time_ms` for the identity card.
      *
-     * Cached 5 min under "find:<hostname>:<serial>" since the mapping is
-     * stable — switches rarely change name or get re-onboarded in XIQ.
+     * Cross-checks are recorded on the returned row under the special
+     * `__match` key so callers (and the ?debug=1 path) can surface what
+     * identifiers actually agreed.
      *
-     * @param string $hostname  Zabbix host technical name (may match XIQ
-     *                          hostname when names are kept in sync).
-     * @param string $serial    Inventory serial number (most reliable match).
+     * Cached 5 min under "find:<sha1(hostname|serial|mac)>" since the
+     * mapping is stable — switches rarely change name or get re-
+     * onboarded in XIQ.
+     *
+     * @param string $hostname  Zabbix host technical name.
+     * @param string $serial    Inventory serial (most reliable identifier).
+     * @param string $mac       MAC address (colon-less or colon-separated).
      * @return array<string,mixed>|null
      */
-    public function findDevice(string $hostname, string $serial = '', int $cacheTtl = 300): ?array {
+    public function findDevice(string $hostname, string $serial = '', string $mac = '', int $cacheTtl = 300): ?array {
         $hostname = trim($hostname);
         $serial   = trim($serial);
-        if ($hostname === '' && $serial === '') return null;
+        $macClean = strtoupper((string) preg_replace('/[^0-9A-Fa-f]/', '', trim($mac)));
+        if (strlen($macClean) !== 12) $macClean = '';
+        if ($hostname === '' && $serial === '' && $macClean === '') return null;
 
-        $bucket = 'find:' . md5($hostname . '|' . $serial);
-        $found = $this->cached($bucket, $cacheTtl, function () use ($hostname, $serial) {
+        $bucket = 'find:' . sha1($hostname . '|' . $serial . '|' . $macClean);
+        $found = $this->cached($bucket, $cacheTtl, function () use ($hostname, $serial, $macClean) {
             $tryFilter = function (array $extra) {
                 $query = http_build_query($extra + [
                     'page'  => 1,
-                    'limit' => 10,
-                    'views' => 'BASIC',
+                    'limit' => 25,
+                    'views' => 'BASIC'
                 ]);
                 $resp = $this->getRaw('/devices?' . $query);
                 $isList = is_array($resp) && (array_values($resp) === $resp);
@@ -172,23 +185,86 @@ final class XIQFleetClient {
                 return is_array($rows) ? $rows : [];
             };
 
-            // Serial first — globally unique, never reused.
+            // Gather candidates from every filter we can use. Each
+            // candidate set is keyed by device id so duplicates from the
+            // same filter don't double-count toward the agreement score.
+            $bySerial   = []; $byHostname = []; $byMac = [];
+            $rowById    = [];
+
             if ($serial !== '') {
-                $rows = $tryFilter(['sns' => $serial]);
-                if ($rows) return $rows[0];
-            }
-            // Then hostname — XIQ matches the param case-sensitively, so
-            // we try the technical name verbatim before any lowercasing.
-            if ($hostname !== '') {
-                $rows = $tryFilter(['hostnames' => $hostname]);
-                if ($rows) return $rows[0];
-                $lower = strtolower($hostname);
-                if ($lower !== $hostname) {
-                    $rows = $tryFilter(['hostnames' => $lower]);
-                    if ($rows) return $rows[0];
+                foreach ($tryFilter(['sns' => $serial]) as $r) {
+                    if (!is_array($r) || empty($r['id'])) continue;
+                    $id = (string) $r['id'];
+                    $bySerial[$id] = true;
+                    $rowById[$id]  = $r;
                 }
             }
-            return ['__not_found' => true];
+            if ($macClean !== '') {
+                foreach ($tryFilter(['macAddresses' => $macClean]) as $r) {
+                    if (!is_array($r) || empty($r['id'])) continue;
+                    $id = (string) $r['id'];
+                    $byMac[$id]   = true;
+                    $rowById[$id] = $rowById[$id] ?? $r;
+                }
+            }
+            if ($hostname !== '') {
+                $candHosts = [$hostname];
+                $lower = strtolower($hostname);
+                if ($lower !== $hostname) $candHosts[] = $lower;
+                foreach ($candHosts as $h) {
+                    foreach ($tryFilter(['hostnames' => $h]) as $r) {
+                        if (!is_array($r) || empty($r['id'])) continue;
+                        $id = (string) $r['id'];
+                        $byHostname[$id] = true;
+                        $rowById[$id]    = $rowById[$id] ?? $r;
+                    }
+                }
+            }
+
+            if (!$rowById) return ['__not_found' => true];
+
+            // Score each candidate by how many independent filters it
+            // appeared in. Tie-break order: serial > MAC > hostname.
+            $score = [];
+            foreach ($rowById as $id => $_) {
+                $score[$id] = (isset($bySerial[$id])   ? 1 : 0)
+                            + (isset($byMac[$id])      ? 1 : 0)
+                            + (isset($byHostname[$id]) ? 1 : 0);
+            }
+            uksort($score, function ($a, $b) use ($score, $bySerial, $byMac, $byHostname) {
+                if ($score[$a] !== $score[$b]) return $score[$b] - $score[$a];
+                if (isset($bySerial[$a])   !== isset($bySerial[$b]))   return isset($bySerial[$a])   ? -1 : 1;
+                if (isset($byMac[$a])      !== isset($byMac[$b]))      return isset($byMac[$a])      ? -1 : 1;
+                if (isset($byHostname[$a]) !== isset($byHostname[$b])) return isset($byHostname[$a]) ? -1 : 1;
+                return 0;
+            });
+            $bestId = (string) array_key_first($score);
+
+            // Verify the winner directly via GET /devices/{id}. This
+            // gives us a fresh, authoritative copy of the device record
+            // and catches the edge case where the filter endpoint
+            // returned a stale id that no longer exists.
+            try {
+                $verified = $this->getJson('/devices/' . $bestId, []);
+            } catch (\Throwable $e) {
+                error_log('[tcs] /devices/{id} verify failed for ' . $bestId . ': ' . $e->getMessage());
+                $verified = $rowById[$bestId];
+            }
+            if (!is_array($verified) || empty($verified['id'])) {
+                $verified = $rowById[$bestId];
+            }
+
+            // Decorate with the cross-check info so the action can decide
+            // whether to trust the match (and the ?debug=1 path can show it).
+            $verified['__match'] = [
+                'score'      => (int) ($score[$bestId] ?? 0),
+                'by_serial'  => isset($bySerial[$bestId]),
+                'by_mac'     => isset($byMac[$bestId]),
+                'by_host'    => isset($byHostname[$bestId]),
+                'candidates' => count($rowById),
+                'verified'   => (string) ($verified['id'] ?? '') === $bestId
+            ];
+            return $verified;
         });
 
         if (!is_array($found) || ($found['__not_found'] ?? false)) return null;

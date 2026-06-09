@@ -962,6 +962,7 @@ const TabXiq = ({ host }) => {
     unknown_host:  "Host not visible in Zabbix.",
     lookup_failed: "XIQ lookup failed — see PHP error log.",
     not_in_xiq:    "This switch isn't onboarded in ExtremeCloud IQ.",
+    lookup_ambiguous: "Refused to query XIQ — the candidate device matched only the hostname, not the serial/MAC. Verify the Zabbix host inventory serialno_a matches XIQ.",
   };
 
   const device  = state.device || null;

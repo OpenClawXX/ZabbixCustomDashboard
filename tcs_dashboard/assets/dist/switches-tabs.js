@@ -1291,7 +1291,8 @@ const TabXiq = ({
     no_token: "No XIQ API token configured. For short tokens set {$XIQ_API_TOKEN}; for the longer Platform ONE JWT, set {$XIQ_API_TOKEN_FILE} to a file path containing the token, or drop it at /etc/zabbix/tcs_dashboard/xiq_api_token.",
     unknown_host: "Host not visible in Zabbix.",
     lookup_failed: "XIQ lookup failed — see PHP error log.",
-    not_in_xiq: "This switch isn't onboarded in ExtremeCloud IQ."
+    not_in_xiq: "This switch isn't onboarded in ExtremeCloud IQ.",
+    lookup_ambiguous: "Refused to query XIQ — the candidate device matched only the hostname, not the serial/MAC. Verify the Zabbix host inventory serialno_a matches XIQ."
   };
   const device = state.device || null;
   const clients = Array.isArray(state.clients) ? state.clients : [];
