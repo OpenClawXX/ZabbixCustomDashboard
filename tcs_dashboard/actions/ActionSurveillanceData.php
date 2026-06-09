@@ -51,7 +51,7 @@ class ActionSurveillanceData extends ActionDataBase {
     ];
 
     protected function checkInput(): bool {
-        $ret = $this->validateInput(['hostid' => 'string']);
+        $ret = $this->validateInput(['hostid' => 'string', 'stage' => 'string']);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
         }
@@ -59,8 +59,90 @@ class ActionSurveillanceData extends ActionDataBase {
     }
 
     protected function doAction(): void {
-        $payload = $this->collect($this->getInput('hostid', ''));
+        $hostid = $this->getInput('hostid', '');
+        $stage  = (string) $this->getInput('stage', '');
+
+        // Staged loading: the frontend fires summary/cameras/servers/history
+        // in parallel so the cheap pieces (header tiles, site grid, alarms)
+        // paint long before the expensive ones (per-camera roll-up, 24h
+        // event.get). Without a stage param the legacy full payload still
+        // builds so any external caller / link keeps working.
+        $payload = $stage !== ''
+            ? $this->collectStage($stage, $hostid)
+            : $this->collect($hostid);
+
         $this->setResponse(new CControllerResponseData(['main_block' => json_encode($payload)]));
+    }
+
+    /**
+     * Build one slice of the surveillance payload. Each stage is cached
+     * independently in APCu (15s TTL) so concurrent NOC tabs share work
+     * and the 30s frontend poll doesn't redo the heavy paths.
+     *
+     *   summary  → milestone + sites + alarms + siteDetails + evidenceLocks
+     *   cameras  → cameras list
+     *   servers  → recording-server tiles
+     *   history  → 24h fleet sparklines
+     */
+    public function collectStage(string $stage, string $active_hostid = ''): array {
+        $cacheKey = 'tcs_dashboard:surveillance_stage:' . $stage . ':' . md5($active_hostid);
+        if (function_exists('apcu_fetch')) {
+            $hit = apcu_fetch($cacheKey, $ok);
+            if ($ok && is_array($hit)) return $hit;
+        }
+
+        $site_hosts = $this->findSiteHosts();
+        if (!$site_hosts) {
+            return ['stage' => $stage, 'ts' => time()];
+        }
+        $site_host_ids = array_keys($site_hosts);
+        $site_items    = $this->collectSiteItems($site_host_ids);
+
+        $out = ['stage' => $stage, 'ts' => time()];
+
+        switch ($stage) {
+            case 'summary': {
+                // Cheapest stage — gates the loading splash. Per-camera
+                // host queries (findCameraHosts) and DVR-agent enrichment
+                // (findDvrAgentHosts) are skipped here; buildMilestoneSummary
+                // and buildSites don't read cam_hosts, and alarms over the
+                // site-host scope is enough to size the activeAlarms tile.
+                $problems = $this->collectProblems($site_host_ids);
+                $out['milestone']     = $this->buildMilestoneSummary($site_hosts, $site_items, [], $problems);
+                $out['sites']         = $this->buildSites($site_hosts, $site_items, [], $problems);
+                $out['alarms']        = $this->buildAlarms($problems);
+                $out['siteDetails']   = (object) [];
+                $out['evidenceLocks'] = [];
+                break;
+            }
+            case 'cameras': {
+                $cam_hosts       = $this->findCameraHosts();
+                $out['cameras']  = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
+                break;
+            }
+            case 'servers': {
+                $dvr_agents      = $this->findDvrAgentHosts($site_items);
+                $out['servers']  = $this->buildServers($site_hosts, $site_items, $dvr_agents);
+                break;
+            }
+            case 'history': {
+                $cam_hosts    = $this->findCameraHosts();
+                $dvr_agents   = $this->findDvrAgentHosts($site_items);
+                $all_host_ids = array_merge(
+                    $site_host_ids,
+                    array_keys($cam_hosts),
+                    array_keys($dvr_agents['hosts'])
+                );
+                $cameras      = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
+                $out['fleetHistory'] = $this->buildFleetHistory($all_host_ids, $cameras);
+                break;
+            }
+        }
+
+        if (function_exists('apcu_store')) {
+            apcu_store($cacheKey, $out, 15);
+        }
+        return $out;
     }
 
     /**
