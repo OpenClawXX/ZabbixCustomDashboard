@@ -23,12 +23,6 @@ namespace Modules\TcsDashboard\Lib;
 final class XIQFleetClient {
 
     private const BASE_URL      = 'https://api.extremecloudiq.com';
-    /** Extreme Platform ONE — Client service. Different host + path prefix
-     *  than the main XIQ API. Hosts the wired/wireless client health grid
-     *  endpoints (POST /wired/grid, POST /wireless/grid) that expose the
-     *  switch-attached station list the legacy /clients/active endpoint
-     *  does NOT return for switches. */
-    private const CLIENT_API_BASE = 'https://cloudapi.extremecloudiq.com/client/v1';
     private const CACHE_PREFIX  = 'tcs_dashboard:xiq_fleet_client:';
     private const PAGE_LIMIT    = 100;
     private const MAX_PAGES     = 200;       // hard ceiling — defends against runaway pagination
@@ -202,18 +196,18 @@ final class XIQFleetClient {
     }
 
     /**
-     * Fetch wired clients connected to one switch device via the Extreme
-     * Platform ONE Client service.
+     * Fetch wired clients connected to one switch device via the main XIQ
+     * Dashboard API.
      *
-     * Endpoint: POST https://cloudapi.extremecloudiq.com/client/v1/wired/grid
-     * Body:     { "device_ids": [<switchId>] }
+     * Endpoint: POST /dashboard/wired/client-health/grid
+     * Query:    page=N&limit=100&sortField=MAC&sortOrder=ASC
+     * Body:     { "device_ids": [<switchId>], "site_ids": [], "filter_field": [] }
      *
-     * This is the only public endpoint that returns the wired station list
-     * for a switch — /clients/active on the main XIQ API is wireless-
-     * association centric and returns 0 rows for switches even when the
-     * console shows attached devices. Different base URL, different scope
-     * on the API token ("Platform ONE Client" / "Client Read"), but same
-     * bearer-token auth.
+     * This is the public endpoint that returns the wired station list for
+     * a switch — /clients/active is wireless-association centric and
+     * returns 0 rows for switches even when the console shows attached
+     * devices. Same base URL and token scope as the other Dashboard
+     * endpoints (no separate Platform ONE service required).
      *
      * Pages through total_pages on the response so deployments with more
      * than `limit` clients on one switch still come back in full. Returns
@@ -223,63 +217,39 @@ final class XIQFleetClient {
      */
     public function getWiredClientsForDevice(int $deviceId, int $limit = 100, int $maxPages = 5): array {
         if ($deviceId <= 0) return [];
-        $limit = max(1, min(500, $limit));
+        $limit = max(1, min(100, $limit));   // /dashboard/wired/client-health/grid caps limit at 100
 
-        $body = ['device_ids' => [$deviceId]];
-        $query = [
-            'page'             => 1,
-            'limit'            => $limit,
-            'connection_status'=> 'CONNECTED',
-            'sort_field'       => 'MAC',
-            'order'            => 'ASC'
+        $body = [
+            'device_ids'   => [$deviceId],
+            'site_ids'     => [],
+            'filter_field' => []
         ];
 
-        $first = $this->requestAbsolute('POST', self::CLIENT_API_BASE . '/wired/grid', $query, $body);
-        $rows  = $first['data'] ?? [];
+        $first = $this->postJson('/dashboard/wired/client-health/grid', [
+            'page'      => 1,
+            'limit'     => $limit,
+            'sortField' => 'MAC',
+            'sortOrder' => 'ASC'
+        ], $body);
+        $rows = $first['data'] ?? [];
         if (!is_array($rows)) $rows = [];
         $all = $rows;
 
         $totalPages = (int) ($first['total_pages'] ?? 0);
         $last       = min($totalPages, $maxPages);
         for ($p = 2; $p <= $last; $p++) {
-            $query['page'] = $p;
-            $resp = $this->requestAbsolute('POST', self::CLIENT_API_BASE . '/wired/grid', $query, $body);
+            $resp = $this->postJson('/dashboard/wired/client-health/grid', [
+                'page'      => $p,
+                'limit'     => $limit,
+                'sortField' => 'MAC',
+                'sortOrder' => 'ASC'
+            ], $body);
             $more = $resp['data'] ?? [];
             if (!is_array($more) || !$more) break;
             foreach ($more as $r) $all[] = $r;
             if (count($more) < $limit) break;
         }
         return $all;
-    }
-
-    /**
-     * Issue a single request against an absolute URL (used for endpoints
-     * outside the main BASE_URL — e.g. the Platform ONE Client service).
-     * Same bearer auth + rate-limit tracking as {@see request()}.
-     *
-     * @return array<string,mixed>
-     */
-    private function requestAbsolute(string $method, string $baseUrl, array $query, $body): array {
-        $url = $baseUrl . ($query ? '?' . http_build_query($query) : '');
-        $ch  = curl_init($url);
-        $headers = [
-            'Authorization: Bearer ' . $this->token,
-            'Accept: application/json'
-        ];
-        $opts = [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HEADER         => true,
-            CURLOPT_TIMEOUT        => self::HTTP_TIMEOUT,
-            CURLOPT_FOLLOWLOCATION => false
-        ];
-        if ($method === 'POST') {
-            $opts[CURLOPT_POST] = true;
-            $opts[CURLOPT_POSTFIELDS] = json_encode($body ?? new \stdClass(), JSON_UNESCAPED_SLASHES);
-            $headers[] = 'Content-Type: application/json';
-        }
-        $opts[CURLOPT_HTTPHEADER] = $headers;
-        curl_setopt_array($ch, $opts);
-        return $this->execAndParse($ch, $baseUrl);
     }
 
     /**

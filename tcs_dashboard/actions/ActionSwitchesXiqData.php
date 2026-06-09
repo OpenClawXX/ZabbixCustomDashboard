@@ -172,7 +172,7 @@ class ActionSwitchesXiqData extends ActionDataBase {
             } catch (\Throwable $e) {
                 $msg = $e->getMessage();
                 if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
-                    $payload['notes']['clients'] = 'XIQ returned 403 on /wired/grid (Platform ONE Client service). The API token is missing the wired-client scope — add it under XIQ Administration → API Access Tokens.';
+                    $payload['notes']['clients'] = 'XIQ returned 403 on /dashboard/wired/client-health/grid — the API token is missing the Dashboard / wired-client read scope. Edit the token under XIQ Administration → API Access Tokens.';
                 } else {
                     error_log('[tcs_dashboard] xiq wired clients failed: ' . $msg);
                 }
