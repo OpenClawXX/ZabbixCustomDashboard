@@ -198,12 +198,20 @@ class ActionSwitchesXiqData extends ActionDataBase {
 
         if ($isSwitch) {
             try {
-                $wired = $fleet->getWiredClientsForDevice($deviceId, 100, 5);
-                $diag['wired_clients_total']    = count($wired);
+                [$wired, $wiredMeta] = $fleet->getWiredClientsForDeviceDetailed($deviceId, 100, 5);
+                // total_count is XIQ's authoritative count — when it's >0
+                // but `returned` is 0 we're either paginating wrong or
+                // hitting a permission filter. When both are 0, XIQ
+                // genuinely has no wired clients indexed for this switch.
+                $diag['wired_clients_total']    = (int) ($wiredMeta['total_count'] ?? count($wired));
                 $diag['wired_clients_returned'] = count($wired);
+                $diag['wired_meta']             = $wiredMeta;
                 if ($wired) $diag['wired_first_keys'] = array_keys($wired[0]);
                 if ($debug && $wired) $diag['wired_first_row'] = $wired[0];
                 $payload['clients'] = array_merge($payload['clients'], $this->shapeWiredClients($wired));
+                if (!$wired && (int) ($wiredMeta['total_count'] ?? 0) === 0) {
+                    $payload['notes']['clients'] = 'XIQ reports 0 wired clients for this switch on /dashboard/wired/client-health/grid. The console-side Connected Clients view may be sourced from a different telemetry channel (e.g. switch FDB pushed via Instant Port Profile); check Site → Switch in XIQ to confirm.';
+                }
             } catch (\Throwable $e) {
                 $msg = $e->getMessage();
                 if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
@@ -504,14 +512,17 @@ class ActionSwitchesXiqData extends ActionDataBase {
         if ($hostname === '') return [];
         $end   = (int) (microtime(true) * 1000);
         $start = $end - (7 * 86400 * 1000);
+        // XiqAlertSortField enum is { TIMESTAMP, SOURCE } — passing
+        // CREATE_TIME / CREATED_AT yields HTTP 400 from XIQ. The
+        // ordering direction stays under `order` (descending by default,
+        // which is what we want anyway, so it's omitted).
         $resp  = $fleet->getJson('/alerts', [
             'page'      => 1,
             'limit'     => 50,
             'startTime' => $start,
             'endTime'   => $end,
             'keyword'   => $hostname,
-            'sortField' => 'CREATE_TIME',
-            'order'     => 'DESC'
+            'sortField' => 'TIMESTAMP'
         ]);
         $rows = $resp['data'] ?? (is_array($resp) && array_values($resp) === $resp ? $resp : []);
         if (!is_array($rows)) return [];

@@ -292,7 +292,19 @@ final class XIQFleetClient {
      * @return array<int, array<string,mixed>>
      */
     public function getWiredClientsForDevice(int $deviceId, int $limit = 100, int $maxPages = 5): array {
-        if ($deviceId <= 0) return [];
+        [$rows, ] = $this->getWiredClientsForDeviceDetailed($deviceId, $limit, $maxPages);
+        return $rows;
+    }
+
+    /**
+     * Same as {@see getWiredClientsForDevice()} but also returns XIQ's
+     * first-page envelope so callers can see total_count / total_pages /
+     * any non-data fields (used by the debug diagnostics path).
+     *
+     * @return array{0: array<int,array<string,mixed>>, 1: array<string,mixed>}
+     */
+    public function getWiredClientsForDeviceDetailed(int $deviceId, int $limit = 100, int $maxPages = 5): array {
+        if ($deviceId <= 0) return [[], []];
         $limit = max(1, min(100, $limit));   // /dashboard/wired/client-health/grid caps limit at 100
 
         $body = [
@@ -325,7 +337,10 @@ final class XIQFleetClient {
             foreach ($more as $r) $all[] = $r;
             if (count($more) < $limit) break;
         }
-        return $all;
+        // Strip data from the returned envelope to keep the meta small.
+        $meta = $first;
+        unset($meta['data']);
+        return [$all, is_array($meta) ? $meta : []];
     }
 
     /**
