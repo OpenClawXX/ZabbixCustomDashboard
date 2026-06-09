@@ -1502,17 +1502,36 @@ class ActionSurveillanceData extends ActionDataBase {
                 $cam_host = $cam_host_by_id[$cam_id] ?? null;
                 $rsid     = trim((string) ($cam['rsid'] ?? ''));
                 $server   = $rsid !== '' ? ($rs_hostname_by_id[$rsid] ?? $rsid) : null;
-                // Group attribution prefers the per-camera dependent item
-                // (milestone.cam.group[<id>] extracting $.groupName) — tiny
-                // text value that survives the MySQL TEXT cap that truncates
-                // the 2 MB raw snapshot in history. Snapshot-fallback and
-                // site_label cover installs that haven't templated the new
-                // leaf yet.
+
+                // RS hostname → operator-readable site key. On installs where
+                // each school has its own dedicated recording server (e.g.
+                // bhs-bcddvr-ms.tcs.tusc.k12.al.us) the leftmost FQDN label
+                // already encodes the site identity; trim the trailing domain
+                // so the navigator shows "bhs-bcddvr-ms" rather than the full
+                // FQDN. Used only when the upstream group readers don't yield
+                // anything for this camera.
+                $server_group = null;
+                if ($server !== null && $server !== '') {
+                    $server_group = (string) (strstr($server, '.', true) ?: $server);
+                }
+
+                // Group attribution preference, worst to best resolution:
+                //   1. milestone.cam.group[<id>]  — per-camera dependent item
+                //      (tiny string, survives history-TEXT truncation).
+                //   2. snapshot-derived map (groupName from the cameras
+                //      snapshot OR cameraIds from the groups snapshot).
+                //   3. recording-server hostname  — operator-meaningful when
+                //      RS-per-site is the deployment shape (every camera
+                //      already carries the RS via milestone.cam.rsid).
+                //   4. site host label as a last-resort header.
                 $direct_group = trim((string) ($cam['group'] ?? ''));
+                $snap_group   = $cam_group_by_id[$this->normCamKey($cam_id)] ?? null;
                 if ($direct_group !== '') {
                     $diag['directGroupHits']++;
-                } elseif (isset($cam_group_by_id[$this->normCamKey($cam_id)])) {
+                } elseif ($snap_group !== null) {
                     $diag['snapFallbackHits']++;
+                } elseif ($server_group !== null) {
+                    $diag['serverFallbackHits'] = ($diag['serverFallbackHits'] ?? 0) + 1;
                 } else {
                     $diag['siteFallbackHits']++;
                 }
@@ -1526,15 +1545,9 @@ class ActionSurveillanceData extends ActionDataBase {
                     'id'        => $cam_id,
                     'name'      => $cam_host['name'] ?? ($cam['hwname'] ?? $cam_id),
                     'site'      => $site_label,
-                    // Camera-group label. Priority:
-                    //   1. milestone.cam.group[<id>]  — per-camera dependent
-                    //      item (tiny string, survives history-TEXT truncation).
-                    //   2. snapshot-derived map (groupName from the cameras
-                    //      snapshot OR cameraIds from the groups snapshot).
-                    //   3. site host label as a last-resort header.
                     'group'     => $direct_group !== ''
                                     ? $direct_group
-                                    : ($cam_group_by_id[$this->normCamKey($cam_id)] ?? $site_label),
+                                    : ($snap_group ?? ($server_group ?? $site_label)),
                     'loc'       => $cam['hwname'] ?? '',
                     'model'     => $cam['hwmodel'] ?? '—',
                     'res'       => null,
