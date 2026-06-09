@@ -51,7 +51,7 @@ class ActionSurveillanceData extends ActionDataBase {
     ];
 
     protected function checkInput(): bool {
-        $ret = $this->validateInput(['hostid' => 'string']);
+        $ret = $this->validateInput(['hostid' => 'string', 'stage' => 'string']);
         if (!$ret) {
             $this->setResponse(new CControllerResponseFatal());
         }
@@ -59,8 +59,96 @@ class ActionSurveillanceData extends ActionDataBase {
     }
 
     protected function doAction(): void {
-        $payload = $this->collect($this->getInput('hostid', ''));
+        $hostid = $this->getInput('hostid', '');
+        $stage  = (string) $this->getInput('stage', '');
+
+        // Staged loading: the frontend fires summary/cameras/servers/history
+        // in parallel so the cheap pieces (header tiles, site grid, alarms)
+        // paint long before the expensive ones (per-camera roll-up, 24h
+        // event.get). Without a stage param the legacy full payload still
+        // builds so any external caller / link keeps working.
+        $payload = $stage !== ''
+            ? $this->collectStage($stage, $hostid)
+            : $this->collect($hostid);
+
         $this->setResponse(new CControllerResponseData(['main_block' => json_encode($payload)]));
+    }
+
+    /**
+     * Build one slice of the surveillance payload. Each stage is cached
+     * independently in APCu (15s TTL) so concurrent NOC tabs share work
+     * and the 30s frontend poll doesn't redo the heavy paths.
+     *
+     *   summary  → milestone + sites + alarms + siteDetails + evidenceLocks
+     *   cameras  → cameras list
+     *   servers  → recording-server tiles
+     *   history  → 24h fleet sparklines
+     */
+    public function collectStage(string $stage, string $active_hostid = ''): array {
+        $cacheKey = 'tcs_dashboard:surveillance_stage:' . $stage . ':' . md5($active_hostid);
+        if (function_exists('apcu_fetch')) {
+            $hit = apcu_fetch($cacheKey, $ok);
+            if ($ok && is_array($hit)) return $hit;
+        }
+
+        $site_hosts = $this->findSiteHosts();
+        if (!$site_hosts) {
+            return ['stage' => $stage, 'ts' => time()];
+        }
+        $site_host_ids = array_keys($site_hosts);
+        $site_items    = $this->collectSiteItems($site_host_ids);
+
+        $out = ['stage' => $stage, 'ts' => time()];
+
+        switch ($stage) {
+            case 'summary': {
+                // Cheapest stage — gates the loading splash. Per-camera
+                // host queries (findCameraHosts) and DVR-agent enrichment
+                // (findDvrAgentHosts) are skipped here; buildMilestoneSummary
+                // and buildSites don't read cam_hosts, and alarms over the
+                // site-host scope is enough to size the activeAlarms tile.
+                $problems = $this->collectProblems($site_host_ids);
+                $out['milestone']     = $this->buildMilestoneSummary($site_hosts, $site_items, [], $problems);
+                $out['sites']         = $this->buildSites($site_hosts, $site_items, [], $problems);
+                $out['alarms']        = $this->buildAlarms($problems);
+                $out['siteDetails']   = (object) [];
+                $out['evidenceLocks'] = [];
+                break;
+            }
+            case 'cameras': {
+                $cam_hosts       = $this->findCameraHosts();
+                $out['cameras']  = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
+                // Surface the per-camera grouping diagnostic so the
+                // Cameras-tab navigator issue is debuggable from the
+                // payload — directGroupHits vs. snapFallbackHits vs.
+                // siteFallbackHits tells you which attribution path
+                // (or none) actually fired.
+                $out['__camGroupDiag'] = $this->camGroupDiag;
+                break;
+            }
+            case 'servers': {
+                $dvr_agents      = $this->findDvrAgentHosts($site_items);
+                $out['servers']  = $this->buildServers($site_hosts, $site_items, $dvr_agents);
+                break;
+            }
+            case 'history': {
+                $cam_hosts    = $this->findCameraHosts();
+                $dvr_agents   = $this->findDvrAgentHosts($site_items);
+                $all_host_ids = array_merge(
+                    $site_host_ids,
+                    array_keys($cam_hosts),
+                    array_keys($dvr_agents['hosts'])
+                );
+                $cameras      = $this->buildCameras($site_hosts, $site_items, $cam_hosts);
+                $out['fleetHistory'] = $this->buildFleetHistory($all_host_ids, $cameras);
+                break;
+            }
+        }
+
+        if (function_exists('apcu_store')) {
+            apcu_store($cacheKey, $out, 15);
+        }
+        return $out;
     }
 
     /**
@@ -1414,17 +1502,36 @@ class ActionSurveillanceData extends ActionDataBase {
                 $cam_host = $cam_host_by_id[$cam_id] ?? null;
                 $rsid     = trim((string) ($cam['rsid'] ?? ''));
                 $server   = $rsid !== '' ? ($rs_hostname_by_id[$rsid] ?? $rsid) : null;
-                // Group attribution prefers the per-camera dependent item
-                // (milestone.cam.group[<id>] extracting $.groupName) — tiny
-                // text value that survives the MySQL TEXT cap that truncates
-                // the 2 MB raw snapshot in history. Snapshot-fallback and
-                // site_label cover installs that haven't templated the new
-                // leaf yet.
+
+                // RS hostname → operator-readable site key. On installs where
+                // each school has its own dedicated recording server (e.g.
+                // bhs-bcddvr-ms.tcs.tusc.k12.al.us) the leftmost FQDN label
+                // already encodes the site identity; trim the trailing domain
+                // so the navigator shows "bhs-bcddvr-ms" rather than the full
+                // FQDN. Used only when the upstream group readers don't yield
+                // anything for this camera.
+                $server_group = null;
+                if ($server !== null && $server !== '') {
+                    $server_group = (string) (strstr($server, '.', true) ?: $server);
+                }
+
+                // Group attribution preference, worst to best resolution:
+                //   1. milestone.cam.group[<id>]  — per-camera dependent item
+                //      (tiny string, survives history-TEXT truncation).
+                //   2. snapshot-derived map (groupName from the cameras
+                //      snapshot OR cameraIds from the groups snapshot).
+                //   3. recording-server hostname  — operator-meaningful when
+                //      RS-per-site is the deployment shape (every camera
+                //      already carries the RS via milestone.cam.rsid).
+                //   4. site host label as a last-resort header.
                 $direct_group = trim((string) ($cam['group'] ?? ''));
+                $snap_group   = $cam_group_by_id[$this->normCamKey($cam_id)] ?? null;
                 if ($direct_group !== '') {
                     $diag['directGroupHits']++;
-                } elseif (isset($cam_group_by_id[$this->normCamKey($cam_id)])) {
+                } elseif ($snap_group !== null) {
                     $diag['snapFallbackHits']++;
+                } elseif ($server_group !== null) {
+                    $diag['serverFallbackHits'] = ($diag['serverFallbackHits'] ?? 0) + 1;
                 } else {
                     $diag['siteFallbackHits']++;
                 }
@@ -1438,15 +1545,9 @@ class ActionSurveillanceData extends ActionDataBase {
                     'id'        => $cam_id,
                     'name'      => $cam_host['name'] ?? ($cam['hwname'] ?? $cam_id),
                     'site'      => $site_label,
-                    // Camera-group label. Priority:
-                    //   1. milestone.cam.group[<id>]  — per-camera dependent
-                    //      item (tiny string, survives history-TEXT truncation).
-                    //   2. snapshot-derived map (groupName from the cameras
-                    //      snapshot OR cameraIds from the groups snapshot).
-                    //   3. site host label as a last-resort header.
                     'group'     => $direct_group !== ''
                                     ? $direct_group
-                                    : ($cam_group_by_id[$this->normCamKey($cam_id)] ?? $site_label),
+                                    : ($snap_group ?? ($server_group ?? $site_label)),
                     'loc'       => $cam['hwname'] ?? '',
                     'model'     => $cam['hwmodel'] ?? '—',
                     'res'       => null,

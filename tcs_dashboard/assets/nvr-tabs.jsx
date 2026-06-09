@@ -140,27 +140,35 @@ const NvrTabSites = () => {
 // ─────────────────────────────────────────────────────────────
 const NvrTabCameras = () => {
   const all = _tabsArr(window.CAMERAS);
-  const SITES_RAW = _tabsArr(window.SITES);
 
-  // Group membership is attributed server-side (buildCameras walks each
-  // group's cameraIds and stamps cam.group). Same join the Sites tab uses
-  // for its per-site cam counts — so the navigator buckets here line up
-  // with what's shown there.
-  const camSite = (c) => c.group || c.site || "Ungrouped";
+  // Bucket the navigator by recording server. Milestone camera-groups
+  // ride on three different upstream paths (milestone.cam.group[<id>]
+  // dep item, the groups snapshot's cameraIds, the cameras snapshot's
+  // groupName) and any of them can be stale or stripped on a given
+  // install, leaving the navigator with every camera collapsed under
+  // one site label. The recording-server hostname is always populated
+  // off milestone.cam.rsid and — on RS-per-site deployments — already
+  // encodes the operator's "site". Trim the trailing FQDN so the bucket
+  // label is "bhs-bcddvr-ms" rather than the full hostname.
+  const serverBucket = (c) => {
+    const s = (c.server || "").trim();
+    if (!s) return "Ungrouped";
+    const dot = s.indexOf(".");
+    return dot > 0 ? s.slice(0, dot) : s;
+  };
+  const camSite = serverBucket;
 
-  // Site → [cameras] in SITES_RAW order, then any "Ungrouped" / extras after.
+  // Server → [cameras]. Sorted alphabetically by bucket label so the
+  // navigator order is stable across refreshes.
   const camsBySite = new Map();
   for (const c of all) {
     const s = camSite(c);
     if (!camsBySite.has(s)) camsBySite.set(s, []);
     camsBySite.get(s).push(c);
   }
-  const sitesList = [];
-  for (const s of SITES_RAW) {
-    sitesList.push({ name: s.name, cams: camsBySite.get(s.name) || [] });
-    camsBySite.delete(s.name);
-  }
-  for (const [name, cams] of camsBySite) sitesList.push({ name, cams });
+  const sitesList = [...camsBySite.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, cams]) => ({ name, cams }));
 
   const [siteFilter,  setSiteFilter]  = useStateNVT("All");
   const [stateFilter, setStateFilter] = useStateNVT("all");

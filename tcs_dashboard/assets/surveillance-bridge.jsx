@@ -5,11 +5,12 @@
 // and publishes the window globals that nvr-overview.jsx / nvr-app.jsx
 // consume: MILESTONE, SITES, SERVERS, CAMERAS, VMS_ALARMS, FLEET_HISTORY.
 //
-// This file is now the SOLE source of those globals on the Overview
-// page — nvr-data.jsx (mock baseline) is no longer loaded by
-// surveillance.view.php. Every key gets a numeric / array / string
-// default so the JSX renders zero / "—" rather than crashing on
-// undefined when the backend has nothing yet for a field.
+// Loading is staged: the page fires four parallel fetches against
+// tcs.surveillance.data?stage=... so the cheap pieces (header tiles +
+// sites grid + alarms) paint long before the expensive per-camera and
+// 24h-event rollups land. Each stage updates its slice of state in
+// place and dispatches "tcs:surveillance-data" with the stage label so
+// the React tree re-renders progressively.
 
 (function () {
     const isNum = (v) => typeof v === "number" && !Number.isNaN(v);
@@ -78,11 +79,12 @@
     window.SITE_DETAILS   = {};
     window.EVIDENCE_LOCKS = [];
 
-    const applyBoot = (boot) => {
-        if (!boot || typeof boot !== "object") return;
-
-        // ── MILESTONE summary ─────────────────────────────────────────
-        const m = boot.milestone || {};
+    // ── Per-key appliers ──────────────────────────────────────────────
+    // Each one writes one global from a partial payload. A stage that
+    // doesn't carry a key just doesn't call the applier, so a "cameras"
+    // response can't blank out SITES from the prior "summary" response.
+    const applyMilestone = (m) => {
+        m = m || {};
         window.MILESTONE = {
             product:                str(m.product, EMPTY_MILESTONE.product),
             version:                str(m.version, EMPTY_MILESTONE.version),
@@ -105,9 +107,10 @@
             evidenceLockSlots:      num(m.evidenceLockSlots),
             evidenceLockUsed:       num(m.evidenceLockUsed)
         };
+    };
 
-        // ── SITES ─────────────────────────────────────────────────────
-        window.SITES = (Array.isArray(boot.sites) ? boot.sites : []).map(s => ({
+    const applySites = (sites) => {
+        window.SITES = (Array.isArray(sites) ? sites : []).map(s => ({
             name:         str(s.name, "—"),
             cams:         num(s.cams),
             online:       num(s.online),
@@ -115,20 +118,15 @@
             err:          num(s.err),
             hwCount:      num(s.hwCount),
             server:       str(s.server, "—"),
-            // Default capacity to 1 so percent-of math doesn't divide by zero.
             storageGB:    num(s.storageGB),
             storageCapGB: num(s.storageCapGB, 1) || 1,
-            // Shortest retention across this site's RSs, in minutes.
-            // Published by buildSitesByGroup when the RS extras template
-            // is linked; 0 when no per-RS retention is templated yet.
             retentionMin: num(s.retentionMin),
-            // Camera GUIDs in this site/group — drives the Cameras tab
-            // navigator's per-group bucketing.
             cameraIds:    Array.isArray(s.cameraIds) ? s.cameraIds : []
         }));
+    };
 
-        // ── SERVERS (recording servers) ───────────────────────────────
-        window.SERVERS = (Array.isArray(boot.servers) ? boot.servers : []).map(s => ({
+    const applyServers = (servers) => {
+        window.SERVERS = (Array.isArray(servers) ? servers : []).map(s => ({
             id:           str(s.id, "—"),
             rsid:         s.rsid || null,
             site:         str(s.site, "—"),
@@ -140,11 +138,8 @@
             cpu:          num(s.cpu),
             mem:          num(s.mem),
             disk:         num(s.disk),
-            // iDRAC-driven RAID / hardware indicator: ok | warn | err | unknown.
             raid:         s.raid || "unknown",
             hwStatus:     s.hwStatus || null,
-            // Milestone-reported service state (from the RS extras
-            // template's milestone.rs.state[<id>]). Null if not linked.
             svcState:     s.svcState || null,
             chans:        num(s.chans),
             hwDevices:    num(s.hwDevices),
@@ -161,9 +156,10 @@
             handshakeAge: num(s.handshakeAge),
             agentHostid:  s.agentHostid || null
         }));
+    };
 
-        // ── CAMERAS ───────────────────────────────────────────────────
-        window.CAMERAS = (Array.isArray(boot.cameras) ? boot.cameras : []).map(c => ({
+    const applyCameras = (cameras) => {
+        window.CAMERAS = (Array.isArray(cameras) ? cameras : []).map(c => ({
             id:        str(c.id, "—"),
             site:      str(c.site, "—"),
             group:     str(c.group, c.site || "—"),
@@ -184,21 +180,10 @@
             warnMsg:   c.warnMsg || null,
             errMsg:    c.errMsg  || null
         }));
+    };
 
-        // ── FLEET_HISTORY (24h sparklines) ────────────────────────────
-        // Per-key: any non-null/non-empty array from the backend lands
-        // directly; everything else keeps the zero baseline so the
-        // SVG charts still have something to draw.
-        const baseHistory = emptyHistory();
-        const bh = boot.fleetHistory && typeof boot.fleetHistory === "object" ? boot.fleetHistory : {};
-        for (const k of EMPTY_HISTORY_KEYS) {
-            const v = bh[k];
-            if (Array.isArray(v) && v.length) baseHistory[k] = v;
-        }
-        window.FLEET_HISTORY = baseHistory;
-
-        // ── VMS_ALARMS ────────────────────────────────────────────────
-        window.VMS_ALARMS = (Array.isArray(boot.alarms) ? boot.alarms : []).map(a => ({
+    const applyAlarms = (alarms) => {
+        window.VMS_ALARMS = (Array.isArray(alarms) ? alarms : []).map(a => ({
             ts:     str(a.ts, ""),
             sev:    a.sev || "info",
             cam:    str(a.cam, "—"),
@@ -207,9 +192,29 @@
             site:   str(a.site, ""),
             ack:    !!a.ack
         }));
+    };
 
-        // ── SITE_DETAILS / EVIDENCE_LOCKS (pass through if backend supplies) ──
-        if (boot.siteDetails && typeof boot.siteDetails === "object") {
+    const applyHistory = (fleetHistory) => {
+        const base = emptyHistory();
+        const bh = fleetHistory && typeof fleetHistory === "object" ? fleetHistory : {};
+        for (const k of EMPTY_HISTORY_KEYS) {
+            const v = bh[k];
+            if (Array.isArray(v) && v.length) base[k] = v;
+        }
+        window.FLEET_HISTORY = base;
+    };
+
+    // applyBoot — only writes keys actually present on the payload, so a
+    // partial (staged) response doesn't clobber the other globals.
+    const applyBoot = (boot) => {
+        if (!boot || typeof boot !== "object") return;
+        if (boot.milestone     !== undefined) applyMilestone(boot.milestone);
+        if (boot.sites         !== undefined) applySites(boot.sites);
+        if (boot.servers       !== undefined) applyServers(boot.servers);
+        if (boot.cameras       !== undefined) applyCameras(boot.cameras);
+        if (boot.alarms        !== undefined) applyAlarms(boot.alarms);
+        if (boot.fleetHistory  !== undefined) applyHistory(boot.fleetHistory);
+        if (boot.siteDetails   && typeof boot.siteDetails === "object") {
             window.SITE_DETAILS = boot.siteDetails;
         }
         if (Array.isArray(boot.evidenceLocks)) {
@@ -217,10 +222,25 @@
         }
     };
 
-    // The page now loads with an empty/async boot (the heavy fleet collect
-    // moved to the tcs.surveillance.data endpoint to keep TTFB low). Mark the
-    // app as loading until the first fetch lands so it can show a spinner
-    // instead of an empty shell.
+    // ── Stage tracking ────────────────────────────────────────────────
+    // The four stages the backend exposes. "summary" is the gate: once
+    // it lands the page can render the header / sites / alarms and the
+    // boot splash drops. The other stages backfill as they arrive.
+    const STAGES = ["summary", "cameras", "servers", "history"];
+    const STAGE_LABELS = {
+        summary: "Loading fleet summary",
+        cameras: "Loading cameras",
+        servers: "Loading recording servers",
+        history: "Loading 24h history"
+    };
+
+    const initialStageState = () => {
+        const s = {};
+        for (const k of STAGES) s[k] = "pending";  // pending | done | error
+        return s;
+    };
+    window.SURVEILLANCE_STAGES = initialStageState();
+
     const boot = window.SURVEILLANCE_BOOT || {};
     window.SURVEILLANCE_LOADING = !boot || boot.async === true || !boot.milestone;
     applyBoot(window.SURVEILLANCE_BOOT);
@@ -229,28 +249,56 @@
     const url = window.TCS_SURVEILLANCE_DATA_URL;
     if (!url) return;
 
-    const tick = async () => {
+    const stageUrl = (stage) =>
+        url + (url.indexOf("?") >= 0 ? "&" : "?") + "stage=" + encodeURIComponent(stage);
+
+    const dispatch = (stage, payload) => {
+        window.dispatchEvent(new CustomEvent("tcs:surveillance-data", {
+            detail: { stage, payload }
+        }));
+    };
+
+    const fetchStage = async (stage) => {
         try {
-            const resp = await fetch(url, {
+            const resp = await fetch(stageUrl(stage), {
                 credentials: "same-origin",
                 headers: { "Accept": "application/json" }
             });
-            if (!resp.ok) return;
-            const fresh = await resp.json();
-            applyBoot(fresh);
-            window.SURVEILLANCE_LOADING = false;
-            window.dispatchEvent(new CustomEvent("tcs:surveillance-data", { detail: fresh }));
+            if (!resp.ok) {
+                window.SURVEILLANCE_STAGES[stage] = "error";
+                dispatch(stage, null);
+                return;
+            }
+            const data = await resp.json();
+            applyBoot(data);
+            window.SURVEILLANCE_STAGES[stage] = "done";
+            // Summary lands → page can render; later stages fill in.
+            if (stage === "summary") window.SURVEILLANCE_LOADING = false;
+            dispatch(stage, data);
         } catch (e) {
-            console.warn("[tcs] surveillance refresh failed:", e);
-            // Don't strand the page on the loading splash — drop the flag and
-            // re-render into the (empty) shell; the next poll will retry.
-            window.SURVEILLANCE_LOADING = false;
-            window.dispatchEvent(new CustomEvent("tcs:surveillance-data", { detail: null }));
+            console.warn(`[tcs] surveillance ${stage} failed:`, e);
+            window.SURVEILLANCE_STAGES[stage] = "error";
+            dispatch(stage, null);
         }
     };
 
+    const tick = async () => {
+        window.SURVEILLANCE_STAGES = initialStageState();
+        // Don't re-trigger the splash on the periodic poll — only the first
+        // load (no milestone yet) keeps SURVEILLANCE_LOADING true.
+        dispatch("start", null);
+        await Promise.all(STAGES.map(fetchStage));
+        // Guarantee the loading flag is cleared even if "summary" errored
+        // (we still want the page to render its empty shell + the error
+        // state on each stage chip).
+        window.SURVEILLANCE_LOADING = false;
+        dispatch("complete", null);
+    };
+
     window.tcsSurveillanceRefresh = tick;
-    // Kick off the first fetch immediately (after first paint), then poll.
+    window.TCS_SURVEILLANCE_STAGE_LABELS = STAGE_LABELS;
+    // Kick off the first set of fetches immediately (after first paint),
+    // then poll every 30s.
     tick();
     setInterval(tick, REFRESH_MS);
 })();
