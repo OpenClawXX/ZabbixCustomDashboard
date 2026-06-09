@@ -237,19 +237,128 @@ class ActionSwitchesXiqData extends ActionDataBase {
                     $activeCount = is_numeric($cnt) ? (int) $cnt
                         : (int) ($cnt['count'] ?? $cnt['total_count'] ?? 0);
                     $diag['clients_active_wired_count'] = $activeCount;
-                    if ($activeCount === 0 && empty($payload['notes']['clients'])) {
-                        $payload['notes']['clients'] =
-                            'XIQ has no wired-client telemetry indexed for this switch — both '
-                            . '/dashboard/wired/client-health/grid and /clients/active (count) '
-                            . 'returned 0. This is typically because the switch isn\'t pushing '
-                            . 'client telemetry to XIQ: assign an Instant Port Profile to the '
-                            . 'access ports in the device\'s policy, or enable Wired Client '
-                            . 'Visibility on the device. The switch FDB shown on the Port Status '
-                            . 'tab (sourced from Zabbix via SNMP) is the source of truth in the '
-                            . 'meantime.';
-                    }
                 } catch (\Throwable $e) {
                     $diag['errors'][] = 'wired_count_probe: ' . $e->getMessage();
+                }
+
+                // Org-wide unfiltered probe. Issue the SAME wired-grid call
+                // but with no device_ids filter, asking for the first 50
+                // rows. Three possible outcomes pin down where the gap is:
+                //
+                //   total = 0      → XIQ org has no wired-client telemetry
+                //                    anywhere → org-wide config (Wired
+                //                    Client Visibility / Instant Port
+                //                    Profile not deployed).
+                //   total > 0, our device_id missing from any row
+                //                  → other devices report wired clients;
+                //                    THIS switch is silent → per-device
+                //                    config issue (IPP not assigned to
+                //                    this switch's port profile).
+                //   total > 0, our device_id present in some row
+                //                  → the per-device filter is dropping
+                //                    matches → bug in our request shape.
+                //
+                // Only run under ?debug=1; it can be expensive on large
+                // orgs (50 rows of FULL data) and is purely diagnostic.
+                if ($debug) {
+                    try {
+                        $orgWide = $fleet->postJson('/dashboard/wired/client-health/grid', [
+                            'page'      => 1,
+                            'limit'     => 50,
+                            'sortField' => 'MAC',
+                            'sortOrder' => 'ASC'
+                        ], [
+                            'site_ids'     => [],
+                            'device_ids'   => [],
+                            'filter_field' => []
+                        ]);
+                        $orgRows  = is_array($orgWide['data'] ?? null) ? $orgWide['data'] : [];
+                        $orgTotal = (int) ($orgWide['total_count'] ?? count($orgRows));
+                        $distinctDevices = [];
+                        $hostnamesByDevice = [];
+                        $thisDeviceHits  = 0;
+                        foreach ($orgRows as $r) {
+                            if (!is_array($r)) continue;
+                            $did = (string) ($r['device_id'] ?? '');
+                            if ($did === '') continue;
+                            $distinctDevices[$did] = ($distinctDevices[$did] ?? 0) + 1;
+                            $hostnamesByDevice[$did] = $hostnamesByDevice[$did]
+                                ?? (string) ($r['switch_name'] ?? '');
+                            if ((string) $did === (string) $deviceId) $thisDeviceHits++;
+                        }
+                        arsort($distinctDevices);
+                        $sampleDevices = [];
+                        foreach (array_slice($distinctDevices, 0, 8, true) as $did => $n) {
+                            $sampleDevices[] = [
+                                'device_id' => $did,
+                                'switch'    => $hostnamesByDevice[$did] ?? '',
+                                'rows'      => $n
+                            ];
+                        }
+                        $diag['orgwide_wired'] = [
+                            'total_count'        => $orgTotal,
+                            'rows_returned'      => count($orgRows),
+                            'distinct_devices'   => count($distinctDevices),
+                            'this_device_hits'   => $thisDeviceHits,
+                            'top_devices_sample' => $sampleDevices
+                        ];
+
+                        // Refine the operator-facing note based on what
+                        // the org-wide probe actually saw.
+                        if (empty($payload['notes']['clients'])) {
+                            if ($orgTotal === 0) {
+                                $payload['notes']['clients'] =
+                                    'XIQ-wide /dashboard/wired/client-health/grid returns 0 '
+                                    . 'rows even with no device filter — wired-client '
+                                    . 'telemetry isn\'t flowing for ANY device in this org. '
+                                    . 'Enable Wired Client Visibility on the network policy / '
+                                    . 'attach an Instant Port Profile to access ports. Until '
+                                    . 'that\'s set up org-wide, no switch will return clients '
+                                    . 'via the public API; the Port Status tab\'s SNMP-sourced '
+                                    . 'FDB is the source of truth.';
+                            } elseif ($thisDeviceHits === 0) {
+                                $sampleHost = $sampleDevices[0]['switch'] ?? '(unknown)';
+                                $payload['notes']['clients'] =
+                                    'XIQ has wired-client telemetry for OTHER devices in this '
+                                    . 'org (e.g. "' . $sampleHost . '") but not for this '
+                                    . 'switch — it isn\'t pushing wired-client info. Check '
+                                    . 'this switch\'s policy: ensure access ports have an '
+                                    . 'Instant Port Profile and that Wired Client Visibility '
+                                    . 'is enabled on the device.';
+                            } else {
+                                $payload['notes']['clients'] =
+                                    'Org-wide probe DID see ' . $thisDeviceHits . ' rows '
+                                    . 'for this switch (device_id ' . $deviceId . ') in the '
+                                    . 'first 50 unfiltered results — but the device-filtered '
+                                    . 'call returned 0. This is a request-shape mismatch in '
+                                    . 'the dashboard, not an XIQ config issue. See server log '
+                                    . 'for details.';
+                                error_log(sprintf(
+                                    '[tcs_dashboard] xiq wired-clients filter mismatch: '
+                                    . 'unfiltered probe saw %d row(s) for device_id %d but '
+                                    . 'filtered grid returned 0. Check request body shape.',
+                                    $thisDeviceHits, $deviceId
+                                ));
+                            }
+                        }
+                    } catch (\Throwable $e) {
+                        $diag['errors'][] = 'wired_orgwide_probe: ' . $e->getMessage();
+                    }
+                }
+
+                // Fall-through default note when debug isn't requested
+                // and we still have nothing useful to say.
+                if (empty($payload['notes']['clients'])) {
+                    $payload['notes']['clients'] =
+                        'XIQ has no wired-client telemetry indexed for this switch — both '
+                        . '/dashboard/wired/client-health/grid and /clients/active (count) '
+                        . 'returned 0. This is typically because the switch isn\'t pushing '
+                        . 'client telemetry to XIQ: assign an Instant Port Profile to the '
+                        . 'access ports in the device\'s policy, or enable Wired Client '
+                        . 'Visibility on the device. The switch FDB shown on the Port Status '
+                        . 'tab (sourced from Zabbix via SNMP) is the source of truth in the '
+                        . 'meantime. Append ?debug=1 to the data URL for an org-wide cross-'
+                        . 'check that pins down whether this is a device-side or org-wide gap.';
                 }
             }
         }
