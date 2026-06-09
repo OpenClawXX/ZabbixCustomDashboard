@@ -254,6 +254,30 @@ final class XIQFleetClient {
                 $verified = $rowById[$bestId];
             }
 
+            // Collect every sibling candidate that shares the SAME
+            // hostname as the primary, minus the primary itself. Switch
+            // stacks and re-onboarded devices often register multiple
+            // XIQ device IDs under the same hostname; the wired-client
+            // telemetry sometimes attaches to a sibling instead of the
+            // record whose serial matched. The action layer fetches
+            // clients/events for the union to avoid missing data.
+            $primaryHost = strtolower((string) ($verified['hostname'] ?? $rowById[$bestId]['hostname'] ?? ''));
+            $siblings = [];
+            foreach ($rowById as $id => $row) {
+                if ((string) $id === $bestId) continue;
+                $rowHost = strtolower((string) ($row['hostname'] ?? ''));
+                if ($primaryHost !== '' && $rowHost === $primaryHost) {
+                    $siblings[] = [
+                        'id'       => (int) ($row['id'] ?? 0),
+                        'hostname' => (string) ($row['hostname'] ?? ''),
+                        'serial'   => (string) ($row['serial_number'] ?? ''),
+                        'model'    => (string) ($row['product_type'] ?? ''),
+                        'function' => (string) ($row['device_function'] ?? ''),
+                        'mac'      => (string) ($row['mac_address'] ?? '')
+                    ];
+                }
+            }
+
             // Decorate with the cross-check info so the action can decide
             // whether to trust the match (and the ?debug=1 path can show it).
             $verified['__match'] = [
@@ -262,7 +286,8 @@ final class XIQFleetClient {
                 'by_mac'     => isset($byMac[$bestId]),
                 'by_host'    => isset($byHostname[$bestId]),
                 'candidates' => count($rowById),
-                'verified'   => (string) ($verified['id'] ?? '') === $bestId
+                'verified'   => (string) ($verified['id'] ?? '') === $bestId,
+                'siblings'   => $siblings
             ];
             return $verified;
         });
@@ -621,7 +646,16 @@ final class XIQFleetClient {
             throw new \RuntimeException("XIQ HTTP $status on $path — $snip");
         }
 
-        $decoded = json_decode($body, true);
+        // Most XIQ endpoints return JSON objects/arrays, but a few count
+        // endpoints (/clients/active/count, /devices/count) return a bare
+        // integer as the response body. json_decode("42", true) → 42, which
+        // is valid JSON. Wrap scalar results in a uniform shape so callers
+        // can read $resp['count'] without special-casing per endpoint.
+        $decoded = json_decode($body, true, 512, JSON_BIGINT_AS_STRING);
+        if (is_int($decoded) || is_float($decoded) || (is_string($decoded) && ctype_digit($decoded))) {
+            return ['count' => (int) $decoded, '__scalar' => true];
+        }
+        if (is_bool($decoded)) return ['value' => $decoded, '__scalar' => true];
         if (!is_array($decoded)) {
             throw new \RuntimeException('XIQ returned non-JSON body');
         }

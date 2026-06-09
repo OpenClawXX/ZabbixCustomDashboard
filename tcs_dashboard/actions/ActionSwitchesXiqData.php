@@ -196,28 +196,54 @@ class ActionSwitchesXiqData extends ActionDataBase {
             $diag['errors'][] = 'clients: ' . $e->getMessage();
         }
 
+        // Collect the device IDs to query: the primary plus any sibling
+        // XIQ devices with the same hostname. Switch stacks and re-
+        // onboarded devices often register multiple XIQ records under
+        // one hostname; wired-client telemetry may attach to a sibling
+        // instead of the serial-matched primary, so we fan out across
+        // all of them and merge results.
+        $siblings = is_array($match['siblings'] ?? null) ? $match['siblings'] : [];
+        $idsToQuery = [$deviceId];
+        foreach ($siblings as $s) {
+            $sid = (int) ($s['id'] ?? 0);
+            if ($sid > 0 && $sid !== $deviceId) $idsToQuery[] = $sid;
+        }
+        $diag['device_ids_queried'] = $idsToQuery;
+        $diag['siblings_seen']      = $siblings;
+
         if ($isSwitch) {
-            try {
-                [$wired, $wiredMeta] = $fleet->getWiredClientsForDeviceDetailed($deviceId, 100, 5);
-                // total_count is XIQ's authoritative count — when it's >0
-                // but `returned` is 0 we're either paginating wrong or
-                // hitting a permission filter. When both are 0, XIQ
-                // genuinely has no wired clients indexed for this switch.
-                $diag['wired_clients_total']    = (int) ($wiredMeta['total_count'] ?? count($wired));
-                $diag['wired_clients_returned'] = count($wired);
-                $diag['wired_meta']             = $wiredMeta;
-                if ($wired) $diag['wired_first_keys'] = array_keys($wired[0]);
-                if ($debug && $wired) $diag['wired_first_row'] = $wired[0];
-                $payload['clients'] = array_merge($payload['clients'], $this->shapeWiredClients($wired));
-            } catch (\Throwable $e) {
-                $msg = $e->getMessage();
-                if (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false) {
-                    $payload['notes']['clients'] = 'XIQ returned 403 on /dashboard/wired/client-health/grid — the API token is missing the Dashboard / wired-client read scope. Edit the token under XIQ Administration → API Access Tokens.';
-                } else {
-                    error_log('[tcs_dashboard] xiq wired clients failed: ' . $msg);
+            $totalAcrossSiblings = 0;
+            foreach ($idsToQuery as $idx => $did) {
+                try {
+                    [$wired, $wiredMeta] = $fleet->getWiredClientsForDeviceDetailed($did, 100, 5);
+                    // First (primary) call drives the diag fields; siblings
+                    // just contribute clients into the merged payload.
+                    if ($idx === 0) {
+                        $diag['wired_clients_total']    = (int) ($wiredMeta['total_count'] ?? count($wired));
+                        $diag['wired_clients_returned'] = count($wired);
+                        $diag['wired_meta']             = $wiredMeta;
+                        if ($wired) $diag['wired_first_keys'] = array_keys($wired[0]);
+                        if ($debug && $wired) $diag['wired_first_row'] = $wired[0];
+                    } else {
+                        $diag['siblings_wired'][] = [
+                            'device_id'   => $did,
+                            'total_count' => (int) ($wiredMeta['total_count'] ?? 0),
+                            'returned'    => count($wired)
+                        ];
+                    }
+                    $totalAcrossSiblings += count($wired);
+                    $payload['clients'] = array_merge($payload['clients'], $this->shapeWiredClients($wired));
+                } catch (\Throwable $e) {
+                    $msg = $e->getMessage();
+                    if ($idx === 0 && (stripos($msg, '403') !== false || stripos($msg, 'AUTH_ACCESS_DENIED') !== false)) {
+                        $payload['notes']['clients'] = 'XIQ returned 403 on /dashboard/wired/client-health/grid — the API token is missing the Dashboard / wired-client read scope. Edit the token under XIQ Administration → API Access Tokens.';
+                    } else {
+                        error_log('[tcs_dashboard] xiq wired clients failed (device ' . $did . '): ' . $msg);
+                    }
+                    $diag['errors'][] = 'wired_clients[' . $did . ']: ' . $msg;
                 }
-                $diag['errors'][] = 'wired_clients: ' . $msg;
             }
+            $diag['wired_clients_merged_total'] = $totalAcrossSiblings;
 
             // Cross-check against the legacy /clients/active count endpoint
             // when the grid returned nothing. Two zeroes from two
@@ -228,15 +254,16 @@ class ActionSwitchesXiqData extends ActionDataBase {
             $gridTotal = (int) ($diag['wired_clients_total'] ?? 0);
             if ($gridTotal === 0 && empty($payload['clients'])) {
                 try {
+                    // /clients/active/count returns a bare integer body
+                    // (e.g. `42`). XIQFleetClient::execAndParse wraps
+                    // scalar JSON into ['count' => N, '__scalar' => true]
+                    // so we can read it with a uniform shape.
                     $cnt = $fleet->getJson('/clients/active/count', [
                         'deviceIds'             => $deviceId,
                         'clientConnectionTypes' => 2,   // 2 = WIRED
                         'excludeLocallyManaged' => 'false'
                     ]);
-                    // /clients/active/count returns a bare int on success.
-                    $activeCount = is_numeric($cnt) ? (int) $cnt
-                        : (int) ($cnt['count'] ?? $cnt['total_count'] ?? 0);
-                    $diag['clients_active_wired_count'] = $activeCount;
+                    $diag['clients_active_wired_count'] = (int) ($cnt['count'] ?? $cnt['total_count'] ?? 0);
                 } catch (\Throwable $e) {
                     $diag['errors'][] = 'wired_count_probe: ' . $e->getMessage();
                 }
@@ -276,7 +303,11 @@ class ActionSwitchesXiqData extends ActionDataBase {
                         $orgTotal = (int) ($orgWide['total_count'] ?? count($orgRows));
                         $distinctDevices = [];
                         $hostnamesByDevice = [];
-                        $thisDeviceHits  = 0;
+                        $thisDeviceHits = 0;     // strict match against $deviceId
+                        $anyQueriedHits = 0;     // match against any id we queried
+                        $hostnameHits   = 0;     // any row where switch_name == our hostname
+                        $queriedSet = array_flip(array_map('strval', $idsToQuery));
+                        $ourHostLower = strtolower($hostMeta['hostname']);
                         foreach ($orgRows as $r) {
                             if (!is_array($r)) continue;
                             $did = (string) ($r['device_id'] ?? '');
@@ -285,22 +316,44 @@ class ActionSwitchesXiqData extends ActionDataBase {
                             $hostnamesByDevice[$did] = $hostnamesByDevice[$did]
                                 ?? (string) ($r['switch_name'] ?? '');
                             if ((string) $did === (string) $deviceId) $thisDeviceHits++;
+                            if (isset($queriedSet[$did])) $anyQueriedHits++;
+                            if (strtolower((string) ($r['switch_name'] ?? '')) === $ourHostLower) $hostnameHits++;
                         }
                         arsort($distinctDevices);
                         $sampleDevices = [];
                         foreach (array_slice($distinctDevices, 0, 8, true) as $did => $n) {
                             $sampleDevices[] = [
-                                'device_id' => $did,
-                                'switch'    => $hostnamesByDevice[$did] ?? '',
-                                'rows'      => $n
+                                'device_id'  => $did,
+                                'switch'     => $hostnamesByDevice[$did] ?? '',
+                                'rows'       => $n,
+                                'we_queried' => isset($queriedSet[$did])
                             ];
                         }
+                        // Identify any XIQ devices using OUR hostname that
+                        // we didn't already query (i.e. they weren't picked
+                        // up by findDevice as siblings). This is the
+                        // "wrong device id resolved" smoking gun.
+                        $unqueriedHostnameMatches = [];
+                        foreach ($distinctDevices as $did => $n) {
+                            if (isset($queriedSet[$did])) continue;
+                            $h = strtolower((string) ($hostnamesByDevice[$did] ?? ''));
+                            if ($h === $ourHostLower) {
+                                $unqueriedHostnameMatches[] = [
+                                    'device_id' => $did,
+                                    'switch'    => $hostnamesByDevice[$did] ?? '',
+                                    'rows'      => $n
+                                ];
+                            }
+                        }
                         $diag['orgwide_wired'] = [
-                            'total_count'        => $orgTotal,
-                            'rows_returned'      => count($orgRows),
-                            'distinct_devices'   => count($distinctDevices),
-                            'this_device_hits'   => $thisDeviceHits,
-                            'top_devices_sample' => $sampleDevices
+                            'total_count'                => $orgTotal,
+                            'rows_returned'              => count($orgRows),
+                            'distinct_devices'           => count($distinctDevices),
+                            'this_device_hits'           => $thisDeviceHits,
+                            'any_queried_device_hits'    => $anyQueriedHits,
+                            'hostname_match_hits'        => $hostnameHits,
+                            'unqueried_hostname_matches' => $unqueriedHostnameMatches,
+                            'top_devices_sample'         => $sampleDevices
                         ];
 
                         // Refine the operator-facing note based on what
@@ -316,7 +369,27 @@ class ActionSwitchesXiqData extends ActionDataBase {
                                     . 'that\'s set up org-wide, no switch will return clients '
                                     . 'via the public API; the Port Status tab\'s SNMP-sourced '
                                     . 'FDB is the source of truth.';
-                            } elseif ($thisDeviceHits === 0) {
+                            } elseif ($unqueriedHostnameMatches) {
+                                // XIQ has a device using OUR hostname that
+                                // findDevice didn't catch as a sibling
+                                // (most likely it didn't show up in the
+                                // 25-row /devices?hostnames filter). The
+                                // wired clients are attributed to THAT
+                                // device id, not the one we resolved. The
+                                // operator should reconcile the duplicate.
+                                $other = $unqueriedHostnameMatches[0];
+                                $payload['notes']['clients'] =
+                                    'Wired clients in XIQ are attributed to a DIFFERENT XIQ '
+                                    . 'device record sharing this switch\'s hostname: '
+                                    . 'device_id ' . $other['device_id'] . ' (' . $other['rows'] . ' '
+                                    . 'sample rows). The serial-matched device we resolved '
+                                    . '(' . $deviceId . ') reports no clients. This usually '
+                                    . 'means XIQ has a duplicate / stale registration after '
+                                    . 'a re-onboard, or stack members register under separate '
+                                    . 'IDs and telemetry attaches to a sibling. Remove the '
+                                    . 'stale registration in XIQ (or update Zabbix inventory '
+                                    . 'serialno_a to the device id that\'s actually reporting).';
+                            } elseif ($anyQueriedHits === 0) {
                                 $sampleHost = $sampleDevices[0]['switch'] ?? '(unknown)';
                                 $payload['notes']['clients'] =
                                     'XIQ has wired-client telemetry for OTHER devices in this '
@@ -327,17 +400,16 @@ class ActionSwitchesXiqData extends ActionDataBase {
                                     . 'is enabled on the device.';
                             } else {
                                 $payload['notes']['clients'] =
-                                    'Org-wide probe DID see ' . $thisDeviceHits . ' rows '
-                                    . 'for this switch (device_id ' . $deviceId . ') in the '
-                                    . 'first 50 unfiltered results — but the device-filtered '
-                                    . 'call returned 0. This is a request-shape mismatch in '
-                                    . 'the dashboard, not an XIQ config issue. See server log '
-                                    . 'for details.';
+                                    'Org-wide probe DID see ' . $anyQueriedHits . ' rows '
+                                    . 'for queried device_ids in the first 50 unfiltered '
+                                    . 'results — but the device-filtered call returned 0. '
+                                    . 'This is a request-shape mismatch in the dashboard, '
+                                    . 'not an XIQ config issue. See server log for details.';
                                 error_log(sprintf(
                                     '[tcs_dashboard] xiq wired-clients filter mismatch: '
-                                    . 'unfiltered probe saw %d row(s) for device_id %d but '
+                                    . 'unfiltered probe saw %d row(s) for queried ids %s but '
                                     . 'filtered grid returned 0. Check request body shape.',
-                                    $thisDeviceHits, $deviceId
+                                    $anyQueriedHits, implode(',', $idsToQuery)
                                 ));
                             }
                         }
